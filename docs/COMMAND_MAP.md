@@ -406,6 +406,7 @@ start a detached bridge per app (key comes from the local store)
 | `--qpm-total` | `QPM_TOTAL` | — | split this total across the started bridges (protects a shared target host) |
 | `--max-workers` | `MAX_WORKERS` | — | — |
 | `--wait-ms` | `WAIT_MS` | — | — |
+| `--idle-timeout` | `IDLE_TIMEOUT` | `0` | opt-in idle cleanup: seconds a paused, already-probed bridge waits before self-stopping. 0 (default) = never idle-stop; the bridge stops when the run reaches a terminal state |
 | `--foreground` | — | — | run ONE bridge in this terminal (logs here, Ctrl-C stops it) instead of detaching — for debugging an adapter. Needs --config. |
 
 ```bash

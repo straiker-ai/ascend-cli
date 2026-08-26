@@ -48,6 +48,19 @@ All notable changes to the Ascend CLI. Newest first. Format follows
   reaches a terminal state and rides through `created`/`paused`/stalled states. Idle cleanup is now
   opt-in via `--idle-timeout` (0 by default), and reaps only a paused run that actually relayed a
   probe and then went quiet.
+- **Results are delivered with retry, and delivery is counted separately from answering.** A failed
+  `submit_result` used to be logged and dropped, so a computed result cost a target call and a ~90s
+  server reclaim, then the probe was re-issued and re-run (the cause of a run crawling for hours
+  under lease-service latency). Submissions now retry with backoff, and the relay tracks `delivered`
+  (server-acked) separately from `answered` (handler produced a result). When `delivered` lags
+  `answered`, results are being dropped — previously invisible because only `answered` was reported.
+- **`/v2/result` no longer inherits the lease long-poll timeout.** The result POST shared the
+  `(wait_ms + 10)s` ceiling of the `/v2/lease` long-poll; it now uses a separate, shorter
+  `result_timeout` (20s), so a slow ack fails fast and retries instead of being lost.
+- **`ascend bridge ls` surfaces lease and submit errors.** The table adds `DELIV`, `LEASE-ERR`, and
+  `SUB-ERR` columns and warns when timeouts are present, so a relay in a lease-service timeout storm
+  no longer reads as healthy. `ascend bridge start` gains `--idle-timeout` so idle cleanup can be
+  opted into without dropping to `runtime start`.
 
 ---
 

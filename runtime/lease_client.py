@@ -45,6 +45,9 @@ class LeaseClient:
     consumer: str = field(default_factory=lambda: f"abv2-{socket.gethostname()}")
     max_probes_per_lease: int = 10
     wait_ms: int = 25000
+    result_timeout: float = 20.0   # /v2/result is an ordinary POST; it must NOT inherit the
+    #                                long-poll's (wait_ms + 10)s ceiling, or a slow ack looks like
+    #                                a lease timeout and the result is dropped.
     max_workers: int = 10          # set to 1 for stateful/sequential targets
     qpm: Optional[int] = None      # queries-per-minute throttle (None = unlimited)
     capture_path: Optional[str] = None  # jsonl file to record every probe+result
@@ -53,8 +56,8 @@ class LeaseClient:
     _last_call: float = 0.0
     _rate_lock: threading.Lock = field(default_factory=threading.Lock)
     stats: Dict[str, int] = field(default_factory=lambda: {
-        "leased": 0, "answered": 0, "failed": 0, "lease_errors": 0,
-        "empty_polls": 0})
+        "leased": 0, "answered": 0, "delivered": 0, "failed": 0,
+        "lease_errors": 0, "submit_errors": 0, "empty_polls": 0})
     fatal_error: Optional[str] = None  # set instead of SystemExit so a daemon thread can report
     last_probe_ts: float = 0.0     # wall-clock of the last real probe handled; drives idle-timeout
 
@@ -68,13 +71,14 @@ class LeaseClient:
             Path(self.capture_path).parent.mkdir(parents=True, exist_ok=True)
 
     # ---- transport ----------------------------------------------------------
-    def _post(self, url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _post(self, url: str, payload: Dict[str, Any],
+              timeout: Optional[float] = None) -> Dict[str, Any]:
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
             url, data=data, method="POST",
             headers={"Content-Type": "application/json",
                      "Authorization": f"Bearer {self.api_key}"})
-        with urllib.request.urlopen(req, timeout=self.http_timeout) as resp:
+        with urllib.request.urlopen(req, timeout=(timeout or self.http_timeout)) as resp:
             return json.loads(resp.read().decode("utf-8"))
 
     def _lease(self) -> Dict[str, Any]:
@@ -87,7 +91,33 @@ class LeaseClient:
         return self._post(self.result_url, {
             "request_id": request_id, "msg_id": msg_id,
             "payload": {"status_code": status_code, "body": body,
-                        "headers": headers or {}}})
+                        "headers": headers or {}}},
+            timeout=self.result_timeout)
+
+    def _submit_with_retry(self, request_id: str, msg_id: str, status_code: int,
+                           body: Any, attempts: int = 4) -> bool:
+        """Deliver a result, retrying transient failures with backoff (same policy as the lease
+        loop). Returns True once the server acks it. A result computed and then dropped is the most
+        expensive failure in the system: it burns a target call and a ~90s server reclaim, then the
+        probe is re-issued and re-run. Retrying costs a few seconds; sustained failure is a
+        server-side problem, which the submit_errors counter then makes visible."""
+        delay = 1.0
+        for i in range(attempts):
+            try:
+                self._submit(request_id, msg_id, status_code, body)
+                self.stats["delivered"] += 1
+                return True
+            except Exception as e:  # noqa: BLE001 - any transport error is retryable here
+                if i == attempts - 1 or self._stop.is_set():
+                    self.stats["submit_errors"] += 1
+                    logger.warning("submit_result failed for %s after %d attempt(s): %s",
+                                   request_id, i + 1, e)
+                    return False
+                logger.warning("submit_result retry %d/%d for %s: %s",
+                               i + 1, attempts, request_id, e)
+                self._sleep(delay)
+                delay = min(delay * 2, 15)
+        return False
 
     # ---- throttle -----------------------------------------------------------
     def _throttle(self) -> None:
@@ -203,13 +233,11 @@ class LeaseClient:
             status_code, body = 500, {"response": "", "_error": f"{type(e).__name__}: {e}"}
             logger.exception("handler raised for %s", request_id)
         if status_code == 200:
-            self.stats["answered"] += 1
+            self.stats["answered"] += 1     # LOCAL: the handler produced an answer
         else:
             self.stats["failed"] += 1
         self._capture("result", {"request_id": request_id,
                                  "status_code": status_code, "body": body})
-        try:
-            self._submit(request_id, msg_id, status_code, body)
-        except Exception as e:
-            # safe to leave unsubmitted — server reclaims after ~90s
-            logger.warning("submit_result failed for %s: %s", request_id, e)
+        # Deliver with retry; `delivered` counts what the server actually acked. `answered` and
+        # `delivered` diverge exactly when result delivery is failing, which is the signal to watch.
+        self._submit_with_retry(request_id, msg_id, status_code, body)

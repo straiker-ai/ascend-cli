@@ -3113,7 +3113,8 @@ def cmd_relay_ls(args):
               "unserved_active_assessments": orphans}, args)
         return
     if rows:
-        hdr = f"  {'STATE':9} {'PID':>7} {'APP':28} {'CONFIG':16} {'ANSWERED':>8} {'FAILED':>6} UPTIME  NAME"
+        hdr = (f"  {'STATE':9} {'PID':>6} {'APP':26} {'CONFIG':12} {'ANS':>5} {'DELIV':>5} "
+               f"{'FAIL':>4} {'LEASE-ERR':>9} {'SUB-ERR':>7} UPTIME  NAME")
         print(hdr); print("  " + "-" * (len(hdr) - 2))
         for r in sorted(rows, key=lambda x: (x["state"] != "serving", x.get("app_name") or "")):
             st = r["stats"] or {}
@@ -3122,13 +3123,23 @@ def cmd_relay_ls(args):
                 secs = int(time.time() - r["started_at"])
                 up = f"{secs//3600}h{(secs%3600)//60:02d}m" if secs >= 3600 else f"{secs//60}m{secs%60:02d}s"
             mark = "*" if r["state"] == "serving" else " "
-            print(f"  {mark}{r['state']:8} {str(r.get('pid') or '-'):>7} {r['app_id']:28} "
-                  f"{str(r.get('config') or '-'):16} {str(st.get('answered', '-')):>8} "
-                  f"{str(st.get('failed', '-')):>6} {up:7} {r.get('app_name') or ''}")
+            print(f"  {mark}{r['state']:8} {str(r.get('pid') or '-'):>6} {r['app_id']:26} "
+                  f"{str(r.get('config') or '-'):12} {str(st.get('answered', '-')):>5} "
+                  f"{str(st.get('delivered', '-')):>5} {str(st.get('failed', '-')):>4} "
+                  f"{str(st.get('lease_errors', '-')):>9} {str(st.get('submit_errors', '-')):>7} "
+                  f"{up:7} {r.get('app_name') or ''}")
             if r.get("fatal_error"):
                 print(f"      ! {r['fatal_error']}")
         print(f"\n  {sum(1 for r in rows if r['state'] == 'serving')} serving, "
               f"{sum(1 for r in rows if r['state'] != 'serving')} not")
+        # A relay in a lease/result timeout storm still answers probes, so ANSWERED alone looks
+        # healthy. Make the storm loud: DELIV < ANS means results are being dropped and re-run.
+        storm = [r for r in rows if (r["stats"] or {}).get("lease_errors")
+                 or (r["stats"] or {}).get("submit_errors")]
+        if storm:
+            print("  !! lease/submit timeouts present on "
+                  f"{len(storm)} bridge(s). When DELIV < ANS, results are being dropped and the")
+            print("     probes re-run — usually the Ascend lease service is slow, not the target.")
     else:
         print("  no bridges on this machine")
         print("  `ascend assess run` auto-starts one; or reconcile all:  ascend bridge sync")
@@ -4994,6 +5005,10 @@ def build_parser():
                    help="split this total across the started bridges (protects a shared target host)")
     s.add_argument("--max-workers", type=int, default=None)
     s.add_argument("--wait-ms", type=int, default=None)
+    s.add_argument("--idle-timeout", type=int, default=0,
+                   help="opt-in idle cleanup: seconds a paused, already-probed bridge waits before "
+                        "self-stopping. 0 (default) = never idle-stop; the bridge stops when the run "
+                        "reaches a terminal state")
     s.add_argument("--foreground", action="store_true",
                    help="run ONE bridge in this terminal (logs here, Ctrl-C stops it) instead of "
                         "detaching — for debugging an adapter. Needs --config.")

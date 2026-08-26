@@ -280,15 +280,18 @@ def test_redact_recurses_into_lists_and_nested():
 
 
 # --------------------------------------------------------------------------- #
-# submit failure does not crash the run (server reclaims)
+# result delivery: retried with backoff, counted separately, on a shorter timeout
 # --------------------------------------------------------------------------- #
-def test_submit_failure_is_swallowed(monkeypatch):
+def test_submit_failure_retried_then_counted(monkeypatch):
+    # a result that never delivers is retried, then counted as submit_errors — never crashes,
+    # and `answered` (local) diverges from `delivered` (server-acked), which is the signal to watch
+    import urllib.error
     client = LeaseClient(api_key="tc-x", handler=ok_handler)
+    monkeypatch.setattr(client, "_sleep", lambda s: None)   # no real backoff waits in the test
     state = {"lease": 0}
 
     def responder(req, timeout=None, **kw):
-        url = req.full_url
-        if url.endswith("/v2/lease"):
+        if req.full_url.endswith("/v2/lease"):
             state["lease"] += 1
             if state["lease"] == 1:
                 return FakeHTTPResponse(json.dumps({"probes": make_probes(2)}).encode())
@@ -296,7 +299,54 @@ def test_submit_failure_is_swallowed(monkeypatch):
             return FakeHTTPResponse(json.dumps({"probes": []}).encode())
         raise urllib.error.URLError("result endpoint down")
 
-    import urllib.error
     monkeypatch.setattr(urllib.request, "urlopen", responder)
     client.run_forever()  # must not raise despite submit failures
-    assert client.stats["answered"] == 2
+    assert client.stats["answered"] == 2        # handler produced answers (local)
+    assert client.stats["delivered"] == 0        # none acked by the server
+    assert client.stats["submit_errors"] == 2    # both dropped after retries
+
+
+def test_submit_transient_failure_then_delivers(monkeypatch):
+    import urllib.error
+    client = LeaseClient(api_key="tc-x", handler=ok_handler)
+    monkeypatch.setattr(client, "_sleep", lambda s: None)
+    state = {"lease": 0, "result": 0}
+
+    def responder(req, timeout=None, **kw):
+        if req.full_url.endswith("/v2/lease"):
+            state["lease"] += 1
+            if state["lease"] == 1:
+                return FakeHTTPResponse(json.dumps({"probes": make_probes(1)}).encode())
+            client.stop()
+            return FakeHTTPResponse(json.dumps({"probes": []}).encode())
+        state["result"] += 1
+        if state["result"] == 1:
+            raise urllib.error.URLError("first attempt times out")
+        return FakeHTTPResponse(b"{}")           # the retry succeeds
+
+    monkeypatch.setattr(urllib.request, "urlopen", responder)
+    client.run_forever()
+    assert client.stats["answered"] == 1
+    assert client.stats["delivered"] == 1        # the retry recovered it
+    assert client.stats["submit_errors"] == 0
+    assert state["result"] == 2                  # exactly one retry
+
+
+def test_result_uses_shorter_timeout_than_lease(monkeypatch):
+    # /v2/result is an ordinary POST and must NOT inherit the long-poll's (wait_ms + 10)s ceiling
+    client = LeaseClient(api_key="tc-x", handler=ok_handler)
+    seen = {}
+
+    def responder(req, timeout=None, **kw):
+        if req.full_url.endswith("/v2/lease"):
+            seen["lease_timeout"] = timeout
+            return FakeHTTPResponse(json.dumps({"probes": make_probes(1)}).encode())
+        seen["result_timeout"] = timeout
+        client.stop()
+        return FakeHTTPResponse(b"{}")
+
+    monkeypatch.setattr(urllib.request, "urlopen", responder)
+    client.run_forever()
+    assert seen["lease_timeout"] == client.http_timeout        # long-poll ceiling (35s)
+    assert seen["result_timeout"] == client.result_timeout     # separate result ceiling (20s)
+    assert seen["result_timeout"] < seen["lease_timeout"]

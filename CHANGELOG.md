@@ -14,8 +14,8 @@ All notable changes to the Ascend CLI. Newest first. Format follows
   user-facing label moved, so no API or protocol change.
 - **The bridge is auto-managed.** `ascend assess run` on a bridge-type app auto-starts the CLI's
   built-in relay *before* probes are scheduled, and the bridge self-stops when the assessment reaches
-  a terminal state. While an assessment is paused the bridge stays alive and self-stops after 30 min
-  idle. `ascend assess resume` re-ensures a bridge (the reliable path after a Console-side resume,
+  a terminal state. While an assessment is paused the bridge stays alive and keeps serving (idle
+  cleanup is opt-in via `--idle-timeout`, off by default). `ascend assess resume` re-ensures a bridge (the reliable path after a Console-side resume,
   since the SaaS cannot start a process on your machine). `ascend bridge start` still exists for
   advanced/remote/continuous/pre-start use but is no longer a required step in the normal flow.
 - A bridge is **per-app**: one relay is shared across that app's assessments with no cross-assessment
@@ -40,6 +40,14 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ### Safety
 - False-pass safety is preserved: a bridge never self-stops when it cannot verify assessment state.
+
+### Fixed
+- **The bridge no longer self-stops while a run is stalled.** Previously the relay idle-timeout (30
+  min) treated a `created`/pending run the same as a genuinely paused one, so a platform stall would
+  reap the bridge at the worst moment and strand the run. The bridge now stops only when the run
+  reaches a terminal state and rides through `created`/`paused`/stalled states. Idle cleanup is now
+  opt-in via `--idle-timeout` (0 by default), and reaps only a paused run that actually relayed a
+  probe and then went quiet.
 
 ---
 

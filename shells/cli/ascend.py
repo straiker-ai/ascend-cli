@@ -881,7 +881,7 @@ def _ensure_bridge(c, app, *, assessment_id=None, args=None):
         return {"app_id": app_id, "ensured": False, "skip": t["skip"]}
     r = S.start(app_id, config=t["config"], adapter=t.get("adapter"), api_key=t["key"],
                 assessment_id=assessment_id, control_token=getattr(c, "token", None),
-                control_base=getattr(args, "base", None), idle_timeout_s=1800,
+                control_base=getattr(args, "base", None), idle_timeout_s=0,
                 app_name=t.get("app_name"), qpm=getattr(args, "qpm", None),
                 wait_ms=getattr(args, "wait_ms", None))
     if "error" in r:
@@ -1230,9 +1230,12 @@ def _reconcile_decision(assessments, *, now, started_at, last_probe_ts,
     """The pure decision at the heart of the self-reconciling bridge: 'serve' | 'stop-terminal' |
     'stop-idle'. No I/O, so it is unit-tested directly.
 
-    Overriding rule: NEVER stop when state could not be verified — an unanswered probe scores a
-    FALSE PASS, so the safe direction is always to keep serving.
-    Per-app: a shared bridge stays up while ANY of the app's assessments is running or paused."""
+    The only reliable stop signal is the run reaching a TERMINAL state. The bridge rides through
+    created/paused/stalled states rather than self-kill during a platform hiccup — an unanswered
+    probe scores a FALSE PASS, so the safe direction is always to keep serving. Idle cleanup is
+    OPT-IN (idle_timeout_s > 0) and reaps ONLY a run that is genuinely paused, has actually relayed
+    a probe, and has since gone quiet. It never reaps a created/queued/running run, nor one that has
+    never been probed. Per-app: a shared bridge stays up while ANY assessment is non-terminal."""
     if not control_ok:
         return "serve"                        # could not read the platform — never self-kill
     if now < (started_at or 0) + _STARTUP_GRACE_S:
@@ -1241,11 +1244,14 @@ def _reconcile_decision(assessments, *, now, started_at, last_probe_ts,
              if str(a.get("status", "")).lower() in RUNNING_STATES]
     if not active:
         return "stop-terminal"                # every assessment on this app is terminal
-    running_now = any(str(a.get("status", "")).lower() in ACTIVE_STATES for a in active)
-    if not running_now:                       # paused/created only — idle-timeout applies
-        idle = now - max(last_probe_ts or 0, started_at or 0)
-        return "stop-idle" if idle >= idle_timeout_s else "serve"
-    return "serve"
+    if not idle_timeout_s or idle_timeout_s <= 0:
+        return "serve"                        # default: stop only on terminal, never idle-kill
+    # Opt-in idle cleanup, and only for a run that genuinely paused AFTER doing work.
+    if not last_probe_ts:
+        return "serve"                        # never probed — the run never really started
+    if any(str(a.get("status", "")).lower() != "paused" for a in active):
+        return "serve"                        # anything running/queued/created — keep serving
+    return "stop-idle" if (now - last_probe_ts) >= idle_timeout_s else "serve"
 
 
 def cmd_runtime_start(args):
@@ -1297,7 +1303,7 @@ def cmd_runtime_start(args):
         # goes terminal (or, if paused, after the idle timeout). It must reach the control plane, so
         # build the client DIRECTLY (never _client() — that would _die on the tenant lock).
         self_reconcile = not getattr(args, "no_self_reconcile", False)
-        idle_timeout_s = getattr(args, "idle_timeout", None) or 1800
+        idle_timeout_s = int(getattr(args, "idle_timeout", 0) or 0)
         tracked_id = getattr(args, "assessment_id", None)
         control = None
         if self_reconcile:
@@ -2972,7 +2978,7 @@ def cmd_relay_start(args):
                     qpm=qpm, max_workers=args.max_workers, bridge_base=args.bridge_base,
                     wait_ms=args.wait_ms, app_name=t.get("app_name"),
                     control_token=getattr(c, "token", None), control_base=getattr(args, "base", None),
-                    idle_timeout_s=getattr(args, "idle_timeout", None) or 1800)
+                    idle_timeout_s=int(getattr(args, "idle_timeout", 0) or 0))
         results.append({"app_id": t["app_id"], "app_name": t.get("app_name"),
                         "started": "error" not in r, **({k: v for k, v in r.items() if k != "app_id"})})
     if args.json:
@@ -4735,8 +4741,10 @@ def build_parser():
                    help="long-poll hold in ms (server clamps to 0-55000)")
     s.add_argument("--assessment-id", default=None,
                    help="the assessment this bridge serves; it self-stops when that run ends")
-    s.add_argument("--idle-timeout", type=int, default=1800,
-                   help="seconds a paused-but-idle bridge lingers before self-stopping (default 1800)")
+    s.add_argument("--idle-timeout", type=int, default=0,
+                   help="opt-in idle cleanup: seconds a paused, already-probed bridge waits before "
+                        "self-stopping. 0 (default) = never idle-stop; the bridge stops when the run "
+                        "reaches a terminal state")
     s.add_argument("--no-self-reconcile", action="store_true",
                    help="do NOT self-stop on assessment completion (stay up until stopped manually)")
     s.set_defaults(func=cmd_runtime_start)

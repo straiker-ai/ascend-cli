@@ -825,7 +825,7 @@ lease probes and relay them to a target via an adapter (see `bridge start --fore
 | `--capture` | `CAPTURE` | — | jsonl file to record probe/result envelopes |
 | `--wait-ms` | `WAIT_MS` | `25000` | long-poll hold in ms (server clamps to 0-55000) |
 | `--assessment-id` | `ASSESSMENT_ID` | — | the assessment this bridge serves; it self-stops when that run ends |
-| `--idle-timeout` | `IDLE_TIMEOUT` | `1800` | seconds a paused-but-idle bridge lingers before self-stopping (default 1800) |
+| `--idle-timeout` | `IDLE_TIMEOUT` | `0` | opt-in idle cleanup: seconds a paused, already-probed bridge waits before self-stopping. 0 (default) = never idle-stop; the bridge stops when the run reaches a terminal state |
 | `--no-self-reconcile` | — | — | do NOT self-stop on assessment completion (stay up until stopped manually) |
 
 > example: STRAIKER_BRIDGE_API_KEY=tc-... ascend runtime start --adapter direct_api --config mybot

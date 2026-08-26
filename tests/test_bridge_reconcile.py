@@ -21,9 +21,10 @@ IDLE = 1800
 NOW = 100_000.0
 
 
-def _dec(assessments, *, now=NOW, started_at=0.0, last_probe_ts=0.0, control_ok=True):
+def _dec(assessments, *, now=NOW, started_at=0.0, last_probe_ts=0.0, control_ok=True,
+         idle_timeout_s=IDLE):
     return D(assessments, now=now, started_at=started_at, last_probe_ts=last_probe_ts,
-             idle_timeout_s=IDLE, control_ok=control_ok)
+             idle_timeout_s=idle_timeout_s, control_ok=control_ok)
 
 
 # ---- false-pass safety: never self-kill when state is unknown ---------------------------------
@@ -55,19 +56,31 @@ def test_queued_and_in_progress_serve():
     assert _dec([{"status": "in_progress"}]) == "serve"
 
 
-# ---- idle-timeout applies only to paused/created (not running) ---------------------------------
-def test_paused_and_idle_past_timeout_stops():
-    assert _dec([{"status": "paused"}], last_probe_ts=0.0) == "stop-idle"
+# ---- default: stop only on terminal, never idle-kill (bridge rides through stalls) ------------
+def test_idle_kill_disabled_by_default_serves():
+    # idle_timeout_s=0 is the shipped default: even a long-idle paused run is NOT reaped
+    assert _dec([{"status": "paused"}], last_probe_ts=NOW - 999999, idle_timeout_s=0) == "serve"
+
+
+def test_created_stalled_never_reaped():
+    # a run stuck in 'created' (a platform stall) must NEVER kill the bridge, even opted in
+    assert _dec([{"status": "created"}], last_probe_ts=0.0, idle_timeout_s=IDLE) == "serve"
+    assert _dec([{"status": "created"}], last_probe_ts=NOW - 999999, idle_timeout_s=IDLE) == "serve"
+
+
+def test_paused_never_probed_serves():
+    # opted in, but no probe ever landed -> the run never really started -> keep serving
+    assert _dec([{"status": "paused"}], last_probe_ts=0.0, idle_timeout_s=IDLE) == "serve"
+
+
+# ---- opt-in idle cleanup: only a genuinely paused, already-probed, then-quiet run --------------
+def test_paused_probed_and_idle_stops_when_opted_in():
+    assert _dec([{"status": "paused"}], last_probe_ts=NOW - 2000, idle_timeout_s=IDLE) == "stop-idle"
 
 
 def test_paused_but_recent_probe_serves():
-    # a probe answered 1000s ago, timeout 1800 -> still within window
-    assert _dec([{"status": "paused"}], last_probe_ts=NOW - 1000) == "serve"
-
-
-def test_created_only_uses_idle_timeout():
-    # 'created' is active-but-not-running -> subject to the idle clock
-    assert _dec([{"status": "created"}], last_probe_ts=0.0) == "stop-idle"
+    # opted in; a probe answered 1000s ago, timeout 1800 -> still within window
+    assert _dec([{"status": "paused"}], last_probe_ts=NOW - 1000, idle_timeout_s=IDLE) == "serve"
 
 
 # ---- per-app counting: a shared bridge stays up while ANY assessment is active -----------------

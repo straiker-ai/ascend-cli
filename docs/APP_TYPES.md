@@ -51,7 +51,8 @@ ascend assess run --app 'My Bot' --name 'run 1'
 
 No manual `ascend bridge start`. `ascend assess run` on a bridge app **auto-starts** the bridge
 before probes are scheduled, and the bridge **self-stops** when the assessment reaches a terminal
-state. While an assessment is paused the bridge stays alive and self-stops after 30 minutes idle. It
+state. While an assessment is paused the bridge stays alive and keeps serving; idle cleanup is opt-in
+via `--idle-timeout` (off by default), so a platform stall never stops it. It
 never self-stops when it cannot verify state — an unverifiable stop would risk a false pass, so the
 relay stays up.
 

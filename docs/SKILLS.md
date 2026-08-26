@@ -57,8 +57,8 @@ The bridge lifecycle is now automatic — do not add a manual start step:
 - `ascend assess run` on a bridge-type app **auto-starts the bridge** (the CLI's
   built-in relay) before probes are scheduled, and the bridge **self-stops** when
   the assessment reaches a terminal state.
-- While an assessment is **paused** the bridge stays alive and self-stops after
-  **30 minutes idle**.
+- While an assessment is **paused** the bridge stays alive; it self-stops only when the run
+  reaches a terminal state. Idle cleanup is opt-in via `--idle-timeout` (off by default).
 - `ascend assess resume` **re-ensures** a bridge — the reliable path after a
   Console-side resume, since the SaaS cannot start a process on your machine.
 - `ascend bridge sync` reconciles bridges to assessment state (start for

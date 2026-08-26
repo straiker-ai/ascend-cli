@@ -89,7 +89,7 @@ def test_starts_and_plumbs_control_token(monkeypatch):
     # the child must be able to reach the control plane to self-reconcile
     assert captured["control_token"] == "s6r_pat_secret"
     assert captured["control_base"] == "https://api.example/api/v3"
-    assert captured["idle_timeout_s"] == 1800
+    assert captured["idle_timeout_s"] == 0        # idle-kill off by default: stop only on terminal
     assert captured["assessment_id"] == "asmt_9"
     assert captured["api_key"] == "tc-abc"
 

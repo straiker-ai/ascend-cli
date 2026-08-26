@@ -124,7 +124,7 @@ for machine-readable output.
 
 Bridge lifecycle across pause/resume:
 
-- While an assessment is **paused** the bridge stays alive and self-stops after 30 minutes idle.
+- While an assessment is **paused** the bridge stays alive; it self-stops only when the run reaches a terminal state (idle cleanup is opt-in via `--idle-timeout`).
 - `ascend assess resume` re-ensures a bridge — the reliable path after a resume done in the
   Console, since the SaaS cannot start a process on your machine.
 - If state changed in the Console and local bridges drifted, reconcile them:

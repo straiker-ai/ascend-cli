@@ -50,8 +50,9 @@ The bridge polls its app's assessment state **every ~30s** and manages its own l
 
 - **Terminal** (`complete` / `failed` / `error`) → it self-stops.
 - **Running / queued / in_progress** → it stays up and answers probes.
-- **Paused** → it stays up (in-flight probes may still be draining, §1) and **self-stops after 30
-  minutes idle** so a paused run left overnight doesn't leave a relay running forever.
+- **Paused** → it stays up (in-flight probes may still be draining, §1). It self-stops only on a
+  terminal state; optional idle cleanup (`--idle-timeout`, off by default) can reap a paused,
+  already-probed relay left running.
 
 **False-pass safety is preserved.** A dead relay does not fail the assessment — probes keep being
 issued, go unanswered, and the run still completes. Unanswered probes aren't findings, so you get a
@@ -90,7 +91,7 @@ Two reliable ways to reconcile after Console-side state changes:
 | STATE | Meaning | Bridge |
 |---|---|---|
 | `*running` / `*queued` / `*in_progress` | probes are being issued now | up (auto) |
-| `paused` | no new probes scheduled; in-flight ones may still be draining (§1) | up, self-stops after 30 min idle |
+| `paused` | no new probes scheduled; in-flight ones may still be draining (§1) | up (stops on terminal; idle cleanup opt-in) |
 | `created` | assessment exists, not started (lifecycle is `created → pause → resume`) | not yet |
 | `complete` | finished — check the probe total before trusting the score (§2) | self-stopped |
 | `failed` / `error` | the run itself errored | self-stopped |

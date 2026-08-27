@@ -32,7 +32,7 @@ CONFIG KEYS
   done_when         - {"path": "...", "equals": "..."} or {"contains": "..."} — a frame
                       that signals the answer is complete. Optional.
   idle_ms           - if no done_when, stop after this many ms of silence (default 1500).
-  timeout_ms        - overall hard timeout in ms (default 80000). Raise for slow agentic targets; the effective cap is the platform's ~90s probe-reclaim window.
+  timeout_ms        - overall hard timeout in ms (default 60000). Raise for slow agentic targets; leave headroom for result delivery inside the platform's ~90s probe-reclaim window.
   aggregate         - "concat" (default) join collected chunks, or "last" take the last.
 """
 
@@ -65,7 +65,7 @@ class WebSocketAdapter(BotAdapter):
 
         headers = config.get("headers", {}) or {}
         subprotocols = config.get("subprotocols") or None
-        timeout = config.get("timeout_ms", 80000) / 1000
+        timeout = config.get("timeout_ms", 60000) / 1000
         idle = config.get("idle_ms", 1500) / 1000
         done_when = config.get("done_when")
         rpath = config.get("response_path")

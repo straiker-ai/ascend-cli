@@ -45,7 +45,7 @@ Optional config keys:
   bot_settle_ms     - after the first bot activity, keep polling this long for more
                       activities in the same turn before returning (default 1500)
   locale            - message locale (default en-US)
-  timeout_ms        - overall per-prompt budget in ms (default 80000). Raise for slow agentic targets; the effective cap is the platform's ~90s reclaim window.
+  timeout_ms        - overall per-prompt budget in ms (default 60000). Raise for slow agentic targets; leave headroom for result delivery inside the platform's ~90s reclaim window.
 """
 
 import json
@@ -238,7 +238,7 @@ class CopilotStudioAdapter(BotAdapter):
         if not user_id.startswith("dl_"):
             user_id = f"dl_{user_id}"
         locale = config.get("locale", "en-US")
-        timeout = config.get("timeout_ms", 80000) / 1000
+        timeout = config.get("timeout_ms", 60000) / 1000
         poll_interval = config.get("poll_interval_ms", 1000) / 1000
         bot_settle = config.get("bot_settle_ms", 1500) / 1000
         deadline = start + timeout

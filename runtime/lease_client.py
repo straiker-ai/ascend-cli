@@ -45,9 +45,10 @@ class LeaseClient:
     consumer: str = field(default_factory=lambda: f"abv2-{socket.gethostname()}")
     max_probes_per_lease: int = 10
     wait_ms: int = 25000
-    result_timeout: float = 20.0   # /v2/result is an ordinary POST; it must NOT inherit the
-    #                                long-poll's (wait_ms + margin)s ceiling, or a slow ack looks
-    #                                like a lease timeout and the result is dropped.
+    result_timeout: float = 10.0   # /v2/result is an ordinary POST. Keep it well under the ~90s
+    #                                server reclaim window: the handler may already have spent most
+    #                                of the window, so a slow ack must still land before reclaim. It
+    #                                must also not inherit the /v2/lease long-poll ceiling.
     lease_margin: float = 25.0     # headroom over wait_ms for the /v2/lease long-poll (see below)
     max_workers: int = 10          # set to 1 for stateful/sequential targets
     qpm: Optional[int] = None      # queries-per-minute throttle (None = unlimited)
@@ -56,6 +57,7 @@ class LeaseClient:
     _min_interval: float = 0.0
     _last_call: float = 0.0
     _rate_lock: threading.Lock = field(default_factory=threading.Lock)
+    _stats_lock: threading.Lock = field(default_factory=threading.Lock)  # guards worker-thread bumps
     stats: Dict[str, int] = field(default_factory=lambda: {
         "leased": 0, "answered": 0, "delivered": 0, "failed": 0,
         "lease_errors": 0, "submit_errors": 0, "empty_polls": 0})
@@ -71,6 +73,13 @@ class LeaseClient:
         # server-side hold jitter during a probe drought into a "lease error" storm. Only a hold
         # that blows past THIS ceiling is genuinely the platform holding too long.
         self.http_timeout = (self.wait_ms / 1000) + self.lease_margin
+
+    def _bump(self, key: str, n: int = 1) -> None:
+        """Increment a counter under the lock. Worker threads race on the same stats dict, and
+        `dict[k] += 1` is a non-atomic read-modify-write; the answered/delivered divergence and the
+        `bridge ls` storm heuristic both read these, so a lost update would misreport."""
+        with self._stats_lock:
+            self.stats[key] += n
         if self.qpm and self.qpm > 0:
             self._min_interval = 60.0 / self.qpm
         if self.capture_path:
@@ -101,28 +110,30 @@ class LeaseClient:
             timeout=self.result_timeout)
 
     def _submit_with_retry(self, request_id: str, msg_id: str, status_code: int,
-                           body: Any, attempts: int = 4) -> bool:
-        """Deliver a result, retrying transient failures with backoff (same policy as the lease
-        loop). Returns True once the server acks it. A result computed and then dropped is the most
-        expensive failure in the system: it burns a target call and a ~90s server reclaim, then the
-        probe is re-issued and re-run. Retrying costs a few seconds; sustained failure is a
-        server-side problem, which the submit_errors counter then makes visible."""
+                           body: Any, attempts: int = 3) -> bool:
+        """Deliver a result, retrying transient failures with backoff. Returns True once the server
+        acks it. A result computed and then dropped is the most expensive failure here: it burns a
+        target call and a ~90s server reclaim, then the probe is re-issued and re-run. The retry
+        budget is bounded on purpose — attempts x result_timeout plus backoff stays well under the
+        reclaim window — because the lease loop blocks on this call, so an unbounded retry storm
+        would stall leasing. Sustained failure is a server-side problem that submit_errors makes
+        visible."""
         delay = 1.0
         for i in range(attempts):
             try:
                 self._submit(request_id, msg_id, status_code, body)
-                self.stats["delivered"] += 1
+                self._bump("delivered")
                 return True
             except Exception as e:  # noqa: BLE001 - any transport error is retryable here
                 if i == attempts - 1 or self._stop.is_set():
-                    self.stats["submit_errors"] += 1
+                    self._bump("submit_errors")
                     logger.warning("submit_result failed for %s after %d attempt(s): %s",
                                    request_id, i + 1, e)
                     return False
                 logger.warning("submit_result retry %d/%d for %s: %s",
                                i + 1, attempts, request_id, e)
                 self._sleep(delay)
-                delay = min(delay * 2, 15)
+                delay = min(delay * 2, 4)
         return False
 
     # ---- throttle -----------------------------------------------------------
@@ -239,9 +250,9 @@ class LeaseClient:
             status_code, body = 500, {"response": "", "_error": f"{type(e).__name__}: {e}"}
             logger.exception("handler raised for %s", request_id)
         if status_code == 200:
-            self.stats["answered"] += 1     # LOCAL: the handler produced an answer
+            self._bump("answered")          # LOCAL: the handler produced an answer
         else:
-            self.stats["failed"] += 1
+            self._bump("failed")
         self._capture("result", {"request_id": request_id,
                                  "status_code": status_code, "body": body})
         # Deliver with retry; `delivered` counts what the server actually acked. `answered` and

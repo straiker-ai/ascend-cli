@@ -16,7 +16,7 @@ Config keys:
   message_body      - Request body template with {{PROMPT}} and {{SESSION_ID}} placeholders
   response_path     - Dot-path to extract response text (default: "messages.0.message")
   headers           - Dict of headers shared across both calls
-  timeout_ms        - Request timeout in milliseconds (default: 80000)
+  timeout_ms        - Request timeout in milliseconds (default: 60000)
 """
 
 import json
@@ -44,7 +44,7 @@ class SessionAPIAdapter(BotAdapter):
         if not session_endpoint or not message_endpoint:
             return self._fail("session_endpoint and message_endpoint are required", start)
 
-        timeout = config.get("timeout_ms", 80000) / 1000
+        timeout = config.get("timeout_ms", 60000) / 1000
 
         headers = {"Content-Type": "application/json"}
         headers.update(config.get("headers", {}))

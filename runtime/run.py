@@ -26,6 +26,12 @@ def build_runtime(api_key: str, adapter: str, config_name: str, *,
     client = LeaseClient(
         api_key=api_key, handler=caller.handler, base_url=base_url,
         max_workers=workers, qpm=qpm, wait_ms=wait_ms,
+        # Never hold more un-acked probes than the workers can drain inside the ~90s reclaim
+        # window. A probe is un-acked from lease until its result is submitted, so a serial
+        # (stateful, workers=1) target that leased a batch of 10 could ack only the first before
+        # the rest were reclaimed and re-run out of order against a session. Leasing exactly
+        # `workers` bounds the in-flight set to what the pool processes concurrently.
+        max_probes_per_lease=workers,
         capture_path=capture_path,
         consumer=consumer or f"abv2-{adapter}-{config_name}",
     )

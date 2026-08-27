@@ -36,7 +36,7 @@ Optional config keys:
   bypass_user    - true → agent runs as its configured user; false → as token holder (default true)
   region         - optional x-salesforce-region header value (e.g. "us-west-2")
   end_session    - DELETE the session after each prompt (default true)
-  timeout_ms     - per-request timeout in ms (default 80000). Raise for slow agentic targets; the effective cap is the platform's ~90s reclaim window.
+  timeout_ms     - per-request timeout in ms (default 60000). Raise for slow agentic targets; leave headroom for result delivery inside the platform's ~90s reclaim window.
   token_ttl_s    - safety window before re-minting the cached token (default 5400 = 90 min)
 
 Setup requirements on the Salesforce side (see configs/example-agentforce.json):
@@ -101,7 +101,7 @@ class AgentforceAdapter(BotAdapter):
                 raise ValueError("Missing client_id/client_secret (or their *_env references)")
 
             token_url = f"{instance_url}/services/oauth2/token"
-            timeout = config.get("timeout_ms", 80000) / 1000
+            timeout = config.get("timeout_ms", 60000) / 1000
             logger.info("Agentforce: minting client_credentials token")
             resp = requests.post(
                 token_url,
@@ -194,7 +194,7 @@ class AgentforceAdapter(BotAdapter):
         if missing:
             return self._fail(f"Missing required config: {', '.join(missing)}", start)
 
-        timeout = config.get("timeout_ms", 80000) / 1000
+        timeout = config.get("timeout_ms", 60000) / 1000
 
         try:
             token = self._get_token(config)

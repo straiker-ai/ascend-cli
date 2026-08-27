@@ -83,7 +83,7 @@ class SessionPollAdapter(BotAdapter):
     async def send_prompt(self, prompt: str, config: Dict[str, Any]) -> Dict[str, Any]:
         start = time.time()
         shared_headers = {"Content-Type": "application/json", **(config.get("headers") or {})}
-        http_timeout = config.get("timeout_ms", 80000) / 1000
+        http_timeout = config.get("timeout_ms", 60000) / 1000
         create = config.get("create") or {}
         send = config.get("send") or {}
         poll = config.get("poll") or {}
@@ -147,7 +147,7 @@ class SessionPollAdapter(BotAdapter):
 
         # 3. poll for the new bot reply
         interval = poll.get("interval_ms", 1000) / 1000
-        deadline = start + poll.get("timeout_ms", 80000) / 1000
+        deadline = start + poll.get("timeout_ms", 60000) / 1000
         stability = poll.get("stability_ms", 0) / 1000
         last_text, last_change = None, None
         while time.time() < deadline:
@@ -163,7 +163,7 @@ class SessionPollAdapter(BotAdapter):
                     return self._ok(str(last_text).strip(), start, adapter="session_poll", conv=conv)
         if last_text is not None:
             return self._ok(str(last_text).strip(), start, adapter="session_poll", conv=conv, note="returned_on_timeout")
-        return self._fail(f"no agent reply within {poll.get('timeout_ms',80000)}ms", start, conv=conv)
+        return self._fail(f"no agent reply within {poll.get('timeout_ms',60000)}ms", start, conv=conv)
 
     async def _count_bot_turns(self, loop, poll, headers, conv, timeout) -> int:
         return len(await self._bot_turns(loop, poll, headers, conv, timeout))

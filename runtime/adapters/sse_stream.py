@@ -79,7 +79,7 @@ OPTIONAL CONFIG KEYS
                         (default {"path": "type", "equals": "done"})
       aggregate         "concat" (default) join the token frames, or "last"
       idle_ms           give up after this much silence between frames (default 20000)
-  timeout_ms        - overall budget in ms (default 80000; raise for slow agentic targets, cap is the ~90s reclaim window)
+  timeout_ms        - overall budget in ms (default 60000; raise for slow agentic targets, leaving headroom for delivery inside the ~90s reclaim window)
   verify_tls        - set false for self-signed targets (default true)
 
 TIMEOUT BEHAVIOUR — read this before tuning
@@ -233,7 +233,7 @@ class SSEStreamAdapter(BotAdapter):
         if not base_url or not chat_path:
             return self._fail("Missing required config: base_url, chat_path", start)
 
-        timeout = config.get("timeout_ms", 80000) / 1000
+        timeout = config.get("timeout_ms", 60000) / 1000
         deadline = start + timeout
         url = _join(base_url, chat_path)
         method = config.get("method", "POST").upper()

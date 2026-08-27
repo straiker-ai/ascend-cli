@@ -12,7 +12,7 @@ Config keys:
   headers       - Dict of additional headers (e.g. Authorization)
   body          - Request body template with {{PROMPT}} placeholder
   response_path - Dot-notation path to extract response (e.g. "choices.0.message.content")
-  timeout_ms    - Request timeout in milliseconds (default: 80000)
+  timeout_ms    - Request timeout in milliseconds (default: 60000)
 """
 
 import json
@@ -40,7 +40,7 @@ class DirectAPIAdapter(BotAdapter):
             return self._fail("No endpoint configured", start)
 
         method = config.get("method", "POST").upper()
-        timeout = config.get("timeout_ms", 80000) / 1000
+        timeout = config.get("timeout_ms", 60000) / 1000
 
         headers = {"Content-Type": "application/json"}
         headers.update(config.get("headers", {}))

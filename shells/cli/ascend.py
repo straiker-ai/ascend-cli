@@ -3155,13 +3155,15 @@ def cmd_relay_ls(args):
         print(f"\n  {sum(1 for r in rows if r['state'] == 'serving')} serving, "
               f"{sum(1 for r in rows if r['state'] != 'serving')} not")
         # A relay in a lease/result timeout storm still answers probes, so ANSWERED alone looks
-        # healthy. Make the storm loud: DELIV < ANS means results are being dropped and re-run.
+        # healthy. Every computed result (answered or failed) is submitted, so DELIV should track
+        # ANS+FAIL; a lag means results are being dropped and their probes re-run.
         storm = [r for r in rows if (r["stats"] or {}).get("lease_errors")
                  or (r["stats"] or {}).get("submit_errors")]
         if storm:
             print("  !! lease/submit timeouts present on "
-                  f"{len(storm)} bridge(s). When DELIV < ANS, results are being dropped and the")
-            print("     probes re-run — usually the Ascend lease service is slow, not the target.")
+                  f"{len(storm)} bridge(s). When DELIV < ANS+FAIL, computed results are being")
+            print("     dropped and their probes re-run. SUB-ERR and LEASE-ERR count the delivery")
+            print("     and lease failures behind it; a sustained storm is a lease/result service issue.")
     else:
         print("  no bridges on this machine")
         print("  `ascend assess run` auto-starts one; or reconcile all:  ascend bridge sync")

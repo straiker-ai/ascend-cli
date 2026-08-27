@@ -33,6 +33,11 @@ All notable changes to the Ascend CLI. Newest first. Format follows
   a git-clone install (`git pull --ff-only`) and prints the command for pipx/binary installs. The
   check is a single unauthenticated GitHub request, no PAT and no telemetry, disabled by
   `ASCEND_NO_UPDATE_CHECK`.
+- **`$ASCEND_BRIDGE_IDLE_TIMEOUT` enables idle cleanup for auto-managed runs.** Idle cleanup is off
+  by default; the bridge stops when its run reaches a terminal state. Set this variable to a positive
+  number of seconds to enable idle cleanup on every path, including the `assess run` and
+  `assess resume` flows that start the bridge for you and cannot take a `--idle-timeout` flag.
+  Contributed by Ryan.
 - `ascend bridge sync` — reconciles local bridges to platform assessment state (start for
   running/paused apps, stop for terminal). The manual fallback when state changed in the Console.
 - **Live run view for `ascend assess run`.** While an assessment runs, the terminal shows the Ascend
@@ -52,6 +57,9 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 - False-pass safety is preserved: a bridge never self-stops when it cannot verify assessment state.
 
 ### Fixed
+- **The CLI imports on Python 3.9–3.11 again.** A nested same-quote f-string in `ascend discover`
+  is a SyntaxError before Python 3.12, so `ascend` failed to start on the 3.9–3.11 range listed in
+  `pyproject.toml`. It is now a plain string join. Reported and fixed by Ryan.
 - **The bridge no longer self-stops while a run is stalled.** Previously the relay idle-timeout (30
   min) treated a `created`/pending run the same as a genuinely paused one, so a platform stall would
   reap the bridge at the worst moment and strand the run. The bridge now stops only when the run

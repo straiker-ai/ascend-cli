@@ -1,12 +1,12 @@
 # Adapter authoring
 
-An **adapter** turns Ascend's "here is a prompt, give me the answer" contract into whatever a
-specific target actually speaks — REST, SSE, WebSocket, a multi-step session API, a browser, or
-a platform bot. This doc is the reference for the `BotAdapter` contract, the config schema for
-each of the 11 shipped adapters, and how to add your own.
+An **adapter** turns Ascend's prompt-and-answer contract into the protocol a specific target
+speaks: REST, SSE, WebSocket, a multi-step session API, a browser, or a platform bot. This
+reference covers the `BotAdapter` contract, the config schema for each of the 11 shipped
+adapters, and how to add your own.
 
-For the *why* (the deterministic composable-layer model that decides which adapter + config a
-target needs), read `docs/CAPABILITY_MATRIX.md`.
+The deterministic composable-layer model that decides which adapter and config a target needs
+is documented in `docs/CAPABILITY_MATRIX.md`.
 
 ---
 
@@ -29,7 +29,7 @@ class BotAdapter(ABC):
         """
 ```
 
-Two helpers on the base class build that dict for you — always return through them:
+Two helpers on the base class build that dict for you. Always return through them:
 
 ```python
 start = time.time()
@@ -39,14 +39,14 @@ return self._ok(answer_text, start, adapter="my_adapter", any="metadata")
 return self._fail("what went wrong", start, status_code=502)
 ```
 
-Rules that keep an adapter well-behaved:
+Rules for adapters:
 
-- **Never raise** for an expected failure (bad HTTP, timeout, missing field) — return `_fail(...)`.
-  The dispatcher turns a raised exception into a generic error, but `_fail` lets you attach an
+- **Never raise** for an expected failure (bad HTTP, timeout, missing field). Return `_fail(...)`.
+  The dispatcher turns a raised exception into a generic error, while `_fail` lets you attach an
   accurate `status_code` and message that Ascend can score.
 - **Stay under the bridge's 30s ceiling.** Most adapters default `timeout_ms` to 26000. If the
   target can exceed it, return the text collected *so far* with `truncated: true` metadata rather
-  than failing — partial evidence is scoreable, `[ERROR] Timeout` is not.
+  than failing. Ascend can score partial evidence. It cannot score `[ERROR] Timeout`.
 - **Substitute `{{PROMPT}}` safely.** When injecting the prompt into a JSON template, use
   `_json_escape(prompt)` (exported from `websocket_direct`) so quotes/newlines don't break the JSON.
 - **Import heavy deps lazily** inside `send_prompt` (e.g. `websockets`, `playwright`) so the
@@ -65,12 +65,12 @@ your result back for Ascend:
 
 ---
 
-## The composable-layer view
+## Composable layers
 
-An adapter *type* is really a bundle of orthogonal choices — transport, auth, auth-lifecycle,
+An adapter *type* is a bundle of orthogonal choices: transport, auth, auth-lifecycle,
 session, identity, rate. Two adapters that share a transport differ only in the other layers. This
 is why configs look similar across adapters and why `build-adapter` can be deterministic. The
-canonical six-layer table lives in `docs/CAPABILITY_MATRIX.md`; keep new adapters aligned to it so
+six-layer table lives in `docs/CAPABILITY_MATRIX.md`; keep new adapters aligned to it so
 they compose with the rest of the toolkit.
 
 ---
@@ -106,7 +106,7 @@ Single POST, extract the answer by dot-path.
 
 ### `sse_stream` — reassemble a streamed answer *(not stateful)*
 For `text/event-stream` or NDJSON targets that emit one frame per token. Reassembles the stream
-into one clean string.
+into one string.
 | Key | Default | Meaning |
 |---|---|---|
 | `base_url` | *(required)* | `scheme://host:port` of the target |
@@ -208,7 +208,7 @@ Fresh conversation per prompt. Provide one token source.
 
 ---
 
-## Two concrete `websocket_direct` examples
+## Two `websocket_direct` examples
 
 ### A. Chunked *text* streaming with a terminal frame
 The server streams the answer as many small JSON frames and marks the end with `{"type":"end"}`:
@@ -256,7 +256,7 @@ one complete JSON object under `data.message`:
 
 1. Create `runtime/adapters/my_adapter.py` with a `class MyAdapter(BotAdapter)` implementing
    async `send_prompt`. Return through `self._ok` / `self._fail`. Import heavy deps lazily.
-   Document the config keys in the module docstring — that docstring is the source of truth for
+   Document the config keys in the module docstring. That docstring is the source of truth for
    this reference.
 2. Export it from `runtime/adapters/__init__.py`.
 3. Register it in `runtime/dispatch.py`: add `"my_adapter": MyAdapter` to `ADAPTER_REGISTRY`, and
@@ -264,5 +264,5 @@ one complete JSON object under `data.message`:
 4. Add a `configs/<name>.json` example and confirm `ascend adapter list` shows the new type.
 5. Run it: `ascend bridge start --adapter my_adapter --config <name>`.
 
-No change to `call_target.py`, `lease_client.py`, or the CLI is needed — the registry is the only
+No change to `call_target.py`, `lease_client.py`, or the CLI is needed. The registry is the only
 wiring point.

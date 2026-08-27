@@ -15,7 +15,7 @@ ascend reports --json                   # for scripts and agents
   ● low       7%  ▓▓▓▓▓▓▓▓▓▓   3/41      2    12d  Acme DocsAI          Jailbreak
 ```
 
-## The one thing to understand: probes ≠ findings
+## Probes and findings are different units
 
 | Column | Unit | Means |
 |---|---|---|
@@ -23,31 +23,29 @@ ascend reports --json                   # for scripts and agents
 | `FIND` | **controls** | how many *controls* failed — each is one finding |
 | `PASS/FAIL` bar | probes | the visual ratio of the probe counts |
 
-They are different units on purpose. 187 failed probes across 56 failed controls is one run, not
-two numbers that should match. A table that silently mixed them would misrepresent your results.
+They are different units. 187 failed probes across 56 failed controls is a single run; the probe
+count and the finding count measure different things and need not match.
 
-`FAIL%` is failed ÷ total probes — the fraction of probes the target failed. `SEV` is the
+`FAIL%` is failed ÷ total probes, the fraction of probes the target failed. `SEV` is the
 assessment's severity, also shown as the leading ● (red high · yellow medium · green low). `WHEN`
-is the age of the run (`4d`, `2h`). There is no opaque "score": every number here is derived from
-the probe counts.
+is the age of the run (`4d`, `2h`). Every number here is derived from the probe counts.
 
 ## Why some rows are flagged
 
 - `!!` — **suspiciously few probes on a clean result.** The likely cause is that no bridge served
   the run: unanswered probes are not findings, so the result reads clean when it measured nothing.
-  `assess run` auto-starts and self-manages the bridge, so this normally can't happen — suspect it
+  `assess run` auto-starts and self-manages the bridge, so this normally can't happen. Suspect it
   when auto-management was disabled, the run started from the Console, or a remote/pre-started bridge
   died. Verify with `ascend bridge ls` (or reconcile with `ascend bridge sync`), and see
   [ASSESSMENT_LIFECYCLE.md](ASSESSMENT_LIFECYCLE.md).
-- `~` — the severity was **re-ranked by your local policy** (below), not reported that way by the
-  platform.
+- `~` — the severity was **re-ranked by your local policy** (below), overriding the platform value.
 
-## Cost, and why `--detail` is separate
+## Cost and the extra `--detail` call
 
-There is no tenant-wide assessments endpoint, so the CLI makes one call per app to list runs. That
-part is parallel and shows a progress line. Probe and finding counts exist only on the *individual*
-assessment, so `--detail` pays one additional call per run. That's why it's opt-in: the default is
-cheap, `--detail` is thorough.
+There is no tenant-wide assessments endpoint, so the CLI makes one call per app to list runs. Those
+calls run in parallel and show a progress line. Probe and finding counts exist only on the
+*individual* assessment, so `--detail` makes one additional call per run. It is opt-in for that
+reason.
 
 ## Exporting
 
@@ -58,7 +56,7 @@ ascend results captures/session.jsonl        # replay a manual chat session as a
 ```
 
 SARIF flows into GitHub code scanning, Azure DevOps, and SARIF-aware SIEMs. A finding whose
-severity cannot be determined is emitted as `error`, never softened to `warning`.
+severity cannot be determined is emitted as `error`.
 
 ## Gating a pipeline
 
@@ -77,23 +75,22 @@ Exit codes are a stable contract:
 
 ### The gate refuses a run that measured nothing
 
-A completed run with **fewer than 5 probes and no findings** exits `1`, not `0`. That combination
-is the signature of a bridge that was not running: the probes went unanswered, unanswered probes
-are not findings, and the assessment finishes looking clean (0% fail) having tested nothing.
-`ascend reports` flags the same run with `!!`; the gate used to pass it, so the report warned while
-the pipeline went green.
+A completed run with **fewer than 5 probes and no findings** exits `1`. That combination indicates
+a bridge that was not running: the probes went unanswered, unanswered probes are not findings, and
+the assessment finishes looking clean (0% fail) having tested nothing. `ascend reports` flags the
+same run with `!!`.
 
 ```
 ascend ci --app 'My Bot' --assessment asmt_x                 # refuses a 2-probe clean run
 ascend ci --app 'My Bot' --assessment asmt_x --min-probes 0  # for runs that really are that small
 ```
 
-A tiny run that *did* find something is a normal findings failure (exit `2`) — it clearly worked.
+A tiny run that found something is a normal findings failure (exit `2`).
 
 ## Local severity policy
 
-Per-control severity is **not settable on an Ascend app** through the v3 API — the platform assigns
-severity at scoring time. So if a control matters more for *your* app, express it locally in a file
+Per-control severity is **not settable on an Ascend app** through the v3 API. The platform assigns
+severity at scoring time. If a control matters more for *your* app, express it locally in a file
 you commit next to your pipeline:
 
 ```
@@ -118,6 +115,6 @@ ascend policy show
 }
 ```
 
-The policy is applied **before** the gate decides, so an override genuinely changes the verdict —
-not just the display. Precedence: app control → app category → global control → global category →
-whatever the platform reported. An explicit `--fail-on-severity` on the command line always wins.
+The policy is applied **before** the gate decides, so an override changes the gate verdict.
+Precedence: app control → app category → global control → global category → the severity the
+platform reported. An explicit `--fail-on-severity` on the command line always wins.

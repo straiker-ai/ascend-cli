@@ -1,7 +1,7 @@
 # Application types
 
-An Ascend application declares **how the platform reaches your target**. There are four types, and
-the choice decides one thing above all: *does the adapter run on your side?*
+An Ascend application declares **how the platform reaches your target**. There are four types. The
+choice determines whether the adapter runs on your side.
 
 ```
 ascend app create --type bridge|api|gcp|bedrock --name 'My Bot' ...
@@ -14,21 +14,20 @@ ascend app create --type bridge|api|gcp|bedrock --name 'My Bot' ...
 | `gcp` | Native Vertex AI / Agent Engine integration | No | Vertex Agent Engine, ADK on Vertex |
 | `bedrock` | Native AWS Bedrock integration | No | Bedrock agents and runtimes |
 
-`bridge` is the default because it is the one that always works: whatever the target does, the CLI's
-adapter layer can be taught to speak it, and the relay runs on your side of the network boundary.
-Pick `bridge` when **either** Ascend can't reach the target **or** the adapter has to run locally
-(code, browser, signed requests, stateful sessions) — if it needs a locally-run adapter, it's a
-bridge app. `ascend assess run` starts and stops the bridge for you (see below); you don't run one
-by hand for a normal assessment.
+`bridge` is the default. The CLI's adapter layer can be configured to speak to any target, and the
+relay runs on your side of the network boundary. Pick `bridge` when **either** Ascend can't reach the
+target **or** the adapter has to run locally (code, browser, signed requests, stateful sessions).
+`ascend assess run` starts and stops the bridge for you (see below); you don't run one by hand for a
+normal assessment.
 
 ## Required fields per type
 
-These are validated **locally, before the request**, so a gap reads as a named field rather than a
-422 from the API.
+These are validated **locally, before the request**. A missing field is caught and named locally, so
+it does not surface as a 422 from the API.
 
 | Type | Required |
 |---|---|
-| `bridge` | `request_template`, `response_template`, `headers` — all defaulted, so `--name` alone works |
+| `bridge` | `request_template`, `response_template`, `headers`. All defaulted, so `--name` alone works |
 | `api` | `url`, `api_key`, `request_template`, `response_template`, `headers` |
 | `gcp` | `url`, `service_account_info` |
 | `bedrock` | `url`, `bedrock_authentication_method` (`assume-role` or `access-key`) |
@@ -39,9 +38,9 @@ error: a 'gcp' application needs: url, service_account_info
   missing: service_account_info
 ```
 
-## The four, in practice
+## The four types in detail
 
-### `bridge` — the default
+### `bridge` (default)
 
 ```bash
 ascend adapter build --api https://internal.corp/chat --bearer "$TOK" --out mybot.json
@@ -52,27 +51,26 @@ ascend assess run --app 'My Bot' --name 'run 1'
 No manual `ascend bridge start`. `ascend assess run` on a bridge app **auto-starts** the bridge
 before probes are scheduled, and the bridge **self-stops** when the assessment reaches a terminal
 state. While an assessment is paused the bridge stays alive and keeps serving; idle cleanup is opt-in
-via `--idle-timeout` (off by default), so a platform stall never stops it. It
-never self-stops when it cannot verify state — an unverifiable stop would risk a false pass, so the
-relay stays up.
+via `--idle-timeout` (off by default), so a platform stall never stops it. It never self-stops when
+it cannot verify state, because an unverifiable stop would risk a false pass.
 
-`ascend assess resume` re-ensures a bridge — the reliable path after a Console-side resume, since
-the SaaS can't start a process on your machine. If state changed in the Console and a bridge is out
-of sync, `ascend bridge sync` reconciles: it starts bridges for running/paused apps and stops them
-for terminal ones.
+`ascend assess resume` re-ensures a bridge. Use it after a Console-side resume, since the SaaS can't
+start a process on your machine. If state changed in the Console and a bridge is out of sync,
+`ascend bridge sync` reconciles: it starts bridges for running/paused apps and stops them for
+terminal ones.
 
 A bridge is per-**app**: one relay is shared across that app's assessments, with no cross-assessment
 contamination. The v2 lease/result protocol carries only an opaque `request_id`/`msg_id` that the
 bridge echoes back; the platform attributes each probe to its assessment.
 
 The create response carries the bridge key (`tc-…`) **exactly once**. The CLI stores it for you; if
-the API ever returns a create without one, the command fails loudly rather than leaving an app no
-bridge can serve.
+the API ever returns a create without one, the command fails rather than leave an app that no bridge
+can serve.
 
-`ascend bridge start` still exists for advanced use — a remote or long-lived host, a continuous
-relay, pre-starting before a run — but it is not a step in the normal flow.
+`ascend bridge start` still exists for advanced use: a remote or long-lived host, a continuous
+relay, or pre-starting before a run. It is not a step in the normal flow.
 
-### `api` — no bridge needed
+### `api` (no bridge)
 
 The url, templates and headers come straight from a mapped config, since `ascend adapter build` already
 produces exactly those fields:
@@ -123,9 +121,8 @@ ascend bridge ls                # bridge-based apps only; flags live runs with n
 ```
 
 The NO-BRIDGE alarm is deliberately scoped to `bridge` apps. Flagging an `api`/`gcp`/`bedrock` app for
-having no bridge would be a false alarm, and a false alarm trains people to ignore the one alarm
-that matters — a live assessment with nobody answering scores a **false pass**, because unanswered
-probes are not findings.
+having no bridge would be a false alarm, and false alarms train people to ignore real ones. A live
+assessment with nobody answering scores a **false pass**, because unanswered probes are not findings.
 
 ## Severity and guardrails at create time
 
@@ -135,15 +132,15 @@ ascend app create --name 'My Bot' \
   --input-guardrail http_status_code=403
 ```
 
-**`--category-severity`** maps to the app's real `category_severities` field. The platform's enum is
-`default|low|medium|high` — there is no `critical`, so a policy asking for it is clamped to `high`
+**`--category-severity`** maps to the app's `category_severities` field. The platform's enum is
+`default|low|medium|high`. There is no `critical`, so a policy asking for it is clamped to `high`
 and the command says so. Per-**control** severity is not settable anywhere in v3; express that in
 `ascend-policy.json` instead, where it applies to `ascend reports` and `ascend ci`.
 
-**`--input-guardrail`** tells the platform how the target signals a block — an HTTP status
+**`--input-guardrail`** tells the platform how the target signals a block: an HTTP status
 (`http_status_code=403`) or text (`response_pattern='I can't help with that'`, pipe-separated for
-several). Without it, a guardrail block looks identical to the target genuinely answering, which is
-what produces guardrail false positives in scoring.
+several). Without it, a guardrail block looks identical to the target genuinely answering, which
+produces guardrail false positives in scoring.
 
 To change either later:
 
@@ -156,7 +153,7 @@ ascend policy push --app 'My Bot'          # sends the CATEGORY half upstream
 
 ## Changing an app's type
 
-You cannot. `api_type` is fixed at creation — the create body is a discriminated union on it.
+You cannot. `api_type` is fixed at creation, because the create body is a discriminated union on it.
 Delete and recreate:
 
 ```bash
@@ -164,4 +161,4 @@ ascend app delete 'My Bot'        # also drops its stored bridge key
 ascend app create --type api --name 'My Bot' --config mybot --target-api-key "$TOK"
 ```
 
-Deleting removes the stored key too: a `tc-` key without its app is a dead secret on disk.
+Deleting removes the stored key too: a `tc-` key without its app cannot be used.

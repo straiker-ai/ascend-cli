@@ -1,19 +1,18 @@
 # Multi-turn and session state over pull-mode
 
 Many red-team probes are multi-turn: an attack primes the bot on turn 1 and lands on turn 3. For
-that to work the *conversation* has to persist across probes. In pull-mode the responsibility for
-that continuity moves to the runtime — this doc explains exactly where it lives and why the
-default policy is *sequential*.
+that to work the *conversation* has to persist across probes. In pull-mode the runtime is
+responsible for that continuity. The default policy is *sequential*.
 
 ---
 
 ## Why the client owns continuity
 
 Ascend's assessment engine (Iris) puts **only the prompt** on the wire. A probe body carries the
-rendered prompt and nothing else — there is no `conversation_id` field (Iris `Probe` has `prompt`,
-not `conversation_id`). For a *direct* `api` app, Iris runs the per-target session/conversation
-logic server-side in its own plugins. For a **bridge** app that logic isn't there — so it
-has to live in the runtime, in `runtime/dispatch.py`.
+rendered prompt and nothing else. There is no `conversation_id` field: Iris `Probe` has a `prompt`
+field and no `conversation_id`. For a *direct* `api` app, Iris runs the per-target
+session/conversation logic server-side in its own plugins. For a **bridge** app that logic is
+absent, so it lives in the runtime, in `runtime/dispatch.py`.
 
 The mechanism: **one persistent adapter instance per conversation.** A stateful adapter (e.g.
 `session_api`) mints a session/conversation id on its first call and reuses it on every subsequent
@@ -26,7 +25,7 @@ per-conversation lock so a stateful adapter's turns stay strictly ordered even u
 
 ---
 
-## The correctness problem, and the default answer
+## The correctness problem and the default policy
 
 Iris gives the runtime **no correlation id**, so the runtime cannot tell which in-flight probe
 belongs to which conversation. If it ran probes concurrently against a single shared stateful
@@ -38,8 +37,8 @@ The default policy that avoids this is **sequential**:
   is ever in flight.
 - The single persistent instance threads the turns in order.
 
-This is exactly why the legacy Go bridge forced `max_workers: 1` for session/browser targets — the
-constraint is inherent to "no correlation id on the wire", not an implementation detail.
+This is why the legacy Go bridge forced `max_workers: 1` for session/browser targets. The
+constraint is inherent to "no correlation id on the wire".
 
 ### Which adapters are stateful
 
@@ -67,7 +66,7 @@ agentforce*, slack_direct, copilot_studio, websocket_direct
 
 For a normal run this is automatic: `ascend assess run` auto-starts the bridge, which reads the
 adapter/config and picks the worker count from the rules above. The `bridge start` invocations
-below are the **advanced** path — a manually pre-started or remote relay — where `--max-workers N`
+below are the **advanced** path (a manually pre-started or remote relay), where `--max-workers N`
 overrides all of this:
 
 ```bash
@@ -80,9 +79,9 @@ ascend bridge start --adapter session_api --config mybot --max-workers 4   # exp
 
 ## Running conversations concurrently: `conversation_key`
 
-The sequential policy is a *safe default*, not a hard limit. If the target **echoes a stable
-correlation value** you can read off the probe, you can demux concurrent conversations instead of
-serializing them. Set `conversation_key` in the config:
+The sequential policy is a default that you can override. If the target **echoes a stable
+correlation value** you can read off the probe, you can demux concurrent conversations. Set
+`conversation_key` in the config:
 
 | Value | Reads from |
 |---|---|
@@ -110,7 +109,7 @@ single `default` conversation, and the sequential policy holds.
 
 ## Resetting sessions (identity rotation)
 
-Sometimes you want to *drop* accumulated state — rotate to a fresh identity, clear a poisoned
+Sometimes you want to *drop* accumulated state: rotate to a fresh identity, clear a poisoned
 context, or start a clean conversation:
 
 - `ConversationRouter.reset(adapter_type=None)` drops cached instances (all, or just one adapter
@@ -120,13 +119,13 @@ context, or start a clean conversation:
 
 Rotation strategies:
 
-- **Per-run** — a fresh runtime process is a fresh router with an empty cache, so a bridge
+- **Per-run**: a fresh runtime process is a fresh router with an empty cache, so a bridge
   auto-started by `ascend assess run` (or a manual `ascend bridge start`) already starts clean.
-- **Per-conversation identity** — for adapters whose identity is a config value (e.g.
+- **Per-conversation identity**: for adapters whose identity is a config value (e.g.
   `slack_direct.slack_token`, `agentforce.client_id`, an `Authorization` header), point the runtime
   at a different config to run under a different identity. Because instances are cached per
   `adapter:config:conversation`, two configs never share a session.
-- **Mid-run reset** — call `caller.reset()` (the `TargetCaller` is kept on the client as `_caller`)
+- **Mid-run reset**: call `caller.reset()` (the `TargetCaller` is kept on the client as `_caller`)
   to force every next turn onto a brand-new session without restarting the process.
 
 Adapters that re-mint credentials on their own (e.g. `agentforce` re-mints an expired OAuth token,

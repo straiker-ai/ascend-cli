@@ -1,14 +1,14 @@
-# Adapter Capability Matrix — the deterministic build-adapter contract
+# Adapter Capability Matrix
 
-An adapter is **not** one of a fixed list of classes. It is a **composition of orthogonal
-layers**, each with a finite set of values. `build-adapter` is deterministic because it detects
-each layer independently from captured evidence, composes one value per layer, then validates the
-composition against the live target and iterates. Finite dimensions × bounded per-dimension
-classifiers = full coverage of the combinatorial space that monolithic adapters cannot reach.
+An adapter is a **composition of orthogonal layers**, each with a finite set of values.
+`build-adapter` is deterministic because it detects each layer independently from captured
+evidence, composes one value per layer, then validates the composition against the live target and
+iterates. Finite dimensions and bounded per-dimension classifiers give full coverage of the
+combinatorial space that monolithic adapters cannot reach.
 
 An adapter config is exactly: **one choice per layer** (+ that choice's parameters).
 
-## Layer 1 — Transport & response assembly
+## Layer 1: Transport & response assembly
 | value | key params | detect by |
 |---|---|---|
 | `rest_json` | `endpoint,method,headers,body({{PROMPT}}),response_path` | content-type application/json, single response |
@@ -21,13 +21,13 @@ An adapter config is exactly: **one choice per layer** (+ that choice's paramete
 | `sentinel_stream` | `begin_marker,end_marker,events_path,message_path,author_field,agent_authors,text_field,skip_flags,aggregate` | repeated `NAME_BEGIN{json}NAME_END` frames in a `text/plain` body (auto-detected generically) |
 | `poll` *(implemented)* | `create/send/poll` urls, `list_path,role_field,bot_roles,text_path,interval_ms,stability_ms` | send returns only an ack; the reply appears on a later GET of a transcript/messages endpoint |
 
-> **Implementation status (verified, not aspirational).** `rest_json`, `sse`, `ndjson`,
+> **Implementation status (verified).** `rest_json`, `sse`, `ndjson`,
 > `websocket`, `browser_dom`, `terminal`, `sentinel_stream` and `poll` are implemented.
-> `mtls` (L2) is **specified but NOT implemented** in `runtime/layers/auth.py` — do not
+> `mtls` (L2) is **specified but NOT implemented** in `runtime/layers/auth.py`. Do not
 > assume it works. `split_duplex` (receive channel opened separately) and `callback`
-> (target POSTs to us) are **not** implemented.
+> (target POSTs to the runtime) are **not** implemented.
 
-## Layer 2 — Auth (how one request is authorized)
+## Layer 2: Auth (how one request is authorized)
 | value | params | detect by |
 |---|---|---|
 | `none` | — | no secret on the wire |
@@ -37,7 +37,7 @@ An adapter config is exactly: **one choice per layer** (+ that choice's paramete
 | `oauth2` | `grant: client_credentials\|password\|refresh, token_url, ...` | token endpoint + `Authorization: Bearer` downstream |
 | `csrf` | `bootstrap_url, extract(regex/path)->header/body` | a token fetched from a page/endpoint then echoed |
 
-## Layer 3 — Auth lifecycle (how credentials stay valid)
+## Layer 3: Auth lifecycle (how credentials stay valid)
 | value | params | detect by |
 |---|---|---|
 | `static` | — | long-lived secret |
@@ -45,7 +45,7 @@ An adapter config is exactly: **one choice per layer** (+ that choice's paramete
 | `reauth_on_401` | `challenge: 401\|403\|body-match`, re-run auth then retry once | observed re-login after a challenge |
 | `cookie_rotation` | capture `Set-Cookie`, re-login on expiry/interval | Set-Cookie churns; session dies after interval |
 
-## Layer 4 — Session / conversation (how turns bind)
+## Layer 4: Session / conversation (how turns bind)
 | value | params | detect by |
 |---|---|---|
 | `stateless` | — | each request independent |
@@ -54,7 +54,7 @@ An adapter config is exactly: **one choice per layer** (+ that choice's paramete
 | `warmup` | `warmup_message`, discard first reply | a mandatory greeting/consent turn precedes real answers |
 | `multi_turn` | persist instance; sequential (max_workers=1) unless `conversation_key` | strategy is multi-turn; target holds context server-side |
 
-## Layer 5 — Identity (who is calling)
+## Layer 5: Identity (who is calling)
 | value | params | detect by (mostly an ROE choice, not auto-detected) |
 |---|---|---|
 | `fixed` | one identity | default |
@@ -62,7 +62,7 @@ An adapter config is exactly: **one choice per layer** (+ that choice's paramete
 | `rotate_per_n` | `pool, n` | per-N-probe rotation |
 | `fresh_per_probe` | `pool` or generator | strict isolation |
 
-## Layer 6 — Rate / concurrency (cross-cutting)
+## Layer 6: Rate / concurrency (cross-cutting)
 `qpm`, `max_workers` (auto: 1 for stateful, 10 stateless), `per_identity_qpm`.
 
 ## Composition & runtime wiring
@@ -75,8 +75,8 @@ IdentityManager (L5)  ──►  AuthProvider (L2) + AuthLifecycle (L3)
 ```
 Existing transports (rest_json, sse, websocket, poll, browser_dom, terminal) are **Layer-1**
 implementations; the legacy monolithic adapters (agentforce, copilot_studio, scrt2_direct,
-session_api, amazon_connect, slack_direct, vertex_ai) are **presets** = a pinned composition of
-L1–L6, kept for convenience and as golden references, but re-expressible as compositions.
+session_api, amazon_connect, slack_direct, vertex_ai) are **presets**: a pinned composition of
+L1–L6, kept for convenience and as golden references, and re-expressible as compositions.
 
 ## build-adapter procedure (deterministic)
 1. Ingest evidence: HAR, and/or a live capture (browser in-page intercept, or a proxied send).

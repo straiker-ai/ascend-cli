@@ -1,10 +1,10 @@
 # Ascend CLI
 
 A Python 3 red-team toolkit that connects the **Straiker Ascend** assessment cloud to
-any AI target — REST APIs, streaming (SSE) endpoints, WebSocket chat, multi-step session
+any AI target: REST APIs, streaming (SSE) endpoints, WebSocket chat, multi-step session
 APIs, browser-only widgets, and platform bots (Salesforce, Slack, Vertex AI, Copilot
 Studio, Amazon Connect). It registers the target as an Ascend application, runs a red-team
-assessment against it, and monitors the result — all from one scriptable CLI.
+assessment against it, and monitors the result, all from one scriptable CLI.
 
 Ascend CLI **replaces the legacy WebSocket bridge** with a *pull-mode* runtime. The
 old bridge held a persistent socket that Ascend pushed probes onto; a dropped connection
@@ -13,18 +13,18 @@ the runtime *leases* probes over plain HTTP, calls your target through an adapte
 the result back. There is no socket to drop.
 
 
-## Connect to any agent: `ascend adapter build`
+## Build an adapter: `ascend adapter build`
 
-`ascend adapter build` derives AND validates an adapter config from a live URL / API / curl / spec /
-HAR, with **auth-first** flags (`--bearer`, `--api-key`, `--basic`, `--cookie`, or a
-`--login-url` access-code flow) honored by every source. It never dead-ends on a 401: it
+`ascend adapter build` derives and validates an adapter config from a live URL / API / curl / spec /
+HAR. Auth-first flags (`--bearer`, `--api-key`, `--basic`, `--cookie`, or a
+`--login-url` access-code flow) are honored by every source. On a 401 it
 names the auth scheme and the exact re-run command. (`ascend adapter build` still works as an
 alias.)
 
-Native coverage now includes **all the major model providers** (validated presets for
+Native coverage includes model providers (validated presets for
 OpenAI, Anthropic, Azure OpenAI incl. Entra, Gemini, Ollama, vLLM) and **AWS Bedrock**
-(Converse / Agent / AgentCore, SigV4 + eventstream via boto3). Enterprise-ready: mTLS,
-custom CA, corporate proxy, and an SSRF guard that allows internal RFC-1918 targets but
+(Converse / Agent / AgentCore, SigV4 + eventstream via boto3). It also supports mTLS,
+custom CA, corporate proxy, and an SSRF guard that allows internal RFC-1918 targets and
 blocks cloud metadata. **Guides:** [BUILD_ADAPTER.md](docs/BUILD_ADAPTER.md) (build an adapter for a target) · [APP_TYPES.md](docs/APP_TYPES.md) (the four
 app types, and which need a bridge) · [REPORTS.md](docs/REPORTS.md) and
 [ANALYSIS.md](docs/ANALYSIS.md) (reading results) · [AGENTS.md](docs/AGENTS.md) (agent/CI use) ·
@@ -36,22 +36,22 @@ app types, and which need a bridge) · [REPORTS.md](docs/REPORTS.md) and
 
 ---
 
-## The pull-mode advantage
+## Pull mode vs. the legacy WebSocket bridge
 
 | Legacy WS bridge | Ascend CLI (pull) |
 |---|---|
 | Ascend **pushes** probes over a persistent WebSocket | Runtime **leases** probes over stateless HTTP (`POST /v2/lease`) |
-| Broken pipe → bad-handshake, ping/pong misses | No socket: a dropped lease is simply retried |
+| Broken pipe → bad-handshake, ping/pong misses | No socket: a dropped lease is retried |
 | Socket drop can **auto-pause** the assessment | Un-acked probe is reclaimed by the server after ~90s; the run continues |
 | No rate control, fixed concurrency | QPM throttle + session-aware concurrency (`max_workers`) |
 | One monolith | One deterministic core + adapter framework + scriptable shells |
 
-Because the transport has no long-lived connection, the *entire class* of WebSocket failures
-the legacy bridge hit simply cannot occur here.
+Because the transport has no long-lived connection, the WebSocket failures
+the legacy bridge hit cannot occur here.
 
 ---
 
-## How it works — the probe lifecycle
+## The probe lifecycle
 
 ```mermaid
 sequenceDiagram
@@ -75,7 +75,7 @@ sequenceDiagram
     B->>I: POST /v2/lease  (repeat)
 ```
 
-## Architecture — one core, thin shells
+## Architecture: one core, thin shells
 
 ```mermaid
 flowchart TB
@@ -104,9 +104,9 @@ flowchart TB
     RT --> BR(["/v2/lease · /v2/result"])
 ```
 
-## Adapters are compositions, not a fixed list
+## Adapters are built by composing primitives
 
-A target is **one value per layer** — that is why a finite set of adapters covers a
+A target is **one value per layer**. A finite set of adapters therefore covers a
 combinatorial space of real integrations.
 
 ```mermaid
@@ -121,7 +121,7 @@ flowchart LR
     L6 -. gates .-> L1
 ```
 
-## Mapping: point at a URL, get a validated config
+## Build a config from a URL
 
 ```mermaid
 flowchart LR
@@ -138,7 +138,7 @@ flowchart LR
 
 ---
 
-## Architecture — one core, three shells
+## Architecture: one core, three shells
 
 ```
           transport/   raw pull-mode client (lease → call → result), reference impl
@@ -173,7 +173,7 @@ Skills that orchestrate the CLI (never reimplement it). See `docs/SURFACE.md`.
    bridge relays each probe to your adapter, which calls the target and returns the answer. Use
    for anything that needs a browser, a session handshake, streaming reassembly, OAuth, or
    egress from inside your network. `ascend assess run` auto-starts the bridge before probes are
-   scheduled and it self-stops when the run reaches a terminal state — no manual serve step. The
+   scheduled and it self-stops when the run reaches a terminal state, with no manual serve step. The
    `app create` call returns a **bridge key** (`tc-…`, shown once) that authenticates the bridge.
 
 ---
@@ -182,8 +182,8 @@ Skills that orchestrate the CLI (never reimplement it). See `docs/SURFACE.md`.
 
 ## Getting connected
 
-Most of the work in a real engagement is learning how to *call* the target. Six ways,
-cheapest first — and all of them end on the same hard gate:
+There are six ways to build a config, cheapest first. All of them end on the same
+validation gate:
 
 ```bash
 ascend adapter build --api  https://api.example.com      # endpoint (or just the base URL)
@@ -195,10 +195,10 @@ ascend adapter build --url  https://site/support --manual  # you drive, we recor
 ```
 
 The config is replayed against the **live target** and nothing is written unless it
-actually answered. You get `VALIDATED` or a diagnosis with a hint — `dns`,
+actually answered. You get `VALIDATED` or a diagnosis with a hint: `dns`,
 `unreachable`, `tls`, `auth_required`, `not_found`, `bad_shape`, `rate_limited`,
-`server_error`, `ambiguous`, `bot_protection`. Confidence scores are a hint; the gate is
-the answer.
+`server_error`, `ambiguous`, `bot_protection`. Confidence scores are advisory; the live
+answer determines pass or fail.
 
 Then talk to it, or run a full assessment:
 
@@ -209,12 +209,12 @@ ascend onboard --config mybot          # register + bridge + assess, one command
 
 ## Prerequisites
 
-**Deliberately minimal: one dependency, or none.**
+**One dependency, or none.**
 
 | How you run it | Needs |
 |---|---|
-| **Standalone binary** (`./ascend`) | **nothing** — no Python, no packages. Build once with `./scripts/build_binary.sh`, copy the file, run it. |
-| **From a clone** (`./ascend`) | Python 3.9+ and **`requests`**. That's the whole list. |
+| **Standalone binary** (`./ascend`) | **nothing**: no Python, no packages. Build once with `./scripts/build_binary.sh`, copy the file, run it. |
+| **From a clone** (`./ascend`) | Python 3.9+ and **`requests`**. |
 
 ```bash
 pip install requests          # the only required package
@@ -227,11 +227,11 @@ export STRAIKER_PAT='s6r_pat_…'   # PAT with ascend:read + ascend:write
 | Extra | Only needed for |
 |---|---|
 | `websockets` | WebSocket targets (lazy-imported) |
-| `playwright` + Chromium | `map --url` live capture — **never** for running an assessment |
+| `playwright` + Chromium | `map --url` live capture; **never** for running an assessment |
 | `tmux` | driving a terminal/CLI agent as the target |
 
-> **The bridge never needs a browser.** `ascend bridge start` — the part that touches your
-> target — is pure HTTP. `map --url` is a convenience for *learning* a contract; you can
+> **The bridge never needs a browser.** `ascend bridge start`, the part that touches your
+> target, is pure HTTP. `map --url` is a convenience for *learning* a contract; you can
 > instead use `--har`, `--manual`, or copy `configs/example-*.json`.
 
 **Network egress** — allowlist these (and bypass TLS interception if your proxy re-signs):
@@ -255,7 +255,7 @@ export STRAIKER_PAT='s6r_pat_…'
 # 3. Preflight: key scopes, API reachability, bridge reachability, deps
 ascend doctor
 
-# 4. Point at the target and get a VALIDATED adapter config
+# 4. Build a validated adapter config for the target
 ascend adapter build --api https://api.example.com/chat --bearer "$TOK" --out mybot.json
 
 # 5. Register it. --type bridge (the default) returns the bridge key ONCE and needs a bridge;
@@ -287,8 +287,8 @@ Where things come from:
 
 ## Command reference
 
-`ascend --help` lists every command in the order you use them. The full reference — all 45
-commands and 215 flags, with values, defaults and examples — is generated from the CLI's own
+`ascend --help` lists every command in the order you use them. The full reference, all 45
+commands and 215 flags, with values, defaults and examples, is generated from the CLI's own
 argparse tree and lives in **[docs/COMMAND_MAP.md](docs/COMMAND_MAP.md)**
 (and [command-map.html](docs/command-map.html)). A test fails if it goes stale, so it cannot
 drift from the tool.
@@ -314,8 +314,8 @@ Full per-command flags, `--json` behaviour, and exit codes are in **`docs/COMMAN
 ## Documentation map
 
 | Doc | What's inside |
-| [docs/COMMAND_MAP.md](docs/COMMAND_MAP.md) | **Every command at a glance** — mindmap, fast path, flags, exit codes |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | **Start here** — what runs where, the probe lifecycle, trust boundaries, diagrams |
+| [docs/COMMAND_MAP.md](docs/COMMAND_MAP.md) | **Every command at a glance**: mindmap, fast path, flags, exit codes |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | **Start here**: what runs where, the probe lifecycle, trust boundaries, diagrams |
 |---|---|
 | `README.md` (this file) | What Ascend CLI is, the architecture, quickstart |
 | `docs/USAGE.md` | Task-oriented how-tos (onboard, run, monitor, multi-turn, browser/terminal, enterprise) |

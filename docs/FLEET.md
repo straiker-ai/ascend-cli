@@ -1,8 +1,8 @@
 # Running many engagements at once
 
 One tenant, many apps. Each Ascend app has its own `tc-` key, and **a `tc-` key selects exactly one
-application server-side**, so N bridge-type apps means N relays. For a normal run you don't start
-them by hand — `assess run` auto-starts a bridge per app (see
+application server-side**, so N bridge-type apps means N relays. For a normal run, `assess run`
+auto-starts a bridge per app (see
 [ASSESSMENT_LIFECYCLE.md](ASSESSMENT_LIFECYCLE.md)):
 
 ```
@@ -17,7 +17,7 @@ ascend bridge sync                  # reconcile bridges to assessment state (man
 The bridges self-stop as each app's assessments reach a terminal state, so there is nothing to tear
 down after a clean run.
 
-## When you still drive the fleet by hand
+## Driving the fleet by hand
 
 `assess run`/`resume` cover the normal flow. The explicit fleet commands remain for advanced use:
 
@@ -33,16 +33,16 @@ ascend bridge sync                  # start relays for running/paused apps, stop
 ascend bridge stop --all
 ```
 
-`bridge sync` is the safe way to line the fleet back up with reality: it starts a relay for every
-app whose assessment is running or paused and stops one for every app that has gone terminal. Reach
-for it after a Console-side resume/pause — the SaaS can't start a process on your machine, so the
+`bridge sync` reconciles the fleet with assessment state: it starts a relay for every
+app whose assessment is running or paused and stops one for every app that has gone terminal. Use
+it after a Console-side resume/pause. The SaaS can't start a process on your machine, so the
 CLI has to reconcile.
 
-## One tenant at a time (and why)
+## One tenant at a time
 
 The CLI pins itself to the first tenant it authenticates against and **refuses any credential from
-another tenant**. Working two customers from one CLI is how material gets crossed — a key, a config,
-an app — so it is a hard stop, not a warning.
+another tenant**. Working two customers from one CLI can cross material between them (a key, a
+config, an app), so it is a hard stop.
 
 ```
 $ ascend app list
@@ -52,13 +52,13 @@ error: this CLI is locked to tenant 'acme.com (admin)', but the supplied credent
 ```
 
 Identity comes from your PAT-exchanged JWT (`iss` + `straikerId`). Only a **SHA-256 fingerprint** is
-stored — never the raw id, never the PAT. `tenant switch --confirm` refuses while relays are running,
+stored, never the raw id or the PAT. `tenant switch --confirm` refuses while relays are running,
 then archives and clears the stored keys so nothing can leak forward. All state (keys, relay records)
 lives under the tenant's fingerprint directory.
 
 ## The key store
 
-`onboard` and `app create` both store the `tc-` key they mint — the API shows it once, so if it
+`onboard` and `app create` both store the `tc-` key they mint. The API shows it once, so if it
 isn't captured the app can never be served.
 
 | command | does |
@@ -69,7 +69,7 @@ isn't captured the app can never be served.
 | `ascend keys rm X` | forget one |
 
 Keys live in a 0600 file under the tenant's state dir. They are **never** put on a relay's command
-line — argv is world-readable via `ps` — they go into the child's environment.
+line, because argv is world-readable via `ps`; they go into the child's environment.
 
 `ascend app bind <config> --app <app>` records the config↔app link inside the config's `_ascend`
 block, so `bridge start --app X` knows what to run without you naming a config.
@@ -78,7 +78,7 @@ block, so `bridge start --app X` knows what to run without you naming a config.
 
 Only **bridge-type** apps. Those hand prompts to your local bridge over a `tc-` key, so nothing runs
 without it. `api`, `gcp` and `bedrock` apps are called by Ascend **directly** and never need a local
-bridge — so `bridge ls` deliberately does not list them in the NO-BRIDGE alarm.
+bridge, so `bridge ls` does not list them in the NO-BRIDGE alarm.
 
 Check an app's type with `ascend app list` (the `TYPE` column shows `bridge` for these).
 
@@ -94,11 +94,11 @@ $ ascend bridge start --app 'Bot A' --app 'Bot B' --qpm-total 60
   they survive this terminal closing.  check:  ascend bridge ls
 ```
 
-Why processes and not threads: the CLI's signal handler closes over one client (so N-1 would never
-stop), `logging.basicConfig` is global and first-call-wins with app-less logger names, the
-conversation router has no teardown (each relay would leak a loop, a thread and cached adapters —
-including live Chromium), and a native adapter crash would take the whole fleet down. Processes give
-per-app logs and isolation for free.
+Processes are used instead of threads for several reasons: the CLI's signal handler closes over one
+client (so N-1 would never stop), `logging.basicConfig` is global and first-call-wins with app-less
+logger names, the conversation router has no teardown (each relay would leak a loop, a thread and
+cached adapters, including live Chromium), and a native adapter crash would take the whole fleet
+down. Processes give per-app logs and isolation.
 
 `--qpm-total N` splits the rate across the relays it starts. Rate limiting is per-relay, so without
 this, three relays pointed at one customer host hit it at 3× your intended rate.
@@ -116,24 +116,23 @@ $ ascend bridge ls
 
 States: `*serving` (heartbeat fresh), `stale` (alive, no recent heartbeat), `dead` (process gone).
 An auto-managed bridge self-stops on a terminal assessment and self-reconciles otherwise, so a
-`dead` row against a live run usually means auto-management is off or the process crashed — `bridge
-sync` puts it right. `relay logs <app> -f` tails one. `relay stop --all` SIGTERMs then SIGKILLs
-after a grace period — an in-flight lease long-poll isn't interruptible, so a clean stop can take
-~35s and the command says so rather than pretending otherwise.
+`dead` row against a live run usually means auto-management is off or the process crashed. `bridge
+sync` corrects it. `relay logs <app> -f` tails one. `relay stop --all` SIGTERMs then SIGKILLs
+after a grace period. An in-flight lease long-poll isn't interruptible, so a clean stop can take
+~35s, and the command reports this.
 
-## Why the NO-BRIDGE alarm matters
+## The NO-BRIDGE alarm
 
 A dead bridge **does not fail the assessment**. Probes keep being issued, go unanswered, and the run
-still completes — and unanswered probes aren't findings, so you get a clean-looking `score 0 / low`
-that reflects nothing. That is a false negative, and a "clean" report from such a run is worthless.
-The auto-managed bridge fails safe (it never self-stops when it can't verify state), but if you run
-a bare `bridge start` the risk is back on you. `bridge ls` therefore reports the inverse condition,
-and `assess results` warns when a completed run has an implausibly small probe total on a clean
-score. See [ASSESSMENT_LIFECYCLE.md](ASSESSMENT_LIFECYCLE.md).
+still completes. Unanswered probes aren't findings, so the run reports a clean-looking `score 0 / low`.
+That is a false negative. The auto-managed bridge fails safe (it never self-stops when it can't
+verify state), but a bare `bridge start` puts the risk back on you. `bridge ls` reports the inverse
+condition, and `assess results` warns when a completed run has an implausibly small probe total on a
+clean score. See [ASSESSMENT_LIFECYCLE.md](ASSESSMENT_LIFECYCLE.md).
 
 ## Many assessments
 
-`--app` is repeatable everywhere it matters:
+`--app` is repeatable across these commands:
 
 ```
 ascend assess run --app A --app B --app C --name 'wave 1'   # control set validated ONCE, bridge per app
@@ -144,7 +143,7 @@ ascend app list --running                                    # only apps activel
 ```
 
 `assess watch --all` shows a `BRIDGE` column per run, so an unserved run is visible while it is
-happening rather than after you have trusted its score.
+happening.
 
 ## A full multi-engagement session
 

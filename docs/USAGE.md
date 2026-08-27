@@ -1,20 +1,20 @@
-# Usage — task-oriented how-tos
+# Usage
 
-Each section is a complete recipe with real `ascend` commands. Set your PAT once:
+Each section is a complete how-to with `ascend` commands. Set your PAT once:
 
 ```bash
 export STRAIKER_PAT='s6r_pat_…'
 ascend doctor          # confirm the PAT exchanges, the API + bridge are reachable
 ```
 
-`ascend doctor` exits non-zero if anything is wrong — wire it into scripts before a run.
+`ascend doctor` exits non-zero if anything is wrong. Wire it into scripts before a run.
 
 ---
 
 ## 1. Onboard a reachable API target (direct `api` app)
 
 Use this when the target is a plain REST endpoint with stable auth that Ascend can call
-itself — no runtime process, no bridge. Registration is a control-plane call; the CLI
+itself, with no runtime process and no bridge. Registration is a control-plane call; the CLI
 `app` verbs cover bridge apps, so build the `api` spec through `control/api.py`:
 
 ```python
@@ -38,7 +38,7 @@ print(app["id"])
 ```
 
 Then run the assessment directly (Section 3). Note the no-space `{{PROMPT}}` / `{{RESPONSE}}`
-gotcha — the templates are enforced literal.
+gotcha: the templates are enforced literal.
 
 ---
 
@@ -47,10 +47,10 @@ gotcha — the templates are enforced literal.
 Use this for anything Ascend can't call directly: browser widgets, session handshakes, SSE
 reassembly, OAuth, WebSocket framing, or egress from inside your network. A **bridge** app has
 its adapter on your side; the CLI relays each probe to the target. You do NOT start the relay by
-hand for a normal run — `ascend assess run` starts it before probes are scheduled and it
+hand for a normal run. `ascend assess run` starts it before probes are scheduled and it
 self-stops when the run reaches a terminal state.
 
-**Step 1 — register the bridge app** (`bridge` is the default type; prints the `tc-` key ONCE):
+**Step 1: register the bridge app** (`bridge` is the default type; prints the `tc-` key ONCE):
 
 ```bash
 ascend app create --name 'My Bot' --config mybot \
@@ -59,7 +59,7 @@ ascend app create --name 'My Bot' --config mybot \
 # tc_key:  tc-…   (stored in the local key store for this app — shown ONCE)
 ```
 
-**Step 2 — write an adapter config** at `configs/mybot.json` (schema per adapter in
+**Step 2: write an adapter config** at `configs/mybot.json` (schema per adapter in
 `docs/ADAPTER_AUTHORING.md`):
 
 ```json
@@ -81,7 +81,7 @@ ascend adapter list                 # the 11 adapter types
 ascend adapter show mybot           # echo the config back
 ```
 
-**Step 3 — run the assessment** (Section 3). It auto-starts the bridge for this app up front, so
+**Step 3: run the assessment** (Section 3). It auto-starts the bridge for this app up front, so
 the first probes are never dropped, and the bridge self-stops when the run ends:
 
 ```bash
@@ -96,7 +96,7 @@ unanswered run cannot score a false pass.
 
 ## 3. Run and monitor an assessment
 
-The lifecycle is *create → pause → resume → poll* — `ascend assess run` does it correctly in
+The lifecycle is *create → pause → resume → poll*. `ascend assess run` does it in
 one command:
 
 ```bash
@@ -125,7 +125,7 @@ for machine-readable output.
 Bridge lifecycle across pause/resume:
 
 - While an assessment is **paused** the bridge stays alive; it self-stops only when the run reaches a terminal state (idle cleanup is opt-in via `--idle-timeout`).
-- `ascend assess resume` re-ensures a bridge — the reliable path after a resume done in the
+- `ascend assess resume` re-ensures a bridge. This is the reliable path after a resume done in the
   Console, since the SaaS cannot start a process on your machine.
 - If state changed in the Console and local bridges drifted, reconcile them:
 
@@ -138,12 +138,12 @@ Bridge lifecycle across pause/resume:
 ## 4. Multi-turn / session targets
 
 Some targets carry conversation state (a session id, a thread, an open widget). In pull-mode
-Ascend sends only the *prompt* — the bridge owns continuity. This is handled automatically:
+Ascend sends only the *prompt*; the bridge owns continuity. This is handled automatically:
 the eight **stateful** adapters (`session_api`, `browser`, `amazon_connect`, `scrt2_direct`,
 `agentforce`, `slack_direct`, `copilot_studio`, `websocket_direct`) run at concurrency **1** by
 default so exactly one conversation is ever in flight, and a persistent adapter instance threads
-the turns. `ascend assess run` auto-starts the bridge at the right concurrency for the config —
-no flag needed:
+the turns. `ascend assess run` auto-starts the bridge at the right concurrency for the config,
+with no flag needed:
 
 ```bash
 ascend assess run --app 'My Bot' --name 'run 1' --controls sys_prompt_leak,pii_leak
@@ -152,14 +152,14 @@ ascend assess run --app 'My Bot' --name 'run 1' --controls sys_prompt_leak,pii_l
 If the target echoes a stable correlation value, run conversations concurrently by setting
 `conversation_key` and `max_workers` in the config; the auto-started bridge picks them up.
 
-Full model — sequential-vs-concurrent policy, `conversation_key`, and identity rotation — is in
+The full model, covering sequential-vs-concurrent policy, `conversation_key`, and identity rotation, is in
 `docs/MULTI_TURN.md`.
 
 ---
 
 ## 5. Browser and terminal targets
 
-**Browser** (`browser` adapter) — for chat widgets with no API. Needs Playwright:
+**Browser** (`browser` adapter): for chat widgets with no API. Needs Playwright:
 
 ```bash
 python3 -m pip install playwright && playwright install chromium
@@ -170,7 +170,7 @@ ascend assess run --app 'My Bot' --name 'run 1' --controls sys_prompt_leak,pii_l
 `pre_actions` (navigate, dismiss popups, open the widget) once, then fills + sends + waits for
 each probe. Stateful → runs sequentially.
 
-**Terminal** — targets driven through a terminal multiplexer need `tmux`. `ascend doctor`
+**Terminal**: targets driven through a terminal multiplexer need `tmux`. `ascend doctor`
 reports whether `tmux` is present (it's optional and only warns when missing):
 
 ```bash
@@ -181,18 +181,18 @@ ascend doctor            # look for: [ok] tmux present (terminal targets only)
 
 ## 6. Reporting and CI
 
-- **Export findings** — `ascend export --format sarif|json|csv|markdown` turns a completed
-  assessment into something you can file or attach.
-- **Gate a pipeline** — `ascend ci --baseline baseline.json` exits `2` on new findings or a
+- **Export findings**: `ascend export --format sarif|json|csv|markdown` turns a completed
+  assessment into a file you can attach or submit.
+- **Gate a pipeline**: `ascend ci --baseline baseline.json` exits `2` on new findings or a
   severity breach, and `1` only if the tool itself failed, so CI can tell them apart.
-- **Keep the evidence** — `ascend chat <config> --out <file.jsonl>` records a session's prompts
+- **Keep the evidence**: `ascend chat <config> --out <file.jsonl>` records a session's prompts
   and responses (header-redacted, `0600`); chat is auto-recorded to `captures/` by default.
 
 
 
 ## Talking to a target by hand
 
-Before (or instead of) a full assessment, just talk to it:
+Before (or instead of) a full assessment, talk to it directly:
 
 ```bash
 ascend chat mybot

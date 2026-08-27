@@ -1,6 +1,6 @@
-# Speed: what's cached, and what never is
+# Caching and performance
 
-The CLI was slower than it needed to be for two measurable reasons, both fixed:
+Two changes reduced per-command latency:
 
 | Cost | Before | Now |
 |---|---|---|
@@ -11,38 +11,36 @@ The CLI was slower than it needed to be for two measurable reasons, both fixed:
 
 ## The JWT cache
 
-A platform PAT is exchanged for a short-lived JWT (**~10 minutes** — an older comment claimed an
-hour). That token is now cached at `<state-dir>/jwt.json`, mode **0600**, and reused until 60s
-before it expires.
+A platform PAT is exchanged for a short-lived JWT (**~10 minutes**). That token is cached at
+`<state-dir>/jwt.json`, mode **0600**, and reused until 60s before it expires.
 
-Safety properties, because this is a bearer token on disk:
-- keyed by `sha256(PAT | token_url)` — the PAT itself is never written;
+Safety properties:
+- keyed by `sha256(PAT | token_url)`; the PAT itself is never written;
 - **tenant-scoped**, and the cached token's own `iss|straikerId` fingerprint must match the pinned
   tenant before it is used, so a token can never leak across tenants;
 - dropped on a 401 (so a rejected token isn't re-read by the next process) and on `tenant switch`;
 - a token whose `exp` cannot be decoded is kept briefly in memory but **never** persisted.
 
-It is strictly less exposure than the status quo: your long-lived PAT already sits in the
-environment; this is a 10-minute credential in a 0600 file.
+The long-lived PAT already sits in the environment; the cached JWT is a 10-minute credential in a
+0600 file.
 
 ## What is never cached
 
-- **`get_assessment`** — it *is* the live status. Caching it would freeze `assess watch` and the
+- **`get_assessment`**. It is the live status; caching it would freeze `assess watch` and the
   poller.
-- **The assessments list on any liveness path** — a stale `complete` would hide a running
-  assessment whose relay died, which is precisely how a false pass happens. `assess run`
+- **The assessments list on any liveness path**. A stale `complete` would hide a running
+  assessment whose relay died, which is how a false pass happens. `assess run`
   auto-manages the bridge, so this is now mainly a risk when auto-management is off or a remote
-  bridge dies; the liveness path stays uncached so `bridge sync` and the NO-BRIDGE alarm see truth.
+  bridge dies. The liveness path stays uncached so `bridge sync` and the NO-BRIDGE alarm see current state.
 - Anything non-GET, and any response carrying a one-shot `tc-` key.
 
 `ASCEND_NO_CACHE=1` disables caching entirely.
 
-## Why "across all apps" is still a fan-out
+## Operations spanning all apps
 
 There is no tenant-wide assessments endpoint, so anything spanning apps (`app list --with-runs`,
 `reports`, `status`, `relay ls`'s orphan check) is **one call per app**, run 12-wide in parallel with
-a progress line. On a 38-app tenant that is ~2s, not instant — and the spinner exists so you can
-see it working rather than guess.
+a progress line. On a 38-app tenant that is ~2s. A spinner shows progress during the scan.
 
 Shortcuts when you don't need the scan:
 ```
@@ -55,7 +53,7 @@ ascend reports                 # cheap columns; --detail adds a call per run
 ## Retries and pooled connections
 
 Pooled keep-alive sockets go stale when the server closes an idle connection, which surfaces as
-`RemoteDisconnected`. Idempotent methods (GET/HEAD/OPTIONS) retry automatically. **POSTs do not** —
-replaying one could create a second app or assessment. Instead, when a create hits a transport
-error the CLI **verifies against the server** before reporting, so you never get "failed" for
-something that actually succeeded (which would invite a destructive retry).
+`RemoteDisconnected`. Idempotent methods (GET/HEAD/OPTIONS) retry automatically. **POSTs do not**,
+because replaying one could create a second app or assessment. When a create hits a transport
+error the CLI **verifies against the server** before reporting, so a create that actually succeeded
+is not reported as failed.

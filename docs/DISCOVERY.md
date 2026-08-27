@@ -1,13 +1,12 @@
-# Discovery pipeline — `capture → classify → compose → validate → iterate`
+# Discovery pipeline: `capture → classify → compose → validate → iterate`
 
 > Internals of how `ascend adapter build` derives an adapter. For the user-facing guide (sources,
 > auth flags, the browser fallback) see [BUILD_ADAPTER.md](BUILD_ADAPTER.md).
 
 
-Building an adapter for a new target is not "pick one of N classes". It is
-**detecting one value per orthogonal layer** from captured evidence, composing
-those values into a runnable config, and then **proving that config against the
-live target** before it is allowed to ship. This is the deterministic
+Building an adapter for a new target detects one value per orthogonal layer from
+captured evidence, composes those values into a runnable config, and proves that
+config against the live target before it ships. This is the deterministic
 `build-adapter` procedure from [`CAPABILITY_MATRIX.md`](CAPABILITY_MATRIX.md),
 implemented in `runtime/discovery/` and `runtime/layers/`.
 
@@ -36,7 +35,7 @@ and `iterate` touch the live target, and only when called.
 
 ---
 
-## 1. `discover` — gather evidence
+## 1. `discover`: gather evidence
 
 Evidence is either a **HAR export** (browser DevTools → Save all as HAR) or a
 list of captured request/response **pairs**. Normalized form:
@@ -66,10 +65,10 @@ report = classify_evidence([ {"request": {...}, "response": {...}} ])
 
 ---
 
-## 2. `classify` — one bounded classifier per layer
+## 2. `classify`: one bounded classifier per layer
 
 `classify_evidence` first picks the **chat pair** (the request that carries the
-scored prompt/answer — non-asset, prompt-like body, chat-ish response), then runs
+scored prompt/answer: non-asset, prompt-like body, chat-ish response), then runs
 six independent classifiers. Each returns
 `{value, params, confidence (0–1), evidence}`.
 
@@ -78,7 +77,7 @@ six independent classifiers. Each returns
 | **transport** (L1) | response content-type & shape | `rest_json` (application/json), `sse` (text/event-stream), `ndjson`, `websocket` (HTTP 101 / captured frames), `poll` (submit→id then a separate GET) |
 | **auth** (L2) | which header/cookie/query carries a secret; whether a login/token call *precedes* the chat request and its value **reappears** downstream | `none`, `static` (bearer / api_key header·query / basic / cookie), `oauth2` (token endpoint + reused `access_token`), `csrf` (token fetched then echoed), `derived_multihop` (login value chained in) |
 | **auth_lifecycle** (L3) | `401/403 → retry` patterns, JWT `exp`, `Set-Cookie` churn | `static`, `refresh_on_ttl`, `reauth_on_401`, `cookie_rotation` |
-| **session** (L4) | **id-flow** — a response id reappearing in a later request URL/body; a mandatory greeting | `stateless`, `create_session`, `create_conversation`, `warmup`, `multi_turn` |
+| **session** (L4) | **id-flow**: a response id reappearing in a later request URL/body; a mandatory greeting | `stateless`, `create_session`, `create_conversation`, `warmup`, `multi_turn` |
 | **identity** (L5) | mostly an ROE choice; per-user rate-limit / 429 hints | `fixed` (+ a rotation hint when rate-limit signals appear) |
 | **rate** (L6) | observed request spacing (HAR timestamps) → `qpm`; concurrency from the session verdict | `qpm`, `max_workers` (1 stateful / 10 stateless) |
 
@@ -88,7 +87,7 @@ auth params instead carry an `env:` `value_ref` placeholder (e.g.
 
 ---
 
-## 3. `compose` — pick the closest adapter + its knobs
+## 3. `compose`: pick the closest adapter + its knobs
 
 `compose(classified)` maps the detected transport to the closest of the 11
 existing adapters and fills in its known config keys:
@@ -103,7 +102,7 @@ existing adapters and fills in its known config keys:
 | `poll` | `session_api` (submit + fetch approximation; verify polling) |
 
 **Platform host hints override the transport pick** (these are integration
-*types*, not customer names): a `salesforce-scrt` host → `scrt2_direct`,
+*types*): a `salesforce-scrt` host → `scrt2_direct`,
 `einstein/ai-agent` → `agentforce`, `directline`/`powerplatform` →
 `copilot_studio`, `slack.com` → `slack_direct`, `reasoningEngines`/`:streamQuery`
 → `vertex_ai`, `connectparticipant` → `amazon_connect`.
@@ -136,7 +135,7 @@ The composed config also carries the layer blocks used by `runtime/layers/`:
 
 ---
 
-## 4. `validate` — the HARD GATE
+## 4. `validate`: the hard gate
 
 A composed config is **not usable** until it has produced a clean answer from the
 live target. `validate_config` resolves the `auth` block from the environment
@@ -157,7 +156,7 @@ back (and, when `expected_substr` is given, it matched). Ship a config only when
 
 ---
 
-## 5. `iterate` — resolve a shaky layer
+## 5. `iterate`: resolve a low-confidence layer
 
 When a layer is low-confidence, the exact knob is often one of a small, known set
 (WebSocket `json` vs `text` framing; `done_when` vs `idle_ms`; an `sse` vs
@@ -179,7 +178,7 @@ result = iterate(
 Each alternate is deep-merged onto the base config, so an override only needs to
 name the field(s) it changes. On total failure `iterate` hands back the raw
 evidence and a `low` confidence marker so an operator or agent can resolve the one
-flagged layer by hand — **never ship an unvalidated config.**
+flagged layer by hand. Never ship an unvalidated config.
 
 ---
 
@@ -187,27 +186,27 @@ flagged layer by hand — **never ship an unvalidated config.**
 
 `compose` emits the config; these classes consume it at runtime.
 
-- **`layers.identity.IdentityManager`** (L5) — pure, deterministic selection of
+- **`layers.identity.IdentityManager`** (L5): pure, deterministic selection of
   the identity vars for a conversation key / probe index. Modes: `fixed`,
   `rotate_per_conversation` (stable hash into the pool), `rotate_per_n`
   (`pool[(index // n) % len]`), `fresh_per_probe` (pool-indexed or generated from
   a `{{N}}` template). No network, no clock.
-- **`layers.auth.AuthProvider`** (L2) — turns the `auth` block into
+- **`layers.auth.AuthProvider`** (L2): turns the `auth` block into
   `AuthMaterial` (headers / cookies / params / body-vars). `none` and `static`
   need no network; `oauth2` / `csrf` / `derived_multihop` make timed HTTP calls
-  **only** inside `.materialize()`. Every secret is an `env:` reference — an
+  **only** inside `.materialize()`. Every secret is an `env:` reference. An
   inline literal is refused by `resolve_secret_ref`.
-- **`layers.auth.AuthLifecycle`** (L3) — pure decisions about *when* to refresh:
+- **`layers.auth.AuthLifecycle`** (L3): pure decisions about *when* to refresh:
   `static`, `refresh_on_ttl` (fixed TTL or JWT `exp`), `reauth_on_401`
   (`should_reauth(status)`), `cookie_rotation` (`note_response` + interval).
 
 ---
 
-## Why deterministic beats monolithic
+## Layer composition and preset adapters
 
 Finite layers × a bounded classifier per layer = coverage of the whole
 combinatorial space. A new target that is "SSE transport + oauth2 + per-N
-identity rotation" needs no new adapter class — it is one value per layer,
+identity rotation" needs no new adapter class. It is one value per layer,
 composed and validated. The monolithic preset adapters (`agentforce`,
 `copilot_studio`, `scrt2_direct`, `session_api`, `amazon_connect`,
 `slack_direct`, `vertex_ai`) remain as pinned compositions and golden references,
@@ -227,29 +226,29 @@ classifiers used for HAR input. A real browser is used deliberately:
 
 * bot protection (Cloudflare/Akamai) rejects plain HTTP clients but accepts a real browser;
 * a HAR export **loses WebSocket frames** and redacts auth headers;
-* the page authenticates itself, so cookies/SSO/CSRF come for free.
+* the page authenticates itself, so cookies/SSO/CSRF are already present.
 
-### Accuracy rules that keep it from being confidently wrong
+### Accuracy rules
 
-1. **Ground truth beats heuristics.** During a live capture we know exactly what we typed, so
+1. **The typed prompt is ground truth.** During a live capture the typed prompt is known, so
    the chat call is the request whose body *contains that prompt*. This is checked first and
    overrides every scoring heuristic.
 2. **A WebSocket is only the transport if it carried the conversation.** Pages routinely open
-   analytics/personalization sockets; a socket with no frames, or one that never carried our
+   analytics/personalization sockets; a socket with no frames, or one that never carried the
    prompt, is ignored. (Without this rule a marketing vendor's socket wins at 0.9 confidence.)
-3. **Low confidence is reported, never hidden.** Unresolved layers are listed explicitly and the
+3. **Low confidence is reported.** Unresolved layers are listed explicitly and the
    config is not marked usable until `ascend adapter validate` passes against the live target.
 
-### Known limits (degrade, don't fail)
-* SPA timing, shadow DOM and cross-origin iframes can hide the input — the capture still records
+### Known limits
+* SPA timing, shadow DOM and cross-origin iframes can hide the input. The capture still records
   the page bootstrap, and the evidence JSON can be classified manually.
 * Multi-step flows may need you to drive the widget yourself while the capture records.
 
 
-## "What if the customer has no Chromium, or won't allow browser recording?"
+## Running without a browser
 
 **The browser is only ever used for DISCOVERY, and discovery is optional.** Running an
-assessment — the thing that touches the customer's target in production — is pure HTTP:
+assessment, which touches the customer's target in production, is pure HTTP:
 `ascend bridge start` never launches a browser, never records a screen, and has no
 Playwright dependency in its path. If you already know the contract, you never need a
 browser at all.
@@ -258,20 +257,20 @@ Four ways to obtain a contract, in order of least customer friction:
 
 | Path | Browser needed? | When to use |
 |---|---|---|
-| **`--har <file>`** | No (customer uses their own browser) | Customer exports a HAR from their normal DevTools session and sends it. Nothing of ours runs on their machine. Note a HAR loses WebSocket frames. |
+| **`--har <file>`** | No (customer uses their own browser) | Customer exports a HAR from their normal DevTools session and sends it. Nothing runs on their machine. Note a HAR loses WebSocket frames. |
 | **Hand-written config** | No | The contract is already documented (vendor API docs, an internal spec). Write the config and go straight to `ascend adapter validate`. |
-| **`--manual`** | Yes, but a human drives | We open the page and record; *you* click and type. No automation touches the widget — useful when automation can't reach it, or when policy forbids automated interaction. |
-| **`--url` (automated)** | Yes | Fastest. Our automation opens the widget and sends one benign prompt. |
+| **`--manual`** | Yes, but a human drives | The tool opens the page and records; *you* click and type. No automation touches the widget. Useful when automation can't reach it, or when policy forbids automated interaction. |
+| **`--url` (automated)** | Yes | Fastest. The automation opens the widget and sends one benign prompt. |
 
 Chromium install: `pip install playwright && playwright install chromium` (~150MB, local
 only). If Playwright is absent, `--url`/`--manual` fail with a clear message and every
 other path still works.
 
-### Capture is verified, never assumed
+### Capture is verified
 
-A capture only counts if the prompt we typed **appears in real traffic** (a request body or
-a WebSocket frame). Typing into a box proves nothing — a site search field accepts text
-happily. When verification fails, discover **writes nothing and exits non-zero**:
+A capture only counts if the typed prompt **appears in real traffic** (a request body or
+a WebSocket frame). Typing into a box proves nothing. A site search field accepts text
+too. When verification fails, discover **writes nothing and exits non-zero**:
 
 ```
 [capture] prompt sent .... YES
@@ -280,14 +279,14 @@ error: capture did not deliver the prompt to the target, so no contract can be d
   Nothing was written: an unverified capture cannot produce a real config.
 ```
 
-This matters because the alternative — emitting a plausible-looking config built from page
-bootstrap traffic — is a confidently wrong answer, the worst failure mode for a discovery
-tool. Measured on a live hunt across 20 public sites, the naive version "succeeded" on
-sites where it had actually typed into a search box and captured nothing.
+The alternative, emitting a plausible-looking config built from page bootstrap
+traffic, produces a confidently wrong answer. Measured on a live hunt across 20
+public sites, the naive version "succeeded" on sites where it had actually typed
+into a search box and captured nothing.
 
-### Picking the right input (not the search box)
+### Picking the right input
 
-Candidate inputs are **scored**, not first-matched: `textarea`/`contenteditable`/`role=textbox`
+Candidate inputs are **scored**: `textarea`/`contenteditable`/`role=textbox`
 score up; chat-ish `placeholder`/`aria-label`/`id` score up; anything matching
 search/zip/email/login scores **down** and is never used; inputs inside a chat-vendor iframe
-score up. We then press Enter and, if that does not submit, click a nearby send button.
+score up. The tool then presses Enter and, if that does not submit, clicks a nearby send button.

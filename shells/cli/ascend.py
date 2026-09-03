@@ -174,6 +174,33 @@ def _unwrap_list(payload, *keys):
     return []
 
 
+def _catalog_control_ids(client):
+    """Every non-deprecated control id in the platform catalog.
+
+    The platform accepts exactly ONE shape for the control selection: `custom` plus an explicit
+    id list. Verified live against v3: `control_type: "all"` is rejected 400 ("rejected by the
+    upstream service") and so is omitting the field. So "test everything" has to be spelled out,
+    and any command that registers an app without --controls has to resolve the catalog here
+    rather than send a payload that can never succeed.
+    """
+    try:
+        raw = client.list_controls()
+        # the catalog comes back as {"object", "controls": [...], "categories": [...]}
+        rows = (raw.get("controls") if isinstance(raw, dict) else None) or _unwrap_list(raw)
+        ids = [r.get("id") for r in rows
+               if isinstance(r, dict) and r.get("id") and not r.get("deprecated")]
+    except Exception as e:
+        _die(f"no --controls given, and the control catalog could not be read "
+             f"({type(e).__name__}). The platform requires an explicit control set.\n"
+             f"  list them:  ascend controls list",
+             error_code="controls_unavailable")
+    if not ids:
+        _die("no --controls given and the control catalog came back empty — the platform "
+             "requires an explicit control set.\n  list them:  ascend controls list",
+             error_code="controls_unavailable")
+    return ids
+
+
 def _resolve_app(client, ref):
     """Accept an aapp_ id or a name; return the app id."""
     if not ref:
@@ -453,27 +480,7 @@ def cmd_app_create(args):
         ctrl = v["valid"] or ctrl
 
     if not ctrl:
-        # The platform accepts exactly ONE shape for the control selection: `custom` plus an
-        # explicit id list. Verified live against v3: `control_type: "all"` is rejected 400
-        # ("rejected by the upstream service") and so is omitting the field. So "test everything"
-        # has to be spelled out. Resolve the catalog here rather than send a payload that can
-        # never succeed — `app create --type bridge` with no --controls used to fail 100% of the
-        # time with an error that named none of this.
-        try:
-            raw = c.list_controls()
-            # the catalog comes back as {"object", "controls": [...], "categories": [...]}
-            rows = (raw.get("controls") if isinstance(raw, dict) else None) or _unwrap_list(raw)
-            ctrl = [r.get("id") for r in rows
-                    if isinstance(r, dict) and r.get("id") and not r.get("deprecated")]
-        except Exception as e:
-            _die(f"no --controls given, and the control catalog could not be read "
-                 f"({type(e).__name__}). The platform requires an explicit control set.\n"
-                 f"  list them:  ascend controls list",
-                 error_code="controls_unavailable")
-        if not ctrl:
-            _die("no --controls given and the control catalog came back empty — the platform "
-                 "requires an explicit control set.\n  list them:  ascend controls list",
-                 error_code="controls_unavailable")
+        ctrl = _catalog_control_ids(c)
         _say(args, f"no --controls given — registering with all {len(ctrl)} catalog controls")
 
     sev = _parse_kv_pairs(getattr(args, "category_severity", None), "category-severity")
@@ -2820,6 +2827,15 @@ def cmd_onboard(args):
             _ok("note: --controls / --system-prompt are ignored when adopting an existing app; "
                 "change them with `ascend app update`")
     else:
+        if not controls:
+            # Without this, build_thin_spec sends `control_type: "all"`, which the platform
+            # rejects 400 — so `target add` with no --controls could never register anything.
+            # Same contract as `app create`: the control set has to be spelled out. See
+            # _catalog_control_ids. Only the create path needs it; the adopt branch above
+            # ignores --controls entirely, so resolving the catalog there would be 62 wasted
+            # ids and a misleading log line.
+            controls = _catalog_control_ids(c)
+            _ok(f"no --controls given — registering with all {len(controls)} catalog controls")
         app = c.create_app(api.build_thin_spec(
             name=args.name or name, system_prompt=args.system_prompt or name,
             control_ids=controls, assessment_size=args.size, qpm=args.qpm))

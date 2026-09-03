@@ -6,6 +6,13 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PY="${ASCEND_PYTHON:-}"
+# A clone's own .venv comes BEFORE any PATH python3. The CLI's one hard dependency is
+# `requests`, which a system python3 almost never has — so falling through to PATH first made
+# every command in a fresh shell die on "No module named 'requests'" while the venv sat right
+# here unused. An explicit $ASCEND_PYTHON still wins.
+if [ -z "$PY" ] && [ -x "$HERE/.venv/bin/python" ]; then
+  PY="$HERE/.venv/bin/python"
+fi
 if [ -z "$PY" ]; then
   for c in python3 python; do command -v "$c" >/dev/null 2>&1 && { PY="$c"; break; }; done
 fi

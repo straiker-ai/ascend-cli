@@ -17,23 +17,6 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 
 
-# The corpora capture argparse output, and argparse's own wording is Python-version dependent:
-# 3.10 renamed the "optional arguments:" section header to "options:". A corpus recorded on 3.12
-# therefore fails on 3.9 for a reason that has nothing to do with this project — the CLI itself
-# works fine there. Two spurious failures that a contributor cannot tell apart from a real
-# regression is worse than no check, so the comparison is pinned to the version that recorded it.
-#
-# This is NOT a way to dodge a failure: the corpora exist to prove OUR output is stable, and one
-# canonical interpreter is the only way to make that a meaningful claim. Logic regressions are
-# still caught on every version in the matrix by the rest of the suite.
-CORPUS_PYTHON = (3, 12)
-_wrong_python = pytest.mark.skipif(
-    sys.version_info[:2] != CORPUS_PYTHON,
-    reason=f"corpus is recorded on Python {CORPUS_PYTHON[0]}.{CORPUS_PYTHON[1]}; argparse "
-           f"section headers differ across versions (3.10 renamed 'optional arguments:' to "
-           f"'options:'), so a cross-version diff reports a difference this project did not make")
-
-@_wrong_python
 def test_plain_output_matches_the_golden_corpus():
     r = subprocess.run([sys.executable, str(REPO / "scripts" / "golden_output.py"), "--check"],
                        capture_output=True, text=True, cwd=str(REPO), timeout=600)

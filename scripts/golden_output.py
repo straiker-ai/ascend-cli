@@ -21,6 +21,7 @@ to re-record and bury whatever it was protecting.
 """
 import argparse
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -50,19 +51,15 @@ ENV = {"NO_COLOR": "1", "ASCEND_NO_SPINNER": "1", "ASCEND_SKIP_TENANT_CHECK": "1
 
 
 def _normalize(text):
-    """Strip anything machine-specific so the corpus is comparable in ANY checkout.
+    """Delegates to the ONE normalizer — see scripts/corpus_normalize.py.
 
-    The first recording baked in the absolute path of the clone it was made in, so the corpus
-    passed on exactly one machine and failed everywhere else -- which makes it worthless as a
-    shared gate, and reads as a real regression to whoever hits it first.
+    This was a private copy, duplicated verbatim in back_compat.py, and the two had already
+    drifted: an argparse fix landed here and not there, so identical CLI output compared equal in
+    one gate and unequal in the other.
     """
-    repo = str(REPO)
-    home = os.path.expanduser("~")
-    out = text.replace(repo + os.sep, "<REPO>/").replace(repo, "<REPO>")
-    out = out.replace(home + os.sep, "<HOME>/").replace(home, "<HOME>")
-    # macOS reports /private/tmp for /tmp; either spelling must compare equal
-    out = out.replace("/private/tmp", "/tmp")
-    return out
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from corpus_normalize import normalize
+    return normalize(text, REPO)
 
 
 def run(argv):

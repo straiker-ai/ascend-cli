@@ -95,12 +95,10 @@ ENV = {"NO_COLOR": "1", "ASCEND_NO_SPINNER": "1", "ASCEND_SKIP_TENANT_CHECK": "1
 
 
 def _normalize(text):
-    """Strip anything machine-specific so the corpus holds in ANY checkout."""
-    repo, home = str(REPO), os.path.expanduser("~")
-    out = text.replace(repo + os.sep, "<REPO>/").replace(repo, "<REPO>")
-    out = out.replace(home + os.sep, "<HOME>/").replace(home, "<HOME>")
-    out = out.replace("/private/tmp", "/tmp")   # macOS spells /tmp both ways
-    return out
+    """Delegates to the ONE normalizer — see scripts/corpus_normalize.py."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from corpus_normalize import normalize
+    return normalize(text, REPO)
 
 
 def run(argv):

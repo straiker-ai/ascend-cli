@@ -1,0 +1,120 @@
+# CI — the gates that already existed, made unskippable.
+#
+# Before this file, `.github/` contained only dependabot.yml. The test suite, the golden output
+# corpus, the back-compat corpus and the command-map check all existed and all ran only when
+# somebody remembered to run them. Everything that shipped broken this release shipped green,
+# because "green" meant "green on the machine that wrote it".
+#
+# Two failures from this release are the reason each job below exists:
+#
+#   * a fix was written, tested locally, and never committed — `main` printed one thing while the
+#     docs said another for half a day. A push-triggered run on the merge result is what catches
+#     that, because it tests the repository rather than a working tree.
+#   * two test files passed alone and failed in the full run (a closed event loop leaked between
+#     them). Order-dependent red is indistinguishable from a real regression, so the suite runs
+#     whole, in one process, exactly as a contributor would run it.
+#
+# Deliberately NOT here: `scripts/live_matrix.py`. It drives real agents and a real tenant with a
+# real PAT, so it cannot run on a fork PR without handing a token to untrusted code. It stays a
+# release step — see docs/CHANGE_CONTROL.md.
+
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor from pyproject.toml (`requires-python = ">=3.9"`) and a current release.
+        # A claim of 3.9 support that nothing runs on 3.9 is a claim, not a fact.
+        python: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # `tests/test_fixtures_are_tracked.py` shells out to `git ls-files` to prove a fixture
+          # is committed rather than merely present. That needs real git history, not an export.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install pytest
+
+      - name: Test suite
+        # One process, whole suite, no per-file invocation: running files separately is what hid
+        # an order-dependent failure across 14 tests.
+        #
+        # `-rs` prints the skip reasons. The golden and back-compat CORPORA are pinned to the
+        # interpreter that recorded them (3.12) and skip elsewhere, because argparse's own wording
+        # is version-dependent -- 3.10 renamed "optional arguments:" to "options:", so a corpus
+        # recorded on 3.12 reports a diff on 3.9 that this project did not cause. Verified: without
+        # that pin, this matrix leg was RED on arrival. A silent skip would be the wrong trade, so
+        # the reasons are printed.
+        run: python -m pytest tests/ -q -rs
+
+  gates:
+    # The three corpora that encode promises to people already running the CLI.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Back-compat (33 pre-1.1 command forms)
+        # The CVS gate. A customer mid-engagement is scripting these; changing one is a decision,
+        # not a side effect. Re-recording to make this pass is the wrong fix.
+        run: python scripts/back_compat.py --check
+
+      - name: Golden output (13 cases)
+        # Piped stdout is an interface. `ascend --help | grep` lives in customer runbooks.
+        run: python scripts/golden_output.py --check
+
+      - name: Command reference is current
+        # docs/COMMAND_MAP.md is GENERATED from the live parser. If this fails, regenerate and
+        # commit — do not hand-edit the file.
+        run: python scripts/gen_command_map.py --check
+
+  packaging:
+    # Catches the version-bump half-done, and proves a clean install actually runs.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install from a clean tree
+        run: |
+          python -m pip install --upgrade pip
+          pip install .
+      - name: The installed CLI runs and reports a version
+        # Runs the INSTALLED entry point, not the working tree — the distinction that would have
+        # caught a fix which existed locally and was never committed.
+        run: |
+          cd "$RUNNER_TEMP"
+          ascend version
+          ascend --help > /dev/null

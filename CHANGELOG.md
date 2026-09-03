@@ -7,6 +7,41 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **`target add` can now onboard a target that is behind a login.** Driven against a matrix of
+  auth-gated agents, 4 of 8 schemes could not be onboarded through the primary command at all, and
+  the cause was three seams that were built and never joined — not missing capability.
+  `runtime/layers/auth.py` has implemented `static`/`oauth2`/`csrf`/`derived_multihop` plus four
+  refresh lifecycles all along, and the bridge re-authenticates before every probe; nothing on
+  `target add` could describe a handshake to it. Measured after: **8 of 8** gated schemes onboard
+  with a real answer (api-key header/query, basic, access-code, token-ttl, OAuth2 client
+  credentials, cookie session, CSRF); HMAC and per-request nonce are refused and routed to
+  `--scaffold`, which is correct — a per-request signature is not static config.
+
+  - **The login flow was orphaned.** `_login_for_token` computed a proper `derived_multihop` block
+    with a `reauth_on_401` lifecycle, and `_apply_login_auth` wrote one onto a config — but each
+    had exactly one caller, on different commands, and neither path ran both. So `adapter build
+    --login-url` shipped a *frozen* `Authorization: Bearer <token>` and no auth block, precisely the
+    failure its own comment says the mechanism exists to prevent; a 60-second token was dead 70
+    seconds later. One `_prepare_target_auth` now runs the exchange for both commands and both
+    write paths attach the recipe. The one-shot token is stripped from the written config: it
+    pinned an expiring credential, shadowed the re-minted one, and put a live secret in a file.
+  - **`target add` lacked the flags its own error recommends.** The 401 hint named `--basic`,
+    `--cookie` and `--login-url`; the parser registered none of them, so following the CLI's
+    printed advice returned `unrecognized arguments`. One shared `_add_target_auth_args` block now
+    feeds `target add`, `onboard`, `adapter build`, `map` and `discover` — the primary command had
+    been strictly *less* capable for auth than the one 1.1.2 demoted. No flag was removed anywhere.
+  - **`--login-body` was JSON-only**, so RFC 6749 `client_credentials` — form-encoded, and the most
+    common enterprise flow — could not be expressed on any command. Shape now decides: a JSON
+    object is JSON, `a=b&c=d` is form-encoded, and the recipe replays with whichever encoding the
+    live exchange actually succeeded with.
+  - **New: `--login-method GET`, `--token-regex`, `--token-header`.** A GET bootstrap that sets a
+    session cookie, or embeds a CSRF token in HTML to be echoed in its own header, is a different
+    shape from a POST login and just as common. Neither could be expressed before.
+  - The auth error now names only flags the printing command accepts, and says plainly that a
+    signed request needs a custom adapter.
+
 ### Added
 
 - **CI (workflow pending a token scope — see `docs/CHANGE_CONTROL.md`).** `.github/` contained only `dependabot.yml`. The test suite, the back-compat corpus, the

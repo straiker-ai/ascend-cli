@@ -1956,40 +1956,60 @@ def _login_for_token(args):
     AND an `auth` block so the bridge re-authenticates on its own during a long run."""
     import requests
     url = args.login_url
-    try:
-        body = json.loads(args.login_body) if args.login_body else {}
-    except json.JSONDecodeError as e:
-        _die(f"--login-body is not valid JSON: {e}")
+    body, form = _parse_login_body(args.login_body)
     print(f"[build] logging in at {url} ...", file=sys.stderr)
     try:
-        r = requests.post(url, json=body, timeout=args.timeout,
-                          verify=not getattr(args, "insecure", False),
-                          allow_redirects=True)
+        method = (getattr(args, "login_method", None) or "POST").upper()
+        # A GET bootstrap carries no body — sending one makes some servers 400, and there is
+        # nothing to send anyway: the point of the GET is the Set-Cookie or the embedded token.
+        kw = {} if method == "GET" else (
+            {"data": form} if form is not None else {"json": body})
+        r = requests.request(method, url, timeout=args.timeout,
+                             verify=not getattr(args, "insecure", False),
+                             allow_redirects=True, **kw)
     except requests.RequestException as e:
         _die(f"login request failed: {e}", code=EXIT_ERROR)
     if r.status_code >= 400:
         _die(f"login returned HTTP {r.status_code}: {r.text[:200]}", code=EXIT_ERROR)
     headers = {}
-    # 1) a token in the JSON body at --token-path
     tok = None
-    try:
-        obj = r.json()
-        tok = obj
-        for part in str(args.token_path).split("."):
-            tok = tok.get(part) if isinstance(tok, dict) else None
-    except ValueError:
-        tok = None
+    # 0) a token matched by regex — the only way to reach one embedded in an HTML bootstrap page,
+    #    e.g. <meta name="csrf-token" content="...">, which no dot-path can address.
+    if getattr(args, "token_regex", None):
+        m = re.search(args.token_regex, r.text or "")
+        if m:
+            tok = m.group(1) if m.groups() else m.group(0)
+    # 1) a token in the JSON body at --token-path
+    if tok is None:
+        try:
+            obj = r.json()
+            tok = obj
+            for part in str(args.token_path).split("."):
+                tok = tok.get(part) if isinstance(tok, dict) else None
+        except ValueError:
+            tok = None
+    # Which header the token rides in. `Authorization: Bearer <tok>` is the common case, but a
+    # CSRF token is echoed verbatim in its own header — sending that as a bearer authenticates
+    # nothing, and the target's 403 says "bad or missing X-CSRF-Token" while the operator stares
+    # at a token they can see is correct.
+    hdr = getattr(args, "token_header", None)
     if tok:
-        headers["Authorization"] = f"Bearer {tok}"
-        print(f"[build] got a token at '{args.token_path}' ({len(str(tok))} chars)", file=sys.stderr)
-    # 2) otherwise ride the session cookie the login set
-    elif r.cookies:
+        headers[hdr or "Authorization"] = str(tok) if hdr else f"Bearer {tok}"
+        where = "the regex" if getattr(args, "token_regex", None) else f"'{args.token_path}'"
+        print(f"[build] got a token via {where} ({len(str(tok))} chars)"
+              f"{' -> ' + hdr if hdr else ''}", file=sys.stderr)
+    # 2) ALSO ride any cookie the bootstrap set. Not `elif`: a CSRF bootstrap commonly sets a
+    #    session cookie AND embeds a token, and the target checks both.
+    if r.cookies:
         jar = "; ".join(f"{c.name}={c.value}" for c in r.cookies)
         headers["Cookie"] = jar
-        print(f"[build] no token at '{args.token_path}'; using the login session cookie", file=sys.stderr)
-    else:
-        _die(f"login succeeded but no token at '{args.token_path}' and no session cookie was set.\n"
-             f"  response: {r.text[:200]}", code=EXIT_ERROR)
+        if not tok:
+            print("[build] no token found; using the session cookie the bootstrap set",
+                  file=sys.stderr)
+    if not headers:
+        _die(f"the login succeeded but produced no credential: nothing at "
+             f"{'the regex' if getattr(args, 'token_regex', None) else repr(args.token_path)} "
+             f"and no cookie was set.\n  response: {r.text[:200]}", code=EXIT_ERROR)
 
     # Record the login as a REPEATABLE recipe, not just the token it produced.
     #
@@ -2003,18 +2023,27 @@ def _login_for_token(args):
     # `derived_multihop` + `reauth_on_401` is exactly this shape: re-issue the login, extract the
     # token again, re-attach it. Values written as `env:NAME` become `inputs` references so the
     # credential itself stays out of the config file.
-    inputs, step_json = {}, {}
-    for k, v in (body or {}).items():
+    inputs, step_body = {}, {}
+    for k, v in ((form if form is not None else body) or {}).items():
         if isinstance(v, str) and v.startswith("env:"):
             var = re.sub(r"[^A-Z0-9]+", "_", k.upper()).strip("_") or "SECRET"
             inputs[var] = v
-            step_json[k] = "{{%s}}" % var
+            step_body[k] = "{{%s}}" % var
         else:
-            step_json[k] = v
-    step = {"method": "POST", "url": url, "json": step_json}
+            step_body[k] = v
+    # Replay with the SAME encoding the exchange just succeeded with. `derived_multihop` reads
+    # `json` or `data` per step, and posting an OAuth2 grant as JSON gets `invalid_client` from a
+    # spec-compliant token endpoint — so a recipe that recorded the wrong one would authenticate
+    # during onboarding and then fail on every re-auth, which is the worst time to find out.
+    _method = (getattr(args, "login_method", None) or "POST").upper()
+    step = {"method": _method, "url": url}
+    if _method != "GET":                 # a GET bootstrap carries no body
+        step.update({"data": step_body} if form is not None else {"json": step_body})
     if tok:
-        step["extract"] = [{"var": "TOKEN", "path": str(args.token_path)}]
-        attach = {"headers": {"Authorization": "Bearer {{TOKEN}}"}}
+        step["extract"] = [{"var": "TOKEN", "regex": args.token_regex} if getattr(args, "token_regex", None)
+                           else {"var": "TOKEN", "path": str(args.token_path)}]
+        attach = {"headers": {hdr: "{{TOKEN}}"} if hdr
+                  else {"Authorization": "Bearer {{TOKEN}}"}}
         lifecycle = "reauth_on_401"
     else:
         # A cookie-based login has nothing to extract: re-running the step re-establishes the
@@ -2122,6 +2151,83 @@ def resolve_out_path(out) -> Path:
     return p
 
 
+def _parse_login_body(raw):
+    """Return ``(json_body, form_body)`` — exactly one is non-None — for ``--login-body``.
+
+    This accepted JSON only, and that made the single most common enterprise auth flow
+    unreachable: **RFC 6749 client_credentials is form-encoded.** Pasting the grant the spec
+    documents, and that every IdP's own docs print --
+
+        --login-body 'grant_type=client_credentials&client_id=…&client_secret=…'
+
+    -- died with ``--login-body is not valid JSON``. The runtime's own OAuth2 materializer has
+    always POSTed form-encoded (`layers/auth.py` uses ``data=``); only this CLI helper disagreed,
+    so a flow the adapter could execute could not be described to it.
+
+    Shape decides, not a flag: a body that parses as a JSON *object* is JSON; otherwise a
+    ``a=b&c=d`` string is form-encoded. Both spellings of an empty body stay JSON ``{}``, which is
+    what the non-OAuth login endpoints in the wild expect.
+    """
+    if not raw or not str(raw).strip():
+        return {}, None
+    text = str(raw).strip()
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, dict):
+            return obj, None
+        # A bare scalar (`"x"`, `5`) is valid JSON but not a body any endpoint accepts; fall
+        # through to the form reading rather than POSTing something meaningless.
+    except json.JSONDecodeError:
+        pass
+    from urllib.parse import parse_qsl
+    # An "=" is required before this is called form-encoded. Without that check `parse_qsl` happily
+    # turns any garbage into a single blank-valued key -- `not json at all` becomes
+    # {"not json at all": ""} -- and the CLI would POST it instead of saying the body is malformed.
+    pairs = parse_qsl(text, keep_blank_values=True) if "=" in text else []
+    if pairs:
+        return None, dict(pairs)
+    _die(f"--login-body is neither JSON nor form-encoded: {text[:80]!r}\n"
+         f"  JSON:  --login-body '{{\"code\":\"1234\"}}'\n"
+         f"  form:  --login-body 'grant_type=client_credentials&client_id=…&client_secret=…'",
+         error_code="bad_login_body")
+
+
+def _prepare_target_auth(args):
+    """Run the login/access-code exchange ONCE, up front, whichever command is onboarding.
+
+    Returns ``(auth_headers, auth_query)`` for the probe, and stashes ``args._login_auth`` so
+    :func:`_apply_login_auth` can attach the *repeatable* recipe to the config that gets written.
+
+    BOTH halves have to run on the same path, and before this they never did:
+
+      * ``_login_for_token`` had exactly one caller, ``cmd_discover`` — it minted a token and
+        flattened it into ``args.header`` as a literal, so `adapter build --login-url` shipped a
+        FROZEN ``Authorization: Bearer …``. The `auth` block it also computed was dropped on the
+        floor, because ``_finish_discovery`` never called ``_apply_login_auth``.
+      * ``_apply_login_auth`` had exactly one caller, ``cmd_onboard`` — which could not run a
+        login at all, because ``--login-url`` was not on its parser.
+
+    So the mechanism whose own comment says it exists to stop "the token expires mid-run, every
+    probe after that 401s" did precisely nothing, on either command. A 60-second token was dead 70
+    seconds later in field testing, and no test covered the pair.
+
+    One function, called by both, is the fix; ``tests/test_auth_flag_parity.py`` asserts both
+    commands call it and that neither re-implements the exchange.
+    """
+    if getattr(args, "proxy", None):                 # honored by requests (probe/spec/validate)
+        os.environ["HTTP_PROXY"] = os.environ["HTTPS_PROXY"] = args.proxy
+    # The exchange runs once; its token/cookie is injected as a header so every source (and the
+    # hard gate, via _target_auth) authenticates with it during THIS run, while the auth block
+    # stashed on args carries the repeatable recipe into the written config.
+    if getattr(args, "login_url", None):
+        login_headers = _login_for_token(args)
+        args.header = (args.header or []) + [f"{k}: {v}" for k, v in login_headers.items()]
+        # Remembered so _apply_login_auth can strip exactly these from the written config: they are
+        # this run's credential, not a durable one, and the auth block re-mints them per probe.
+        args._login_minted_headers = set(login_headers)
+    return _target_auth(args)
+
+
 def _apply_login_auth(cfg, args):
     """Attach the repeatable login recipe recorded by `_login_for_token` to a built config.
 
@@ -2134,6 +2240,23 @@ def _apply_login_auth(cfg, args):
         return cfg
     cfg["auth"] = block["auth"]
     cfg["auth_lifecycle"] = block["auth_lifecycle"]
+    # Drop the ONE-SHOT header the exchange minted for this run. It was injected into args.header
+    # so the probe and the hard gate could authenticate right now, and `_bake_auth` then wrote it
+    # into cfg["headers"] as a literal. Leaving it there is actively harmful in two ways: it pins a
+    # token that is already expiring (and would shadow the freshly minted one the auth block
+    # produces), and it writes a live credential into a file the operator may well commit.
+    #
+    # Exactly the names the exchange minted are removed — recorded by `_prepare_target_auth` rather
+    # than inferred from `attach`, because the cookie path attaches nothing (the session rides the
+    # request jar) yet still injects a `Cookie:` header that would go stale the same way. A genuine
+    # `--header` the operator passed alongside the login survives untouched.
+    minted = {h.lower() for h in (getattr(args, "_login_minted_headers", None) or ())}
+    if minted and isinstance(cfg.get("headers"), dict):
+        kept = {k: v for k, v in cfg["headers"].items() if k.lower() not in minted}
+        if kept:
+            cfg["headers"] = kept
+        else:
+            cfg.pop("headers", None)
     return cfg
 
 
@@ -2226,6 +2349,11 @@ def _finish_discovery(cfg, args, *, source, browser_recipe=None, response_sample
     auth_headers, auth_query = _target_auth(args)
     _bake_auth(cfg, auth_headers, auth_query)
     _bake_body_fields(cfg, _body_fields(args))   # body-carried key/tenant must persist too
+    # Attach the REPEATABLE login recipe, not just the one token the exchange happened to mint.
+    # This call was missing, and its absence is the whole bug: `adapter build --login-url` baked a
+    # frozen `Authorization: Bearer <token>` and no `auth` block, so nothing could re-mint when it
+    # expired mid-run. `cmd_onboard` already made this call; this is the other half.
+    cfg = _apply_login_auth(cfg, args)
     # carry TLS/mTLS options into the written config so runtime/assess use them too
     if getattr(args, "insecure", False):
         cfg["verify_tls"] = False
@@ -2942,7 +3070,7 @@ def cmd_onboard(args):
         # the simple-contract one-liner: one probe, no browser, no adapter to author
         _step(1, total, f"probing {args.api}")
         from runtime.discovery.probe import probe_api, build_config
-        auth_headers, auth_query = _target_auth(args)
+        auth_headers, auth_query = _prepare_target_auth(args)
         api_url = args.api
         if auth_query:
             sep = "&" if "?" in api_url else "?"
@@ -2959,7 +3087,7 @@ def cmd_onboard(args):
     elif getattr(args, "ws", None):
         _step(1, total, f"probing {args.ws}")
         from runtime.discovery.probe import probe_ws, build_ws_config
-        auth_headers, _auth_query = _target_auth(args)
+        auth_headers, _auth_query = _prepare_target_auth(args)
         res = probe_ws(args.ws, prompt=args.prompt or "hello",
                        headers=auth_headers or None,
                        timeout_s=args.timeout or 30)
@@ -3015,7 +3143,17 @@ def cmd_onboard(args):
     except Exception:
         pass
 
+    _before_login = json.dumps(cfg, sort_keys=True, default=str)
     cfg = _apply_login_auth(cfg, args)
+    if json.dumps(cfg, sort_keys=True, default=str) != _before_login and cfg_path:
+        # Every source branch above writes the config as soon as it derives one, and this call
+        # runs after all of them — so the login recipe was being attached to the in-memory dict
+        # and never reaching the file. The config on disk kept a frozen `Authorization` header and
+        # no `auth` block: the exact shape that dies when the token expires mid-run.
+        #
+        # Re-written only when something actually changed, so the no-login path stays byte-identical
+        # and `--config <existing>` is not rewritten for nothing.
+        cfg_path, cfg_name = _write_named_config(cfg, cfg_name, exact=True)
     adapter = args.adapter or cfg.get("adapter")
     if not adapter:
         _die("could not determine the adapter type; set 'adapter' in the config or pass --adapter")
@@ -5376,14 +5514,7 @@ def cmd_discover(args):
         if blocked:
             _die(f"refusing to probe {blocked}. Pass --allow-internal to override.",
                  code=EXIT_USAGE)
-    if getattr(args, "proxy", None):                 # honored by requests (probe/spec/validate)
-        os.environ["HTTP_PROXY"] = os.environ["HTTPS_PROXY"] = args.proxy
-    # A login / access-code exchange runs ONCE, up front; its token/cookie is injected as a
-    # header so every source (and the hard gate, via _target_auth) authenticates with it.
-    if getattr(args, "login_url", None):
-        login_headers = _login_for_token(args)
-        args.header = (args.header or []) + [f"{k}: {v}" for k, v in login_headers.items()]
-    auth_headers, auth_query = _target_auth(args)
+    auth_headers, auth_query = _prepare_target_auth(args)
 
     # ---- non-browser sources -------------------------------------------------
     if getattr(args, "api", None):
@@ -5882,6 +6013,65 @@ Full reference: docs/COMMAND_MAP.md  ·  building adapters: docs/BUILD_ADAPTER.m
 """
 
 
+def _add_target_auth_args(s):
+    """Target-authentication flags, defined ONCE and shared by every command that onboards.
+
+    These lived only on `adapter build`/`map`/`discover`. `target add` — the command 1.1.2 made
+    primary — had just `--bearer`, `--api-key`, `--header` and `--body-field`, which made it
+    strictly LESS capable for auth than the command it demoted.
+
+    That gap was not cosmetic. `runtime/discovery/probe.py` answers a 401 by telling the operator
+    to re-run with `--basic`, `--cookie`, or `--login-url` + `--login-body` + `--token-path` — and
+    `target add` accepted none of them, so following the CLI's own printed advice returned
+    `unrecognized arguments`. A dead end on the documented first step, for the commonest kind of
+    real target there is: one behind a login.
+
+    Defined here rather than copied into both parsers, because the copy is how they diverged in the
+    first place; `tests/test_auth_flag_parity.py` asserts both call this and neither re-declares a
+    flag of its own.
+    """
+    # --- one request's credentials -----------------------------------------------------------
+    s.add_argument("--header", action="append", metavar="'Name: value'",
+                   help="raw header (repeatable), honored by all sources, e.g. 'X-Api-Key: …'")
+    s.add_argument("--bearer", metavar="TOKEN", help="Authorization: Bearer <token>")
+    s.add_argument("--api-key", metavar="NAME:VALUE[:in=header|query]",
+                   help="API key, e.g. 'x-api-key:abc' or 'key:abc:in=query'")
+    s.add_argument("--basic", metavar="USER:PASS", help="HTTP Basic auth")
+    s.add_argument("--cookie", metavar="'k=v; k2=v2'", help="Cookie header for a session-gated target")
+    s.add_argument("--token-file", metavar="PATH", help="read a bearer token from this file")
+    s.add_argument("--body-field", action="append", metavar="key=value",
+                   help="extra JSON body field, repeatable — for agents whose key/tenant lives in "
+                        "the BODY, e.g. --body-field apiKey=abc --body-field workspace=support. "
+                        "Use key:=raw for a non-string literal (true/1/{...}).")
+    # --- login / access-code flow: POST creds, extract a token, then use it -------------------
+    s.add_argument("--login-url", metavar="URL", help="POST here first to exchange creds/code for a token")
+    s.add_argument("--login-body", metavar="JSON|FORM",
+                   help="body for --login-url. JSON ('{\"code\":\"1234\"}') or form-encoded "
+                        "('grant_type=client_credentials&client_id=…') — OAuth2 is form-encoded.")
+    s.add_argument("--token-path", metavar="DOTPATH", default="token",
+                   help="dot-path to the token in the login response (default: token)")
+    # A GET bootstrap is a different shape from a POST login and just as common: a session cookie
+    # handed out by GET /login, or a CSRF token embedded in the HTML of GET /. Neither could be
+    # expressed before, so both failed with the target's own 401/403 and no way forward.
+    s.add_argument("--login-method", choices=["POST", "GET"], default="POST",
+                   help="verb for --login-url (default: POST). GET for a bootstrap page that sets "
+                        "a session cookie or embeds a CSRF token.")
+    s.add_argument("--token-regex", metavar="RE",
+                   help="extract the token with a regex (first capture group) instead of "
+                        "--token-path — for a token embedded in HTML, e.g. "
+                        "'csrf-token\" content=\"([^\"]+)'")
+    s.add_argument("--token-header", metavar="NAME",
+                   help="send the extracted token in this header verbatim (e.g. X-CSRF-Token) "
+                        "instead of as 'Authorization: Bearer <token>'")
+    # --- transport / TLS ----------------------------------------------------------------------
+    s.add_argument("--insecure", action="store_true",
+                   help="skip TLS verification (self-signed internal targets)")
+    s.add_argument("--ca-bundle", metavar="PATH", help="custom CA bundle for TLS verification")
+    s.add_argument("--client-cert", metavar="PATH", help="client certificate (PEM) for mTLS")
+    s.add_argument("--client-key", metavar="PATH", help="client private key (PEM) for mTLS")
+    s.add_argument("--proxy", metavar="URL", help="HTTP(S) proxy for the probe/validate calls")
+
+
 def _add_onboard_args(s, *, require_source):
     """Every argument the onboard flow reads. Shared by `onboard` and `target add` so the two
     cannot drift apart — `target add` takes the same evidence, it just stops once registered."""
@@ -5917,13 +6107,8 @@ def _add_onboard_args(s, *, require_source):
     s.add_argument("--system-prompt", help="what the target is, for the assessment context")
     s.add_argument("--controls", help="comma-separated control ids (validated before the run)")
     s.add_argument("--adapter", help="override the adapter type (default: from the config)")
-    s.add_argument("--bearer", metavar="TOKEN", help="Authorization: Bearer <token> (with --api/--curl)")
-    s.add_argument("--api-key", metavar="NAME:VALUE[:in=header|query]", help="API key (with --api)")
-    s.add_argument("--header", action="append", metavar="'Name: value'", help="raw header (repeatable)")
-    s.add_argument("--body-field", action="append", metavar="key=value",
-                   help="extra JSON body field (repeatable) — for a key/tenant that lives in the body")
+    _add_target_auth_args(s)
     s.add_argument("--prompt-hint", help="with --curl: the literal prompt text used in that command")
-    s.add_argument("--insecure", action="store_true", help="skip TLS verification (self-signed internal)")
     s.add_argument("--size", default="small", choices=["small", "medium", "large"],
                    help="assessment size")
     s.add_argument("--qpm", type=int, default=20, help="queries per minute against the target")
@@ -5957,30 +6142,8 @@ def _add_build_args(s):
     s.add_argument("--spec", metavar="BASE_URL",
                    help="find an OpenAPI/Swagger spec under this base URL and build from it")
     s.add_argument("--har", help="HAR file to classify")
-    # --- target auth (honored by every source; baked into the written config) ---
-    s.add_argument("--header", action="append", metavar="'Name: value'",
-                   help="raw header (repeatable), honored by all sources, e.g. 'X-Api-Key: …'")
-    s.add_argument("--bearer", metavar="TOKEN", help="Authorization: Bearer <token>")
-    s.add_argument("--api-key", metavar="NAME:VALUE[:in=header|query]",
-                   help="API key, e.g. 'x-api-key:abc' or 'key:abc:in=query'")
-    s.add_argument("--basic", metavar="USER:PASS", help="HTTP Basic auth")
-    s.add_argument("--cookie", metavar="'k=v; k2=v2'", help="Cookie header for a session-gated target")
-    s.add_argument("--token-file", metavar="PATH", help="read a bearer token from this file")
-    s.add_argument("--body-field", action="append", metavar="key=value",
-                   help="extra JSON body field, repeatable — for agents whose key/tenant lives in "
-                        "the BODY, e.g. --body-field apiKey=abc --body-field workspace=support. "
-                        "Use key:=raw for a non-string literal (true/1/{...}).")
-    # --- login / access-code flow: POST creds, extract a token, then use it ---
-    s.add_argument("--login-url", metavar="URL", help="POST here first to exchange creds/code for a token")
-    s.add_argument("--login-body", metavar="JSON", help="JSON body for --login-url, e.g. '{\"code\":\"1234\"}'")
-    s.add_argument("--token-path", metavar="DOTPATH", default="token",
-                   help="dot-path to the token in the login response (default: token)")
+    _add_target_auth_args(s)
     s.add_argument("--prompt-hint", help="with --curl: the literal prompt text used in that command")
-    s.add_argument("--insecure", action="store_true", help="skip TLS verification (self-signed internal targets)")
-    s.add_argument("--ca-bundle", metavar="PATH", help="custom CA bundle for TLS verification")
-    s.add_argument("--client-cert", metavar="PATH", help="client certificate (PEM) for mTLS")
-    s.add_argument("--client-key", metavar="PATH", help="client private key (PEM) for mTLS")
-    s.add_argument("--proxy", metavar="URL", help="HTTP(S) proxy for the probe/validate calls")
     s.add_argument("--allow-internal", action="store_true",
                    help="allow link-local/cloud-metadata hosts (169.254/fd00::) — off by default")
     s.add_argument("--timeout", type=float, default=20.0, help="per-request timeout in seconds")

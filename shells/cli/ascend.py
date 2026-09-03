@@ -417,6 +417,41 @@ def _spec_from_config(args, api):
     return out
 
 
+def _resolve_all_controls(c, args, ctrl):
+    """Return an explicit control id list, resolving the whole catalog when none was given.
+
+    The platform accepts exactly ONE shape for the control selection: `control_type: "custom"`
+    plus an explicit id list. `control_type: "all"` is rejected 400 ("the request was rejected by
+    the upstream service") and so is omitting the field, so "test everything" has to be spelled
+    out client-side.
+
+    This lives in one place because it did not, and that cost the release. `cmd_app_create` had
+    the resolution; `cmd_onboard` had `if controls:` with nothing in the else, so it sent
+    control_type "all" and 400'd 100% of the time whenever `--controls` was omitted -- which is
+    the default, and which is the exact command 1.1.2 makes the primary path. Two copies of one
+    rule is how that happens; there is now one copy and two callers.
+    """
+    if ctrl:
+        return ctrl
+    try:
+        raw = c.list_controls()
+        # the catalog comes back as {"object", "controls": [...], "categories": [...]}
+        rows = (raw.get("controls") if isinstance(raw, dict) else None) or _unwrap_list(raw)
+        ctrl = [r.get("id") for r in rows
+                if isinstance(r, dict) and r.get("id") and not r.get("deprecated")]
+    except Exception as e:
+        _die(f"no --controls given, and the control catalog could not be read "
+             f"({type(e).__name__}). The platform requires an explicit control set.\n"
+             f"  list them:  ascend controls list",
+             error_code="controls_unavailable")
+    if not ctrl:
+        _die("no --controls given and the control catalog came back empty — the platform "
+             "requires an explicit control set.\n  list them:  ascend controls list",
+             error_code="controls_unavailable")
+    _say(args, f"no --controls given — registering with all {len(ctrl)} catalog controls")
+    return ctrl
+
+
 def cmd_app_create(args):
     """Create an Ascend application of any of the four types the platform supports.
 
@@ -452,29 +487,7 @@ def cmd_app_create(args):
                  error_code="no_scorable_controls")
         ctrl = v["valid"] or ctrl
 
-    if not ctrl:
-        # The platform accepts exactly ONE shape for the control selection: `custom` plus an
-        # explicit id list. Verified live against v3: `control_type: "all"` is rejected 400
-        # ("rejected by the upstream service") and so is omitting the field. So "test everything"
-        # has to be spelled out. Resolve the catalog here rather than send a payload that can
-        # never succeed — `app create --type bridge` with no --controls used to fail 100% of the
-        # time with an error that named none of this.
-        try:
-            raw = c.list_controls()
-            # the catalog comes back as {"object", "controls": [...], "categories": [...]}
-            rows = (raw.get("controls") if isinstance(raw, dict) else None) or _unwrap_list(raw)
-            ctrl = [r.get("id") for r in rows
-                    if isinstance(r, dict) and r.get("id") and not r.get("deprecated")]
-        except Exception as e:
-            _die(f"no --controls given, and the control catalog could not be read "
-                 f"({type(e).__name__}). The platform requires an explicit control set.\n"
-                 f"  list them:  ascend controls list",
-                 error_code="controls_unavailable")
-        if not ctrl:
-            _die("no --controls given and the control catalog came back empty — the platform "
-                 "requires an explicit control set.\n  list them:  ascend controls list",
-                 error_code="controls_unavailable")
-        _say(args, f"no --controls given — registering with all {len(ctrl)} catalog controls")
+    ctrl = _resolve_all_controls(c, args, ctrl)
 
     sev = _parse_kv_pairs(getattr(args, "category_severity", None), "category-severity")
     if sev:
@@ -2846,6 +2859,10 @@ def cmd_onboard(args):
                  "whose assessments cannot measure anything",
                  error_code="no_scorable_controls")
         controls = v["valid"]
+    # Without this, `target add` with no --controls sent control_type "all" and the platform
+    # refused with a bare "the request was rejected by the upstream service" -- 100% of the time,
+    # on the default invocation of the command 1.1.2 makes primary.
+    controls = _resolve_all_controls(c, args, controls)
     existing_ref = getattr(args, "app", None)
     if existing_ref:
         # Adopt an application that already exists in the Console instead of creating a second

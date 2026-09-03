@@ -5,6 +5,25 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ---
 
+## [Unreleased]
+
+### Fixed
+- **`ascend target add` failed 100% of the time without `--controls`.** The platform accepts
+  exactly one shape for the control selection — `control_type: "custom"` plus an explicit id
+  list — and rejects `control_type: "all"` with a bare 400 ("the request was rejected by the
+  upstream service"). `app create` resolved the whole catalog client-side to avoid that.
+  `cmd_onboard` did not: it had `if controls:` with nothing in the else, so with no `--controls`
+  it sent the rejected shape every time. That is the *default* invocation of the command 1.1.2
+  makes the primary path, and registration is step 3 of 5 — so the adapter was derived and
+  proven against the live target, and then the app could not be created.
+
+  The resolution now lives in one function with two callers, and a source-discipline test
+  asserts both registration paths call it and neither re-implements it. A unit test on the
+  helper alone would have passed against this bug, because the helper was never the broken half
+  — two copies of one rule was the defect.
+
+  Found by recording the docs walkthrough: the failure was captured on screen mid-take.
+
 ## [1.1.2] — 2026-09-03
 
 ### Security

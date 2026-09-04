@@ -3,6 +3,7 @@ $ ascend relay sync --help
 --- stdout
 usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] bridge sync
        [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE] [--no-stop]
+       [--app APP]
 
 options:
   -h, --help            show this help message and exit
@@ -13,3 +14,5 @@ options:
                         Ascend lease-service base URL (where bridges fetch probes and post
                         results) (default: https://ascendai-bridge.prod.straiker.ai)
   --no-stop             only start missing bridges; never stop one (default: False)
+  --app APP             only these apps (repeatable; name or aapp_ id). Default: every app on the
+                        tenant (default: None)

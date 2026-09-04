@@ -47,7 +47,7 @@ Then, day to day:
 ascend target list             # adapter, config, whether registered, whether serving
 ascend target show 'My Bot'    # app id, adapter, endpoint, masked key, last verified reply
 ascend target check 'My Bot'   # re-prove it against the LIVE endpoint, and time it
-ascend target rm 'My Bot'      # delete the application and drop its stored key
+ascend target rm 'My Bot'      # delete the application and drop its stored key (asks on a terminal; --yes skips)
 ```
 
 `target check` is the first thing to run when a run comes back suspiciously clean. It exits
@@ -162,12 +162,14 @@ Non-blocking / scripted variants:
 ascend assess run --app 'My Bot' --name 'run 1' --no-wait --json   # kick off, return now
 ascend assess list --app 'My Bot' --json                           # find the assessment id
 ascend assess status  --app 'My Bot' --assessment <aid>            # poll status/progress
-ascend assess results --app 'My Bot' --assessment <aid>            # summary once complete
+ascend assess results --app 'My Bot'                               # latest finished run (or --assessment <aid>)
 ascend assess pause   --app 'My Bot' --assessment <aid>            # pause / resume as needed
 ascend assess resume  --app 'My Bot' --assessment <aid>
 ```
 
-`--app` accepts an `aapp_` id or a (unique substring of a) name. Add `--json` to any command
+`--app` accepts an `aapp_` id or a (unique substring of a) name — except for commands that change
+or delete an app (`app update`/`delete`, `target rm`, `keys add`/`rm`, `bridge stop`, `assess
+pause`/`resume`, `policy push`), which take the exact name or the id. Add `--json` to any command
 for machine-readable output.
 
 Bridge lifecycle across pause/resume:
@@ -178,7 +180,8 @@ Bridge lifecycle across pause/resume:
 - If state changed in the Console and local bridges drifted, reconcile them:
 
   ```bash
-  ascend bridge sync     # start a bridge for every running/paused app, stop terminal ones
+  ascend bridge sync             # every app you hold a key for; live runs you cannot serve are listed, not failed
+  ascend bridge sync --app 'My Bot'   # just this one
   ```
 
 ---
@@ -234,7 +237,7 @@ ascend doctor            # look for: [ok] tmux present (terminal targets only)
   assessment into a file you can attach or submit.
 - **Gate a pipeline**: `ascend ci --baseline baseline.json` exits `2` on new findings or a
   severity breach, and `1` only if the tool itself failed, so CI can tell them apart.
-- **Keep the evidence**: `ascend chat <config> --out <file.jsonl>` records a session's prompts
+- **Keep the evidence**: `ascend chat <target|config> --out <file.jsonl>` records a session's prompts
   and responses (header-redacted, `0600`); chat is auto-recorded to `captures/` by default.
 
 
@@ -244,7 +247,7 @@ ascend doctor            # look for: [ok] tmux present (terminal targets only)
 Before (or instead of) a full assessment, talk to it directly:
 
 ```bash
-ascend chat mybot
+ascend chat 'My Bot'            # a target name from `target list`, a config name, or a URL
 you › what can you help me with?
 mybot › I can help with orders, returns and billing.
   (412ms · http 200)

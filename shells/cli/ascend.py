@@ -3709,6 +3709,14 @@ def cmd_target_add(args):
     return cmd_onboard(args)
 
 
+def _has_token(args) -> bool:
+    """Is a PAT available at all? `getattr`, not `args.token`: a caller can build the namespace
+    without the global flags (every skill and several tests do), and a command that only WANTS a
+    token must not crash on the absence of the attribute."""
+    return bool(getattr(args, "token", None) or os.environ.get("STRAIKER_PAT")
+                or os.environ.get("STRAIKER_TOKEN"))
+
+
 def cmd_target_list(args):
     """Every target this machine can run: its app, its proven adapter, and whether it is serving."""
     import creds as C
@@ -3716,7 +3724,7 @@ def cmd_target_list(args):
     live = None
     # The list is LOCAL (the key store); asking the platform whether each app still exists is a
     # bonus. With no PAT this used to die on the token check before printing anything.
-    if args.token or os.environ.get("STRAIKER_PAT") or os.environ.get("STRAIKER_TOKEN"):
+    if _has_token(args):
         try:
             live = {a.get("id"): a for a in _unwrap_list(_client(args).list_apps())}
         except Exception:

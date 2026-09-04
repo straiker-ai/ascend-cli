@@ -1705,7 +1705,7 @@ def cmd_assess_run(args):
     import api
     # --no-wait returns {app_id, assessment_id, status}; summarizing that prints a phantom
     # "risk ? score ? probes ?/?" header. Only summarize a real assessment payload.
-    human = (_verdict(res)
+    human = (_verdict(res, detail=getattr(args, "detail", False))
              if isinstance(res, dict) and res.get("category_summary") is not None else None)
     if isinstance(res, dict) and res.get("recovered"):
         # Loud only when the operator has to do something. A run the CLI recovered and confirmed
@@ -7177,6 +7177,12 @@ def build_parser():
     s.add_argument("--recon-controls", metavar="IDS",
                    help="recon control ids for --with-recon/--recon-only (default: the whole recon catalog; "
                         "see `ascend recon controls`)")
+    # `assess run` waits and prints the verdict, so --detail means here what it means on
+    # `assess results`. Without it, the obvious way to ask for findings from the command that just
+    # produced them exited 3 with `unrecognized arguments: --detail`, and the run had to be
+    # re-issued. Observed twice in a row across independent operators.
+    s.add_argument("--detail", action="store_true",
+                   help="show key findings per control when the run completes")
     s.set_defaults(func=cmd_assess_run)
 
     # assess diff — compare two runs (new / resolved / regressed findings)

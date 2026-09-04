@@ -28,6 +28,12 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ### Fixed
 
+- **`assess run --detail` works.** The command waits for the run and prints the verdict, but
+  rejected the flag its sibling `assess results` has always had — so asking the command that just
+  produced the findings to show them exited 3 with `unrecognized arguments: --detail`, before
+  anything started, and the whole run had to be re-issued. Two independent operators hit it in
+  consecutive trials.
+
 - **A recovered assessment that is running no longer reads like a failure.** `assess run`
   absorbs a transport error after the assessment is created — it asks the platform what state the
   run is really in, rather than reporting a failure the operator would retry into a duplicate run.

@@ -2,7 +2,9 @@ $ ascend app delete --help
 --- exit 0
 --- stdout
 usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] app delete
-       [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE] [--keep-key] app
+       [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE] [--keep-key]
+       [--yes]
+       app
 
 positional arguments:
   app                   app name or aapp_ id
@@ -17,3 +19,5 @@ options:
                         results) (default: https://ascendai-bridge.prod.straiker.ai)
   --keep-key            keep the stored bridge key (default: remove it — a key without its app is
                         dead) (default: False)
+  --yes                 skip the confirmation prompt (non-interactive runs never prompt) (default:
+                        False)

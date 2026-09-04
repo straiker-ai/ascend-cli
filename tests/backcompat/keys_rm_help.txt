@@ -2,7 +2,9 @@ $ ascend keys rm --help
 --- exit 0
 --- stdout
 usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] keys rm
-       [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE] [--delete-app] app
+       [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE] [--delete-app]
+       [--yes]
+       app
 
 positional arguments:
   app                   app name or aapp_ id
@@ -17,3 +19,5 @@ options:
                         results) (default: https://ascendai-bridge.prod.straiker.ai)
   --delete-app          also delete the Ascend app (retire the pair: a keyless app can't be
                         served) (default: False)
+  --yes                 skip the confirmation prompt (non-interactive runs never prompt) (default:
+                        False)

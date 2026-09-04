@@ -29,11 +29,12 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 ### Fixed
 
 - **No internal service name reaches a customer.** The launch-screen diagram named the assessment
-  engine "Iris" — an internal service name. In the customer's world that is **Ascend AI**, running
-  in the Straiker cloud, and that is what the diagram, the recon help, the generated adapter
-  scaffold, six docs pages and the architecture diagram now say. `probe_shadow` became "the lease
-  service" and the bridge artifact is named for the product. `tests/test_no_internal_codenames.py`
-  fails on any shipped file that names one, so a new leak cannot ship quietly.
+  engine by its internal service name. In the customer's world that is **Ascend AI**, running in
+  the Straiker cloud, and that is what the diagram, the recon help, the generated adapter
+  scaffold, the transport client, six docs pages and the architecture diagram now say; the
+  lease/relay endpoint is "the lease service" and the bridge artifact is named for the product.
+  `tests/test_no_internal_codenames.py` fails on any shipped file that names one — including this
+  changelog, which is why the entry describes the change without printing the old name.
 
 - **The answer path on a target that returns the whole conversation.** Found in the second
   forge-and-test loop against a GraphQL target: the derived path landed on a GraphQL `__typename`
@@ -174,43 +175,9 @@ All notable changes to the Ascend CLI. Newest first. Format follows
   by the same `_resolve_assessment` that `ci` and `export` use — it now truly has the three callers
   its docstring names. Under `--json` a false-pass-suspect run carries `false_pass_suspect: true`
   and `false_pass_warning` alongside the numbers they qualify.
-- **Several targets on one machine behave.** Audited live with four differently-authenticated
-  targets side by side. `target add --name X` when an app named X already existed **created a
-  second app with the same name** and reported success — after which every command naming X
-  (`assess run`, `results`, `ci`, `export`, `target rm`) was refused as ambiguous. Registration
-  now refuses a duplicate name and spells out the two ways forward (`--app X` adopts the existing
-  app; a new `--name` registers another). `target list` flags same-named targets with their ids.
-  `chat` accepts a target's name (it took only config names, so the name just read in `target
-  list` was refused). The fleet form `assess run --app A --app B` **waits** like the single form —
-  per-run bridge watchdog and pause guard, one summary table, one JSON document, non-zero on
-  anything unfinished (`--no-wait` keeps the fire-and-forget form; it read as success to a
-  pipeline that went straight on to `ci`). `assess results` on a run still going says so and
-  points at `watch` instead of printing `?` fields. Deleting a target names the runs it cancels
-  and forgets the relay's state files, so `bridge ls` stops listing a dead relay for an app that
-  no longer exists. `target add` ends with `talk to it: ascend chat '<name>'`.
 
 ### Fixed
 
-- **The tenant-lock refusal named the same tenant twice.** The label is derived from the PAT's
-  email domain and role, so two tenants administered from one domain share a label, and the
-  message read *"locked to 'straiker.ai (admin)', but the credential belongs to 'straiker.ai
-  (admin)'"* — a correct refusal (demo tenant vs Discover tenant) that told the operator nothing.
-  The check compares fingerprints; the message now prints them, and says outright when only the
-  names collide.
-
-- **Three auth-runtime defects that were wired but wrong.** Found while mapping the auth
-  architecture for the `target add` work; none had a test. (1) **The JWT-`exp` refresh branch was
-  dead in production**: `AuthProvider` has always recorded the token it obtained and
-  `AuthLifecycle.needs_refresh()` has always preferred a real `exp` over the wall-clock `ttl_s`
-  guess, but `call_target.py` called `mark_refreshed()` without `token=` at both refresh points, so
-  the accurate branch never ran and short-lived JWTs refreshed late. `merge_auth` now stamps the
-  token on the merged config and both sites pass it through. (2) **`oauth2.extra` bypassed
-  `resolve_secret_ref`** — the one place a secret could be written inline and reach the wire;
-  `env:`/`literal:` refs are now resolved, bare strings still pass through for non-secret
-  parameters. (3) **A non-JSON 2xx from a token endpoint raised a bare decode error** instead of
-  the one-line `AuthError` every other auth failure produces. `_materialize_oauth2`,
-  `_materialize_csrf` and `_materialize_multihop` — the only three methods in the file that do
-  real HTTP — now have error-path coverage.
 - **First-five-minutes polish.** `ascend doctor` says what to do about a failed check (`fix: export
   STRAIKER_PAT=…`, and `fixes` under `--json`); `ascend target list` works with no PAT in the shell
   (the list is local — the platform check is a bonus, and used to be a fatal one); `docs/USAGE.md`

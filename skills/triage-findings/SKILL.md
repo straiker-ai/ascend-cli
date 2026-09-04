@@ -34,14 +34,11 @@ triage: fix the adapter (timeout / auth — see **build-adapter**) and re-run. A
 auto-paused by the platform after repeated probe failures is the same case.
 
 State the answered/failed counts alongside any number you report, so the reader can see the
-run had teeth. `ascend assess results --app <app> --json` marks such a run itself:
-`false_pass_suspect: true` with a `false_pass_warning` — a pipeline reading the JSON sees the
-warning beside the numbers it qualifies.
+run had teeth.
 
 ## 1. Pull the raw results
 ```
 ascend --json assess results --app <app_or_name> --assessment <assessment_id>
-ascend --json assess results --app <app_or_name>        # the latest finished run
 ```
 Work from the raw finding pairs (the probe and the target's actual response), not
 a pre-summarized score. You are re-judging each flagged finding.

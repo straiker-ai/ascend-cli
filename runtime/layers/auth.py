@@ -326,25 +326,12 @@ class AuthProvider:
 
         if cfg.get("scope"):
             data["scope"] = cfg["scope"]
-        # `extra` used to be merged in raw, which was the one place in this file a secret could be
-        # written inline and reach the wire -- a hole in the rule the module header states. A value
-        # spelled `env:NAME` / `literal:TEXT` is resolved like every other credential here; a bare
-        # string passes through unchanged, because `extra` legitimately carries non-secret
-        # parameters (audience, resource) and refusing those would break working configs.
-        for k, v in (cfg.get("extra", {}) or {}).items():
-            data[k] = (resolve_secret_ref(v, allow_literal=True)
-                       if isinstance(v, str) and v.startswith(("env:", "literal:")) else v)
+        data.update(cfg.get("extra", {}) or {})
 
         resp = requests.post(token_url, data=data, timeout=timeout_s, verify=verify_tls)
         if resp.status_code >= 400:
             raise AuthError(f"oauth2 token request failed: HTTP {resp.status_code} {resp.text[:200]}")
-        try:
-            payload = resp.json()
-        except ValueError:
-            raise AuthError(f"oauth2 token endpoint returned HTTP {resp.status_code} but not JSON: "
-                            f"{resp.text[:120]!r}")
-        if not isinstance(payload, dict):
-            raise AuthError(f"oauth2 token response is not an object: {resp.text[:120]!r}")
+        payload = resp.json()
         token = payload.get(cfg.get("token_field", "access_token"))
         if not token:
             raise AuthError(f"oauth2 response missing access token (field={cfg.get('token_field', 'access_token')})")

@@ -1050,6 +1050,9 @@ def _ensure_bridge(c, app, *, assessment_id=None, args=None):
                 "reason": "native app — Ascend calls it directly (no bridge needed)"}
     if S.is_serving(app_id):
         return {"app_id": app_id, "ensured": True, "reused": True}
+    reclaimed = _reclaim_wedged_relay(S, app_id)
+    if reclaimed.get("error"):
+        return {"app_id": app_id, "ensured": False, "error": reclaimed["error"]}
     t = _target_for(app_id)
     if t.get("skip"):
         return {"app_id": app_id, "ensured": False, "skip": t["skip"]}
@@ -1060,7 +1063,40 @@ def _ensure_bridge(c, app, *, assessment_id=None, args=None):
                 wait_ms=getattr(args, "wait_ms", None))
     if "error" in r:
         return {"app_id": app_id, "ensured": False, "error": r["error"]}
-    return {"app_id": app_id, "ensured": True, "started": True, "pid": r.get("pid")}
+    out = {"app_id": app_id, "ensured": True, "started": True, "pid": r.get("pid")}
+    if reclaimed.get("pid"):
+        out["reclaimed"] = reclaimed["pid"]
+    return out
+
+
+def _reclaim_wedged_relay(S, app_id):
+    """Make room for a new relay when the recorded one is alive but not serving.
+
+    Returns {} when there is nothing to reclaim, {"pid": n} after stopping a wedged relay, or
+    {"error": why} when the relay has to be left alone.
+
+    `is_serving()` is pid-alive AND heartbeat-fresh; `start()` refuses on pid-alive alone. Between
+    those two tests sits a relay that is alive and has not beaten for HEARTBEAT_STALE_S — wedged —
+    and nothing ever replaced it: every watchdog tick printed "a relay is already running for this
+    app" while the run sat paused until its timeout (seen live). A relay that has not beaten in
+    three minutes is answering nobody, so it is stopped and a fresh one started in its place. A
+    relay that was just spawned cannot be mistaken for this one: start() stamps a fresh heartbeat
+    the moment it spawns.
+
+    The one alive-but-silent relay NOT replaced is one that reported a fatal error (a bridge key
+    the lease service rejected, say). A replacement would hit the same wall, so the error is
+    surfaced for the operator instead of churning a new relay into it every three minutes.
+    """
+    if not S.is_running(app_id):
+        return {}
+    pid = S.read_pid(app_id)
+    rec = S.read_status(app_id) or {}
+    if rec.get("state") == "fatal" or rec.get("fatal_error"):
+        return {"error": (f"relay pid {pid} is alive but reported a fatal error and is not serving: "
+                          f"{rec.get('fatal_error') or 'unknown'}. Fix the cause, then "
+                          f"`ascend bridge stop --app <name>` and `ascend bridge start --app <name>`")}
+    st = S.stop(app_id, grace_s=3.0)
+    return {"pid": st.get("pid") or pid}
 
 
 def _ensure_note(res):
@@ -1068,6 +1104,9 @@ def _ensure_note(res):
     if res.get("reused"):
         return "bridge: already serving this app — reused."
     if res.get("started"):
+        if res.get("reclaimed"):
+            return (f"bridge: relay pid {res['reclaimed']} was alive but had stopped answering — "
+                    f"replaced (pid {res.get('pid')}); it self-stops when the run ends.")
         return f"bridge: started for this run (pid {res.get('pid')}); it self-stops when the run ends."
     if res.get("skip") or res.get("error"):
         return (f"! bridge NOT started ({res.get('skip') or res.get('error')}). Probes will go "
@@ -1095,6 +1134,112 @@ def _bind_assessment(app_id, assessment_id):
             S.write_status(app_id, rec)
     except Exception:
         pass
+
+
+PAUSED_NO_BRIDGE_TICKS = 3    # polls a run may sit paused with no relay startable before we give up
+AUTO_RESUME_MAX = 3           # per run: lift a platform pause after an outage; never fight an operator
+HEALTHY_TICKS_TO_FORGET = 5   # running+serving polls after which an old outage no longer explains a pause
+RESUME_SETTLE_TICKS = 3       # polls the platform may still say "paused" after we resumed it
+
+
+class _BridgeUnavailable(Exception):
+    """Raised from the poll tick when a bridge-type run is paused and no relay can be brought up."""
+
+    def __init__(self, msg, *, assessment_id=None, reason=None):
+        super().__init__(msg)
+        self.assessment_id = assessment_id
+        self.reason = reason
+
+
+class _PauseGuard:
+    """What a paused bridge-type run needs, decided once per poll tick.
+
+    The platform pauses a run whose probes go unanswered. Seen live, both halves of what follows
+    were missing: a run paused during a relay outage stayed paused after the watchdog brought the
+    relay back, because nothing resumed it; and a run whose relay could not be brought back was
+    polled to its full timeout — ten minutes of "could not be restarted" before a non-zero exit.
+
+      * paused, relay serving, an outage was seen here  -> resume: the pause was ours to cause
+      * paused, no relay for PAUSED_NO_BRIDGE_TICKS polls -> raise _BridgeUnavailable, with the reason
+      * paused, relay serving, no outage seen here       -> somebody's `assess pause`: say so once
+
+    `local` is whether THIS machine runs the relay (the initial ensure started or reused one). When
+    the bridge runs elsewhere — a jump host with a route to the target — `is_serving()` here knows
+    nothing about it, so the guard only ever hints. Native apps are never touched. Raises nothing
+    but _BridgeUnavailable.
+    """
+
+    def __init__(self, c, app_id, *, bridged, local=True):
+        self.c, self.app_id, self.bridged, self.local = c, app_id, bridged, local
+        self.paused_noserve = 0
+        self.healthy = 0
+        self.outage_seen = False
+        self.resumes = 0
+        self.hinted = False
+        self.last_reason = None
+        self.settling = 0          # polls to wait after a resume before reading "paused" again
+
+    def tick(self, status, a, *, outage_note=None):
+        if not self.bridged:
+            return None
+        st = str(status or "").lower()
+        aid = (a or {}).get("id")
+        if not self.local:
+            if st == "paused" and not self.hinted:
+                self.hinted = True
+                return ("run is paused; no bridge is configured on this machine. If one runs "
+                        "elsewhere, check it there — else `ascend bridge start --app <name>`, then "
+                        "`ascend assess resume`")
+            return None
+        import supervisor as S
+        try:
+            serving = S.is_serving(self.app_id)
+        except Exception:
+            serving = False
+        if outage_note:
+            self.outage_seen = True
+            if outage_note.startswith("!"):
+                self.last_reason = outage_note.lstrip("! ")
+        if not serving:
+            self.outage_seen = True
+            self.healthy = 0
+        if st != "paused":
+            self.paused_noserve = 0
+            self.settling = 0
+            if st == "running" and serving:
+                self.healthy += 1
+                if self.healthy >= HEALTHY_TICKS_TO_FORGET:
+                    self.outage_seen = False
+            return None
+        if not serving:
+            self.paused_noserve += 1
+            if self.paused_noserve >= PAUSED_NO_BRIDGE_TICKS:
+                why = f" ({self.last_reason})" if self.last_reason else ""
+                raise _BridgeUnavailable(
+                    f"the run is paused and no bridge could be brought up in "
+                    f"{self.paused_noserve} consecutive polls{why}",
+                    assessment_id=aid, reason=self.last_reason)
+            return None
+        self.paused_noserve = 0
+        if self.settling:
+            # The platform takes a poll or two to leave "paused" after a resume. Reading that as
+            # somebody's pause would print the wrong hint.
+            self.settling -= 1
+            return None
+        if self.outage_seen and aid and self.resumes < AUTO_RESUME_MAX:
+            self.resumes += 1
+            self.outage_seen = False
+            self.settling = RESUME_SETTLE_TICKS
+            try:
+                self.c.resume(self.app_id, aid)
+            except Exception as e:
+                return f"! run is paused and the bridge is back, but resuming it failed: {e}"
+            return "run was paused by the platform while the bridge was down — bridge is back, resumed"
+        if not self.hinted and not self.outage_seen:
+            self.hinted = True
+            return ("run is paused and no bridge outage was seen here — left alone. "
+                    "`ascend assess resume` continues it; Ctrl-C detaches")
+        return None
 
 
 def _release_bridge(app_id, ensure):
@@ -1133,6 +1278,9 @@ def _supervise_bridge(c, app, *, assessment_id=None, args=None, owned=None):
             # recording that, a relay the watchdog revived outlived the run that needed it.
             if owned is not None:
                 owned["started"] = True
+            if r.get("reclaimed"):
+                return (f"bridge relay pid {r['reclaimed']} was alive but had stopped answering — "
+                        f"replaced (pid {r.get('pid')})")
             return f"bridge went down mid-run — restarted (pid {r.get('pid')})"
         if r.get("skip") or r.get("error"):
             return f"! bridge down and could not be restarted: {r.get('skip') or r.get('error')}"
@@ -1195,6 +1343,9 @@ def cmd_assess_run(args):
         # existing relay.
         owned = dict(ensure)
 
+        guard = _PauseGuard(c, appid, bridged=needs_bridge(_sup_app),
+                            local=bool(ensure.get("started") or ensure.get("reused")))
+
         def _supervised_tick(status, prog, a):
             # Bind the relay to THIS run as soon as the platform names it, so the bridge scopes its
             # own stop decision to the run it is actually serving.
@@ -1202,16 +1353,22 @@ def cmd_assess_run(args):
             note = _supervise_bridge(c, _sup_app, args=args, owned=owned)
             if note:
                 print(f"  {note}", file=sys.stderr)
+            pnote = guard.tick(status, a, outage_note=note)
+            if pnote:
+                print(f"  {pnote}", file=sys.stderr)
             if tw.enabled:
                 _tw_tick(status, prog, a)
             elif not args.json:
                 _tick(status, prog, a)
         feed_interval = min(args.interval, 4) if tw.enabled else args.interval
         res = None
+        bridge_gone = None
         try:
             with tw:
                 res = c.run(appid, args.name, wait=True,
                             interval=feed_interval, timeout=args.timeout, on_tick=_supervised_tick)
+        except _BridgeUnavailable as e:
+            bridge_gone = e
         finally:
             # Release the relay WE started — including one the watchdog restarted mid-run — but
             # ONLY once this run is genuinely finished. `c.run` also returns early when it recovers
@@ -1230,6 +1387,21 @@ def cmd_assess_run(args):
                      and str(res.get("status", "")).lower() in _api.TERMINAL_STATUSES)
             if _done:
                 _release_bridge(appid, owned)
+        if bridge_gone is not None:
+            # Nothing answers this run's probes and nothing here can change that. Waiting on is
+            # ten minutes of the same line and then a non-zero exit; say it now, with the way out.
+            _release_bridge(appid, owned)
+            aid = bridge_gone.assessment_id
+            if args.json:
+                print(json.dumps({"app_id": appid, "assessment_id": aid, "status": "paused",
+                                  "error": str(bridge_gone)}), flush=True)
+            print(f"error: {bridge_gone}\n"
+                  f"  The platform pauses a run whose probes go unanswered; the run stays paused, "
+                  f"nothing was measured.\n"
+                  f"  Fix the cause, then:\n"
+                  f"    ascend bridge start --app {args.app!r}\n"
+                  f"    ascend assess resume --app {args.app!r} --assessment {aid}", file=sys.stderr)
+            sys.exit(EXIT_ERROR)
     else:
         res = c.run(appid, args.name, wait=False,
                     interval=args.interval, timeout=args.timeout, on_tick=None)
@@ -1372,6 +1544,8 @@ def _watch_many(args, c):
                     out = "\n".join(f"{l:<118}" for l in lines)
                 print(out, flush=True)
                 printed = len(lines)
+            if getattr(args, "once", False):
+                return                      # one snapshot was asked for; the single-app loop already stops here
             if rows and all(r["status"] in api.TERMINAL_STATUSES for r in rows):
                 return
             if not rows:
@@ -1761,63 +1935,70 @@ def cmd_runtime_start(args):
             n = 0
             terminal_since = None
             while True:
-                rec = S.read_status(app_id) or {}
-                # The bridge is often started BEFORE its assessment exists (ensure-before-create),
-                # so the id cannot come from argv alone: the parent writes the real id into this
-                # status file once the run is created, and we pick it up here. That binding is what
-                # scopes the stop decision to OUR run instead of "whatever ran on this app last".
-                bound = tracked_id or rec.get("assessment_id")
-                rec.update({"app_id": app_id, "config": args.config, "adapter": args.adapter,
-                            "pid": os.getpid(), "ts": time.time(),
-                            "state": "serving" if not client.fatal_error else "fatal",
-                            "stats": dict(client.stats),
-                            "assessment_id": bound,
-                            "fatal_error": client.fatal_error})
-                rec.setdefault("started_at", time.time())
-                # Heartbeat FIRST. Liveness is judged by heartbeat age, and the reconcile below is a
-                # network call that can take as long as the API timeout; writing after it let a slow
-                # control plane push a perfectly healthy bridge toward "stale".
                 try:
-                    S.write_status(app_id, rec)
-                except Exception:
-                    pass
-                # Reconcile on a slower cadence (~every 3rd beat = 30s) to bound control-plane load.
-                if control is not None and n % 3 == 0:
+                    rec = S.read_status(app_id) or {}
+                    # The bridge is often started BEFORE its assessment exists (ensure-before-create),
+                    # so the id cannot come from argv alone: the parent writes the real id into this
+                    # status file once the run is created, and we pick it up here. That binding is what
+                    # scopes the stop decision to OUR run instead of "whatever ran on this app last".
+                    bound = tracked_id or rec.get("assessment_id")
+                    rec.update({"app_id": app_id, "config": args.config, "adapter": args.adapter,
+                                "pid": os.getpid(), "ts": time.time(),
+                                "state": "serving" if not client.fatal_error else "fatal",
+                                "stats": dict(client.stats),
+                                "assessment_id": bound,
+                                "fatal_error": client.fatal_error})
+                    rec.setdefault("started_at", time.time())
+                    # Heartbeat FIRST. Liveness is judged by heartbeat age, and the reconcile below is a
+                    # network call that can take as long as the API timeout; writing after it let a slow
+                    # control plane push a perfectly healthy bridge toward "stale".
                     try:
-                        asmts = _assessments_for(control, app_id)
-                        rec["reconcile_error"] = None
-                        cur = None
-                        if bound:
-                            cur = next((a for a in asmts if a.get("id") == bound), None)
-                        cur = cur or (_latest(asmts)[0] if asmts else None)
-                        rec["asmt_status"] = (cur or {}).get("status")
-                        decision, terminal_since = _reconcile_step(
-                            asmts, now=time.time(), started_at=rec.get("started_at"),
-                            last_probe_ts=client.last_probe_ts,
-                            idle_timeout_s=idle_timeout_s, control_ok=True,
-                            terminal_since=terminal_since, bound_id=bound)
-                    except Exception as e:
-                        # Could not verify — keep serving. Never self-kill on a transient error:
-                        # an unanswered probe scores a FALSE PASS.
-                        rec["reconcile_error"] = f"{type(e).__name__}: {e}"
-                        decision = "serve"
-                    if decision != "serve":
-                        rec["state"] = ("stopped-complete" if decision == "stop-terminal"
-                                        else "stopped-idle")
+                        S.write_status(app_id, rec)
+                    except Exception:
+                        pass
+                    # Reconcile on a slower cadence (~every 3rd beat = 30s) to bound control-plane load.
+                    if control is not None and n % 3 == 0:
                         try:
-                            S.write_status(app_id, rec)
-                        except Exception:
-                            pass
-                        logging.getLogger("ascendbridge").info(
-                            "self-reconcile: %s — stopping bridge for %s", decision, app_id)
-                        client.stop()
+                            asmts = _assessments_for(control, app_id)
+                            rec["reconcile_error"] = None
+                            cur = None
+                            if bound:
+                                cur = next((a for a in asmts if a.get("id") == bound), None)
+                            cur = cur or (_latest(asmts)[0] if asmts else None)
+                            rec["asmt_status"] = (cur or {}).get("status")
+                            decision, terminal_since = _reconcile_step(
+                                asmts, now=time.time(), started_at=rec.get("started_at"),
+                                last_probe_ts=client.last_probe_ts,
+                                idle_timeout_s=idle_timeout_s, control_ok=True,
+                                terminal_since=terminal_since, bound_id=bound)
+                        except Exception as e:
+                            # Could not verify — keep serving. Never self-kill on a transient error:
+                            # an unanswered probe scores a FALSE PASS.
+                            rec["reconcile_error"] = f"{type(e).__name__}: {e}"
+                            decision = "serve"
+                        if decision != "serve":
+                            rec["state"] = ("stopped-complete" if decision == "stop-terminal"
+                                            else "stopped-idle")
+                            try:
+                                S.write_status(app_id, rec)
+                            except Exception:
+                                pass
+                            logging.getLogger("ascendbridge").info(
+                                "self-reconcile: %s — stopping bridge for %s", decision, app_id)
+                            client.stop()
+                            return
+                    try:
+                        S.write_status(app_id, rec)
+                    except Exception:
+                        pass
+                    if client.fatal_error:
                         return
-                try:
-                    S.write_status(app_id, rec)
-                except Exception:
-                    pass
-                if client.fatal_error:
-                    return
+                except Exception as e:  # noqa: BLE001
+                    # The heartbeat IS liveness. A crash here used to end the thread silently: the
+                    # process lived on, the heartbeat aged past HEARTBEAT_STALE_S, and the relay became
+                    # the alive-but-not-serving state that blocked its own replacement.
+                    logging.getLogger("ascendbridge").warning("heartbeat error: %s: %s",
+                                                                 type(e).__name__, e)
                 n += 1
                 time.sleep(10)
 

@@ -32,6 +32,22 @@ def _bridge_response_timeout_s(config: Optional[Dict[str, Any]]) -> float:
     return bridge_response_timeout_s()
 
 
+RETRY_AFTER_DEFAULT_S = 2.0     # a 429 with no Retry-After: a short, single wait
+RETRY_AFTER_MAX_S = 10.0        # never park a probe longer than this on a target's say-so
+
+
+def _retry_after_seconds(headers) -> Optional[float]:
+    """Seconds from a Retry-After header (delta form only), else None."""
+    try:
+        items = headers.items() if isinstance(headers, dict) else (headers or [])
+        for k, v in items:
+            if str(k).lower() == "retry-after":
+                return float(str(v).strip())
+    except (TypeError, ValueError, AttributeError):
+        pass
+    return None
+
+
 class TargetCaller:
     """Builds a lease-client handler bound to one adapter config."""
 
@@ -113,6 +129,8 @@ class TargetCaller:
             return int(self.config["max_workers"])
         return 1 if self.is_stateful else 10
 
+    _last_retry_after: Optional[float] = None
+
     def handler(self, message: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
         self._maybe_refresh_auth()
         # `merge_auth` never raises: an auth failure -- a token endpoint down, an env ref unset, a
@@ -141,6 +159,14 @@ class TargetCaller:
             if err:                     # the re-mint itself failed: say so, do not retry naked
                 return 401, {"response": "", "_error": f"auth (re-acquire failed): {err}"}
             status, out = self._send_once(prompt, conv)
+        if status == 429:
+            # A target rate-limiting a run that is otherwise fine. Without this every throttled
+            # probe scored as unanswered, and a target that throttles one request in three lost a
+            # third of its assessment. One bounded wait, one retry; a second 429 stands.
+            wait = min(max(self._last_retry_after or RETRY_AFTER_DEFAULT_S, 0.0), RETRY_AFTER_MAX_S)
+            logging.getLogger("ascendbridge").info("429 from the target; retrying once in %.1fs", wait)
+            time.sleep(wait)
+            status, out = self._send_once(prompt, conv)
         return status, out
 
     def _send_once(self, prompt: str, conv: Optional[str]) -> Tuple[int, Dict[str, Any]]:
@@ -148,6 +174,7 @@ class TargetCaller:
             self.adapter_type, self.config, self.config_name,
             prompt, conv, self.timeout_s)
         meta = result.get("metadata") or {}
+        self._last_retry_after = _retry_after_seconds(meta.get("headers"))
         try:
             self._lifecycle.note_response(int(meta.get("status_code") or 0),
                                           meta.get("headers"))

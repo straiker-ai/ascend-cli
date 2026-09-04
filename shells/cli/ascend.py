@@ -512,6 +512,9 @@ def _guard_constant_response(adapter, cfg, vres, args, V, *, cfg_name=None, cfg_
            f"reply, so every probe would score that one string\n"
            f"  an assessment on this config completes and reports LOW risk having measured "
            f"nothing. That is the one result worse than no result.\n"
+           f"  if that constant is a title or an id, this endpoint CREATES a conversation and the "
+           f"prompt goes to a second call: a create-then-message contract. Export a HAR of one "
+           f"exchange and pass --har, or write the two calls with --scaffold.\n"
            f"  fix the answer field, then re-check:\n"
            f"    ascend target types                      # what shape is this target?\n"
            f"    ascend adapter build --api <url> --response-path <path>\n"
@@ -2311,7 +2314,7 @@ def _finalize_target_auth(cfg, args):
             else:
                 cfg.pop("headers", None)
         else:
-            for key in ("endpoint", "url"):
+            for key in ("endpoint", "url", "ws_url"):
                 if cfg.get(key):
                     cfg[key] = _strip_query_param(cfg[key], name)
         cfg["auth"] = block
@@ -2498,7 +2501,7 @@ def _bake_auth(cfg, headers, query):
     if headers:
         cfg["headers"] = {**(cfg.get("headers") or {}), **headers}
     if query:
-        key = "endpoint" if "endpoint" in cfg else ("url" if "url" in cfg else None)
+        key = next((k for k in ("endpoint", "url", "ws_url") if k in cfg), None)
         if key:
             url = cfg[key] or ""
             new = {k: v for k, v in query.items() if f"{k}=" not in url}
@@ -3489,8 +3492,15 @@ def cmd_onboard(args):
         _step(1, total, f"probing {args.ws}")
         _guard_egress(args.ws, args)
         from runtime.discovery.probe import probe_ws, build_ws_config
-        auth_headers, _auth_query = _prepare_target_auth(args)
-        res = probe_ws(args.ws, prompt=args.prompt or "hello",
+        auth_headers, auth_query = _prepare_target_auth(args)
+        ws_url = args.ws
+        if auth_query:
+            # `--api-key key:...:in=query` was folded into an HTTP URL and silently dropped for a
+            # WebSocket one: the config validated against a gate that was not there and would have
+            # failed on the first real probe. Seen in the loop against agent-forge `ws`.
+            sep = "&" if "?" in ws_url else "?"
+            ws_url += sep + "&".join(f"{k}={v}" for k, v in auth_query.items())
+        res = probe_ws(ws_url, prompt=args.prompt or "hello",
                        headers=auth_headers or None,
                        timeout_s=args.timeout or 30)
         if not res.get("ok"):

@@ -18,6 +18,7 @@ Everything here was written after a release in which every shipped bug shipped *
 | `scripts/gen_command_map.py --check` | CI | `docs/COMMAND_MAP.md` gone stale |
 | clean `pip install .` + run | CI | a half-done version bump; a broken package |
 | `scripts/live_matrix.py` | **release only, by hand** | an adapter that cannot talk to a real target |
+| `scripts/live_auth_matrix.py` | **release only, by hand** | a target behind a login the CLI can no longer onboard, or a credential stored in a config |
 | mutation check | **by hand, per fix** | a test that passes against the bug |
 
 CI lives in `.github/workflows/ci.yml`. Before it existed, `.github/` held only `dependabot.yml`,
@@ -111,13 +112,14 @@ in that gap.**
 
 1. Full suite and all gates green in CI on the merge commit.
 2. `scripts/live_matrix.py` green — with the measured probe count recorded.
-3. A real end-to-end run against a real agent: `target add` → `target check` → `assess run` →
+3. `scripts/live_auth_matrix.py` green — ten auth gates derive as expected, no secret in any written config.
+4. A real end-to-end run against a real agent: `target add` → `target check` → `assess run` →
    `results` → `ci`. Every step, not just the ones that changed.
-4. Version bumped in **both** `shells/cli/ascend.py` and `pyproject.toml`
+5. Version bumped in **both** `shells/cli/ascend.py` and `pyproject.toml`
    (`tests/test_version_sync.py` enforces this).
-5. `CHANGELOG.md` entry under the new version, moved out of `[Unreleased]`.
-6. Clean-clone check: `git clone`, run `./ascend`, confirm the change is actually there.
-7. Tag and release. **A merge to `main` is not a release** — anyone installing a released binary is
+6. `CHANGELOG.md` entry under the new version, moved out of `[Unreleased]`.
+7. Clean-clone check: `git clone`, run `./ascend`, confirm the change is actually there.
+8. Tag and release. **A merge to `main` is not a release** — anyone installing a released binary is
    on the last tag, not on `main`.
 
 ---

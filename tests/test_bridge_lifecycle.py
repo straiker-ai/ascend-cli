@@ -101,3 +101,12 @@ def test_last_probe_ts_advances_on_real_probe(monkeypatch):
     c._process({"request_id": "r1", "msg_id": "m1", "message": {"payload": "hi"}})
     assert c.last_probe_ts > 0.0
     assert c.stats["answered"] == 1
+
+
+@pytest.fixture(autouse=True)
+def _no_startup_grace(monkeypatch):
+    """These tests are about pid/status bookkeeping and argv hygiene; their children are stand-ins
+    (or die at once on a bogus config). supervisor.start() now watches a fresh child for its first
+    heartbeat or its death, which would turn every start() here into a 3 s wait or a reported
+    death. The real-child startup-death behaviour has its own test in test_p1_consistency.py."""
+    monkeypatch.setenv("ASCEND_STARTUP_GRACE_S", "0")

@@ -47,7 +47,7 @@ import ascend  # noqa: E402
 SRC = (REPO / "shells" / "cli" / "ascend.py").read_text()
 
 # Commands whose --assessment is optional and which therefore must resolve a default.
-OPTIONAL = ["cmd_ci", "cmd_export"]
+OPTIONAL = ["cmd_ci", "cmd_export", "cmd_assess_results"]
 
 
 class _Args:
@@ -137,12 +137,12 @@ class TestCommandsThatRequireItAreLeftAlone:
     """These are excluded from OPTIONAL because argparse already blocks the None case.
 
     If any of them is ever made optional, it acquires the exact defect this file exists for and
-    must be added to OPTIONAL in the same change — that is what this test is here to force. For
-    the two destructive verbs it is also the right design on its own terms.
+    must be added to OPTIONAL in the same change — that is what this test is here to force.
+    `assess results` made that move in 1.1.3 (it defaults to the latest finished run); the two
+    verbs left here act on a run, and naming it explicitly is the right design on its own terms.
     """
 
-    @pytest.mark.parametrize("verbs", [("assess", "pause"), ("assess", "resume"),
-                                       ("assess", "results")])
+    @pytest.mark.parametrize("verbs", [("assess", "pause"), ("assess", "resume")])
     def test_the_flag_is_still_required(self, verbs):
         p = ascend.build_parser()
         node = [a for a in p._actions if getattr(a, "choices", None)][0].choices[verbs[0]]

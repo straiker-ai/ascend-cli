@@ -20,6 +20,39 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 - **`ascend ci --app <name>` resolves the latest finished run.** `--assessment` is now optional.
 
+### Changed
+
+- **Exit codes and `--json` shapes a pipeline can rely on.** argparse's own usage errors exited
+  **2** — the same code as `EXIT_FINDINGS` — with plain text under `--json`, so a typo'd flag in an
+  `ascend ci` step read as "findings present". They now exit 3 (`EXIT_USAGE`) through the same
+  path as every other bad invocation, with one JSON error object under `--json`. Intended
+  back-compat change: `ascend not-a-command` and `ascend adapter not-a-verb` exit 3, not 2 (both
+  corpora re-recorded). Also: `bridge start --json` and `bridge sync --json` now exit 1 when
+  nothing could be started (they returned 0 before their failure check); `bridge sync` reports —
+  rather than fails on — live runs on apps this machine holds no key for, takes `--app` to scope
+  itself, and fails only on a start that failed or a scoped app it cannot serve; `assess watch
+  --json` no longer prints the final row twice; `target add <url> --scaffold` no longer trips the
+  "not both" source conflict; `bridge start --foreground` completes its namespace from the
+  `runtime start` parser's own defaults instead of a hand-kept list (it crashed on
+  `wait_ms=None / 1000`) and registers under the app ID with the fleet's consumer scheme (a relay
+  known only by a name was invisible to `is_serving()`, so `assess run` started a second one);
+  `bridge start` refuses an explicit `--config` that does not exist and reports a relay that
+  died at startup as an error with the last line of its log, instead of "started" with a pid
+  that was already gone; `app resolve` and `bridge logs` honour `--json`; `export --out` writes
+  its "wrote …" line to stderr.
+
+- **One rule behind every `--controls`.** `app create` refused an unknown control id unless
+  `--force`, `assess run` only warned and quietly ran the rest, `app update` and onboarding
+  refused with no `--force` at all. `_validated_control_ids` is now the single check: an unknown
+  id is refused (exit 3) unless `--force` applies the ids as given, a set that can generate no
+  probes is refused unless `--force`, warnings are printed. A run narrowed silently scores clean
+  on less than was asked for.
+
+- **`assess results` defaults to the latest finished run.** `--assessment` is optional, resolved
+  by the same `_resolve_assessment` that `ci` and `export` use — it now truly has the three callers
+  its docstring names. Under `--json` a false-pass-suspect run carries `false_pass_suspect: true`
+  and `false_pass_warning` alongside the numbers they qualify.
+
 ### Fixed
 
 - **`ascend ci` and `ascend export` requested `/assessments/None`.** Both take an optional

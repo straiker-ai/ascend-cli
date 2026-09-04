@@ -71,7 +71,11 @@ class TargetCaller:
         # and a 401 challenge, so it is wired in here — at the one seam every adapter goes
         # through — rather than each adapter growing its own copy of the same logic.
         self._lifecycle = self._build_lifecycle()
-        self._lifecycle.mark_refreshed()          # merge_auth() above just materialized
+        # `token=` was never passed here, so AuthLifecycle._token stayed None for the whole run
+        # and the JWT-`exp` branch of refresh_on_ttl -- the accurate one -- was dead code in
+        # production. Every short-lived JWT fell back to the wall-clock ttl_s guess and refreshed
+        # late. The provider has always recorded the token; it just never reached the lifecycle.
+        self._lifecycle.mark_refreshed(token=self.config.get("_auth_token"))
 
     def _build_lifecycle(self):
         from layers.auth import AuthLifecycle
@@ -92,7 +96,7 @@ class TargetCaller:
 
     def _reauth(self, why: str) -> None:
         self.config = merge_auth(copy.deepcopy(self._raw))
-        self._lifecycle.mark_refreshed()
+        self._lifecycle.mark_refreshed(token=self.config.get("_auth_token"))
         logger.info("auth: re-acquired credentials (%s)", why)
 
     def _maybe_refresh_auth(self) -> None:

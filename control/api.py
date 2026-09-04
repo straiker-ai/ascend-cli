@@ -80,6 +80,10 @@ TOKEN_URL = DEFAULT_ROOT + "/auth/token"
 
 # The ONE terminal-status set. Both the API poller and the CLI `assess watch` loop
 # import this so a run that ends in `done`/`canceled` can never hang one but not the other.
+# Consecutive transport failures a poll absorbs before it gives up. Not 1: a single blip ended
+# the wait and reported a running assessment as finished.
+POLL_MAX_CONSECUTIVE_ERRORS = 5
+
 TERMINAL_STATUSES = frozenset(
     {"completed", "complete", "done", "failed", "error", "cancelled", "canceled"})
 
@@ -517,9 +521,24 @@ class AscendAPI:
         """
         deadline = time.time() + timeout
         terminal = TERMINAL_STATUSES
+        # One failed GET used to raise straight out of this loop. `run()` then caught it, read the
+        # state, saw `running`, and RETURNED that row -- so a wait=True caller got a non-terminal
+        # result and `assess run` exited 0 with the run still going. Observed live, repeatedly: the
+        # platform truncates the create response often enough that recovery is the common path,
+        # not the rare one. A poll tolerates a few consecutive transport errors before giving up.
+        consecutive_errors = 0
         last = None
         while time.time() < deadline:
-            a = self.get_assessment(app_id, aid)
+            try:
+                a = self.get_assessment(app_id, aid)
+                consecutive_errors = 0
+            except Exception as exc:  # transport blip: keep waiting, do not end the run
+                consecutive_errors += 1
+                if consecutive_errors >= POLL_MAX_CONSECUTIVE_ERRORS:
+                    raise AscendAPIError(f"poll failed {consecutive_errors} times in a row "
+                                         f"({type(exc).__name__}); last status={last and last.get('status')}")
+                time.sleep(min(interval, max(1, deadline - time.time())))
+                continue
             last = a
             status = str(a.get("status", "")).lower()
             prog = a.get("progress")
@@ -533,7 +552,15 @@ class AscendAPI:
     # ---- high-level orchestration -------------------------------------------
     def run(self, app_id: str, name: str, *, wait: bool = True,
             interval: int = 20, timeout: int = 7200, on_tick=None) -> Any:
-        """Create an assessment on an existing app, resume it, and (optionally) poll."""
+        """Create an assessment on an existing app, resume it, and (optionally) poll.
+
+        When ``wait`` is True this returns ONLY a terminal payload or raises. It used to return a
+        non-terminal row after a transport error mid-poll, which the CLI then reported as a
+        finished run.
+        """
+        t0 = time.time()
+        def terminal_now():
+            return TERMINAL_STATUSES
         a = self.create_assessment(app_id, name)
         aid = a.get("id") or a.get("assessment_id")
         if not aid:
@@ -574,10 +601,25 @@ class AscendAPI:
             status = str(state.get("status", "")).lower()
             note = (f"the connection dropped ({type(exc).__name__}) after the assessment was "
                     f"created; it is on the platform with status '{status or 'unknown'}'")
+            if not wait:
+                if status in ("created", "paused"):
+                    note += ". It is NOT running — resume it with `ascend assess resume`."
+                return {**state, "app_id": app_id, "assessment_id": aid,
+                        "recovered": True, "recovery_note": note}
+            # The caller asked to WAIT. Returning a non-terminal row here is how `assess run`
+            # exited 0 in two seconds with the assessment still running -- a pipeline read that as
+            # a passing security gate before a single probe had been answered. Recover the state,
+            # get it running if the drop left it paused, and go back to polling.
+            if status in terminal_now():
+                return {**state, "app_id": app_id, "assessment_id": aid,
+                        "recovered": True, "recovery_note": note}
             if status in ("created", "paused"):
-                note += ". It is NOT running — resume it with `ascend assess resume`."
-            return {**state, "app_id": app_id, "assessment_id": aid,
-                    "recovered": True, "recovery_note": note}
+                self._safe_transition(self.resume, app_id, aid, want="running")
+            remaining = max(30, int(timeout - (time.time() - t0)))
+            res = self.poll_assessment(app_id, aid, interval=interval, timeout=remaining,
+                                       on_tick=on_tick)
+            return {**res, "recovered": True,
+                    "recovery_note": note + "; polling resumed and the run was followed to the end"}
 
     def _state_of(self, app_id: str, aid: str):
         """Best-effort read of an assessment's real state. None if we cannot tell."""

@@ -22,6 +22,40 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ### Fixed
 
+- **A wedged relay blocked its own replacement, and the run waited on it to the timeout.** A
+  relay that was alive but had stopped heartbeating was "not serving" to the auto-lifecycle and
+  "already running" to `supervisor.start()`, so every watchdog tick printed *a relay is already
+  running for this app* while the run sat paused — ten minutes of the same line, then exit 1.
+  `_ensure_bridge` now stops a relay that has not beaten in `HEARTBEAT_STALE_S` and starts a fresh
+  one in its place, saying which pid it replaced. A relay that reported a fatal error (a bridge key
+  the lease service rejected) is not churned — its error is surfaced instead. The relay's heartbeat
+  loop is guarded so a crash in it can no longer end liveness silently while the process lives on.
+
+- **A run the platform paused during a relay outage stayed paused after the relay came back.**
+  The watchdog restarted the bridge and nothing resumed the run. A `_PauseGuard` in the `assess run`
+  poll now lifts a pause that follows an outage this command saw and fixed (at most
+  `AUTO_RESUME_MAX` times per run, never a pause it did not see happen — an operator's
+  `assess pause` is left alone and said once), and when a paused run has had no relay startable for
+  `PAUSED_NO_BRIDGE_TICKS` polls it exits 1 immediately with the reason and the two commands that
+  continue the run, instead of polling to the timeout. `--json` gets the same as an object.
+
+- **`assess watch --all --once` never returned.** `--once` was honoured only by the single-app loop.
+
+- **A probe is never sent unauthenticated when the target's login failed.** When the auth layer
+  recorded an error, `TargetCaller.handler` still sent the probe naked — the target's refusal then
+  scored as the target's answer. The probe is now answered locally with a 401 and `_error: auth: …`
+  and never leaves the machine; the same applies when a re-authentication after a 401 fails.
+
+- **`assess run` exited 0 with the assessment still running.** The platform truncates the
+  create-assessment response often enough that the CLI's recovery path is the common one, not the
+  rare one. Recovery found the run, saw `running`, and returned that row — from a `wait=True`
+  call — so `assess run` printed the `--no-wait` hints and exited 0 in two seconds while the
+  probes were still being answered. A pipeline read that as a passing gate. Two seams fed it:
+  `poll_assessment` raised on a single failed GET, and `run()`'s recovery returned whatever state
+  it found regardless of `wait`. Polling now absorbs a few consecutive transport errors, recovery
+  re-resumes and keeps polling when asked to wait, and `assess run` exits non-zero if it was asked
+  to wait and the run is not terminal — a wait that returns early can never be green.
+
 - **`ascend ci` and `ascend export` requested `/assessments/None`.** Both take an optional
   `--assessment` and passed it straight into the URL, so omitting it produced
 

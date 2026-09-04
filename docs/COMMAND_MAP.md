@@ -194,6 +194,7 @@ delete an application (also stops its bridge + drops its stored key)
 | Flag | Value | Default | What it does |
 |---|---|---|---|
 | `--keep-key` | — | — | keep the stored bridge key (default: remove it — a key without its app is dead) |
+| `--yes` | — | — | skip the confirmation prompt (non-interactive runs never prompt) |
 
 ### `ascend app get`
 
@@ -590,6 +591,7 @@ remove a stored key (optionally the Ascend app with it)
 | Flag | Value | Default | What it does |
 |---|---|---|---|
 | `--delete-app` | — | — | also delete the Ascend app (retire the pair: a keyless app can't be served) |
+| `--yes` | — | — | skip the confirmation prompt (non-interactive runs never prompt) |
 
 ### `ascend map`
 
@@ -932,6 +934,7 @@ delete the application and drop its stored key
 | Flag | Value | Default | What it does |
 |---|---|---|---|
 | `--keep-key` | — | — | leave the stored bridge key in place |
+| `--yes` | — | — | skip the confirmation prompt (non-interactive runs never prompt) |
 
 ### `ascend target show`
 

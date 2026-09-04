@@ -174,8 +174,14 @@ def _unwrap_list(payload, *keys):
     return []
 
 
-def _resolve_app(client, ref):
-    """Accept an aapp_ id or a name; return the app id."""
+def _resolve_app(client, ref, *, exact=False):
+    """Accept an aapp_ id or a name; return the app id.
+
+    A name that matches no app exactly falls back to a case-insensitive substring match, so
+    `assess results --app bot` finds "Demo Bot". `exact=True` refuses that fallback and is what
+    every command that changes or destroys an app passes: `target rm bot` deleting "Demo Bot" is
+    not a convenience. The candidates are still shown, so the fix is one copy-paste away.
+    """
     if not ref:
         _die("no application given: pass --app <name-or-aapp_id>")
     if ref.startswith("aapp_"):
@@ -183,6 +189,14 @@ def _resolve_app(client, ref):
     data = client.list_apps()
     apps = _unwrap_list(data)
     matches = [a for a in apps if (a.get("name") or "") == ref]
+    if not matches and exact:
+        near = [a for a in apps if ref.lower() in (a.get("name") or "").lower()]
+        hint = ""
+        if near:
+            hint = "\n  did you mean:\n  " + "\n  ".join(
+                f"{a.get('id')}  {a.get('name', '')}" for a in near[:10])
+        _die(f"no app named exactly {ref!r}. This command changes or deletes an app, so it takes "
+             f"the exact name or the aapp_ id.{hint}")
     if not matches:
         matches = [a for a in apps if ref.lower() in (a.get("name") or "").lower()]
     if not matches:
@@ -721,6 +735,61 @@ def _read_maybe_file(v):
     return v
 
 
+def _stdio_is_tty():
+    """Is a person at the keyboard? Both ends must be terminals: a piped stdout is a script."""
+    try:
+        return bool(sys.stdin.isatty() and sys.stdout.isatty())
+    except Exception:
+        return False
+
+
+def _confirm_destroy(args, what):
+    """Ask before an irreversible action — on a terminal, unless --yes.
+
+    Scripts, CI and `--json` are never prompted: a question nobody can answer hangs a pipeline, and
+    those callers already had to spell the app out (exact name or aapp_ id). The prompt is for the
+    person at a keyboard, where one slip deletes an app and every assessment under it.
+    """
+    if getattr(args, "yes", False) or getattr(args, "json", False):
+        return
+    if not _stdio_is_tty():
+        return
+    try:
+        ans = input(f"  {what} [y/N]: ").strip().lower()
+    except EOFError:
+        ans = ""
+    if ans not in ("y", "yes"):
+        _die("aborted — nothing was changed", code=EXIT_ERROR)
+
+
+def _retire_app(c, app_id, *, keep_key=False):
+    """Delete an app and everything that only existed to serve it, in the order that fails safe.
+
+    Stop its relay, delete the app, THEN drop the stored key. The key goes last on purpose: a
+    bridge key is shown once and cannot be re-read, so dropping it before a delete that then fails
+    leaves an app nobody can ever serve again — which is what `target rm` used to do. Raises
+    AscendAPIError when the platform refuses the delete; the key is untouched then. One helper for
+    `app delete`, `target rm` and `keys rm --delete-app`, so the three cannot drift apart again.
+    """
+    stopped = None
+    try:                                   # a live bridge for a deleted app is pointless
+        import supervisor as S
+        if S.is_running(app_id):
+            stopped = S.stop(app_id)
+    except Exception:
+        stopped = None
+    res = c.delete_app(app_id)
+    key_removed = False
+    if not keep_key:
+        try:
+            import creds as C
+            key_removed = C.remove(app_id)
+        except Exception:
+            key_removed = False
+    return {"app_id": app_id, "api_response": res, "bridge_stopped": bool(stopped),
+            "key_removed": key_removed}
+
+
 def cmd_app_update(args):
     """Change an existing app's settings in place — no delete/recreate, so the bridge key survives.
 
@@ -728,7 +797,7 @@ def cmd_app_update(args):
     QPM, controls, system prompt, category severities, input guardrail, frequency, strategy.
     """
     c = _client(args)
-    app_id = _resolve_app(c, args.app)
+    app_id = _resolve_app(c, args.app, exact=True)
     import api
     patch = {}
     if args.name:
@@ -818,38 +887,22 @@ def cmd_app_delete(args):
     together: `--keep-key` opts out.
     """
     c = _client(args)
-    app_id = _resolve_app(c, args.app)
-    _say(args, f"Deleting {args.app}...")
+    app_id = _resolve_app(c, args.app, exact=True)
     name = None
     try:
         name = (c.get_app(app_id) or {}).get("name")
     except Exception:
         pass
-
-    stopped = None
-    try:                                   # a live bridge for a deleted app is pointless
-        import supervisor as S
-        if S.is_running(app_id):
-            stopped = S.stop(app_id)
-    except Exception:
-        pass
-
-    res = c.delete_app(app_id)
-    key_removed = False
-    if not args.keep_key:
-        try:
-            import creds as C
-            key_removed = C.remove(app_id)
-        except Exception:
-            pass
-
+    _confirm_destroy(args, f"delete app {name or args.app!r} ({app_id}) and every assessment under it?")
+    _say(args, f"Deleting {args.app}...")
+    r = _retire_app(c, app_id, keep_key=args.keep_key)
     payload = {"deleted": True, "app_id": app_id, "app_name": name,
-               "key_removed": key_removed, "bridge_stopped": bool(stopped),
-               "api_response": res}
+               "key_removed": r["key_removed"], "bridge_stopped": r["bridge_stopped"],
+               "api_response": r["api_response"]}
     human = f"deleted {name or app_id}"
-    if stopped:
+    if r["bridge_stopped"]:
         human += "\n  stopped its bridge"
-    if key_removed:
+    if r["key_removed"]:
         human += "\n  removed its stored bridge key (a key without its app is a dead secret)"
     elif args.keep_key:
         human += "\n  kept the stored key (--keep-key)"
@@ -1059,6 +1112,9 @@ def _ensure_bridge(c, app, *, assessment_id=None, args=None):
                 "reason": "native app — Ascend calls it directly (no bridge needed)"}
     if S.is_serving(app_id):
         return {"app_id": app_id, "ensured": True, "reused": True}
+    reclaimed = _reclaim_wedged_relay(S, app_id)
+    if reclaimed.get("error"):
+        return {"app_id": app_id, "ensured": False, "error": reclaimed["error"]}
     t = _target_for(app_id)
     if t.get("skip"):
         return {"app_id": app_id, "ensured": False, "skip": t["skip"]}
@@ -1069,7 +1125,40 @@ def _ensure_bridge(c, app, *, assessment_id=None, args=None):
                 wait_ms=getattr(args, "wait_ms", None))
     if "error" in r:
         return {"app_id": app_id, "ensured": False, "error": r["error"]}
-    return {"app_id": app_id, "ensured": True, "started": True, "pid": r.get("pid")}
+    out = {"app_id": app_id, "ensured": True, "started": True, "pid": r.get("pid")}
+    if reclaimed.get("pid"):
+        out["reclaimed"] = reclaimed["pid"]
+    return out
+
+
+def _reclaim_wedged_relay(S, app_id):
+    """Make room for a new relay when the recorded one is alive but not serving.
+
+    Returns {} when there is nothing to reclaim, {"pid": n} after stopping a wedged relay, or
+    {"error": why} when the relay has to be left alone.
+
+    `is_serving()` is pid-alive AND heartbeat-fresh; `start()` refuses on pid-alive alone. Between
+    those two tests sits a relay that is alive and has not beaten for HEARTBEAT_STALE_S — wedged —
+    and nothing ever replaced it: every watchdog tick printed "a relay is already running for this
+    app" while the run sat paused until its timeout (seen live). A relay that has not beaten in
+    three minutes is answering nobody, so it is stopped and a fresh one started in its place. A
+    relay that was just spawned cannot be mistaken for this one: start() stamps a fresh heartbeat
+    the moment it spawns.
+
+    The one alive-but-silent relay NOT replaced is one that reported a fatal error (a bridge key
+    the lease service rejected, say). A replacement would hit the same wall, so the error is
+    surfaced for the operator instead of churning a new relay into it every three minutes.
+    """
+    if not S.is_running(app_id):
+        return {}
+    pid = S.read_pid(app_id)
+    rec = S.read_status(app_id) or {}
+    if rec.get("state") == "fatal" or rec.get("fatal_error"):
+        return {"error": (f"relay pid {pid} is alive but reported a fatal error and is not serving: "
+                          f"{rec.get('fatal_error') or 'unknown'}. Fix the cause, then "
+                          f"`ascend bridge stop --app <name>` and `ascend bridge start --app <name>`")}
+    st = S.stop(app_id, grace_s=3.0)
+    return {"pid": st.get("pid") or pid}
 
 
 def _ensure_note(res):
@@ -1077,6 +1166,9 @@ def _ensure_note(res):
     if res.get("reused"):
         return "bridge: already serving this app — reused."
     if res.get("started"):
+        if res.get("reclaimed"):
+            return (f"bridge: relay pid {res['reclaimed']} was alive but had stopped answering — "
+                    f"replaced (pid {res.get('pid')}); it self-stops when the run ends.")
         return f"bridge: started for this run (pid {res.get('pid')}); it self-stops when the run ends."
     if res.get("skip") or res.get("error"):
         return (f"! bridge NOT started ({res.get('skip') or res.get('error')}). Probes will go "
@@ -1104,6 +1196,112 @@ def _bind_assessment(app_id, assessment_id):
             S.write_status(app_id, rec)
     except Exception:
         pass
+
+
+PAUSED_NO_BRIDGE_TICKS = 3    # polls a run may sit paused with no relay startable before we give up
+AUTO_RESUME_MAX = 3           # per run: lift a platform pause after an outage; never fight an operator
+HEALTHY_TICKS_TO_FORGET = 5   # running+serving polls after which an old outage no longer explains a pause
+RESUME_SETTLE_TICKS = 3       # polls the platform may still say "paused" after we resumed it
+
+
+class _BridgeUnavailable(Exception):
+    """Raised from the poll tick when a bridge-type run is paused and no relay can be brought up."""
+
+    def __init__(self, msg, *, assessment_id=None, reason=None):
+        super().__init__(msg)
+        self.assessment_id = assessment_id
+        self.reason = reason
+
+
+class _PauseGuard:
+    """What a paused bridge-type run needs, decided once per poll tick.
+
+    The platform pauses a run whose probes go unanswered. Seen live, both halves of what follows
+    were missing: a run paused during a relay outage stayed paused after the watchdog brought the
+    relay back, because nothing resumed it; and a run whose relay could not be brought back was
+    polled to its full timeout — ten minutes of "could not be restarted" before a non-zero exit.
+
+      * paused, relay serving, an outage was seen here  -> resume: the pause was ours to cause
+      * paused, no relay for PAUSED_NO_BRIDGE_TICKS polls -> raise _BridgeUnavailable, with the reason
+      * paused, relay serving, no outage seen here       -> somebody's `assess pause`: say so once
+
+    `local` is whether THIS machine runs the relay (the initial ensure started or reused one). When
+    the bridge runs elsewhere — a jump host with a route to the target — `is_serving()` here knows
+    nothing about it, so the guard only ever hints. Native apps are never touched. Raises nothing
+    but _BridgeUnavailable.
+    """
+
+    def __init__(self, c, app_id, *, bridged, local=True):
+        self.c, self.app_id, self.bridged, self.local = c, app_id, bridged, local
+        self.paused_noserve = 0
+        self.healthy = 0
+        self.outage_seen = False
+        self.resumes = 0
+        self.hinted = False
+        self.last_reason = None
+        self.settling = 0          # polls to wait after a resume before reading "paused" again
+
+    def tick(self, status, a, *, outage_note=None):
+        if not self.bridged:
+            return None
+        st = str(status or "").lower()
+        aid = (a or {}).get("id")
+        if not self.local:
+            if st == "paused" and not self.hinted:
+                self.hinted = True
+                return ("run is paused; no bridge is configured on this machine. If one runs "
+                        "elsewhere, check it there — else `ascend bridge start --app <name>`, then "
+                        "`ascend assess resume`")
+            return None
+        import supervisor as S
+        try:
+            serving = S.is_serving(self.app_id)
+        except Exception:
+            serving = False
+        if outage_note:
+            self.outage_seen = True
+            if outage_note.startswith("!"):
+                self.last_reason = outage_note.lstrip("! ")
+        if not serving:
+            self.outage_seen = True
+            self.healthy = 0
+        if st != "paused":
+            self.paused_noserve = 0
+            self.settling = 0
+            if st == "running" and serving:
+                self.healthy += 1
+                if self.healthy >= HEALTHY_TICKS_TO_FORGET:
+                    self.outage_seen = False
+            return None
+        if not serving:
+            self.paused_noserve += 1
+            if self.paused_noserve >= PAUSED_NO_BRIDGE_TICKS:
+                why = f" ({self.last_reason})" if self.last_reason else ""
+                raise _BridgeUnavailable(
+                    f"the run is paused and no bridge could be brought up in "
+                    f"{self.paused_noserve} consecutive polls{why}",
+                    assessment_id=aid, reason=self.last_reason)
+            return None
+        self.paused_noserve = 0
+        if self.settling:
+            # The platform takes a poll or two to leave "paused" after a resume. Reading that as
+            # somebody's pause would print the wrong hint.
+            self.settling -= 1
+            return None
+        if self.outage_seen and aid and self.resumes < AUTO_RESUME_MAX:
+            self.resumes += 1
+            self.outage_seen = False
+            self.settling = RESUME_SETTLE_TICKS
+            try:
+                self.c.resume(self.app_id, aid)
+            except Exception as e:
+                return f"! run is paused and the bridge is back, but resuming it failed: {e}"
+            return "run was paused by the platform while the bridge was down — bridge is back, resumed"
+        if not self.hinted and not self.outage_seen:
+            self.hinted = True
+            return ("run is paused and no bridge outage was seen here — left alone. "
+                    "`ascend assess resume` continues it; Ctrl-C detaches")
+        return None
 
 
 def _release_bridge(app_id, ensure):
@@ -1142,6 +1340,9 @@ def _supervise_bridge(c, app, *, assessment_id=None, args=None, owned=None):
             # recording that, a relay the watchdog revived outlived the run that needed it.
             if owned is not None:
                 owned["started"] = True
+            if r.get("reclaimed"):
+                return (f"bridge relay pid {r['reclaimed']} was alive but had stopped answering — "
+                        f"replaced (pid {r.get('pid')})")
             return f"bridge went down mid-run — restarted (pid {r.get('pid')})"
         if r.get("skip") or r.get("error"):
             return f"! bridge down and could not be restarted: {r.get('skip') or r.get('error')}"
@@ -1199,6 +1400,12 @@ def cmd_assess_run(args):
         # existing relay.
         owned = dict(ensure)
 
+        # `local` = this machine is responsible for the relay: it started one, reused one, or TRIED
+        # to start one and failed. Only a `skip` (no key or config stored here) means the bridge may
+        # legitimately live elsewhere, where is_serving() cannot see it.
+        guard = _PauseGuard(c, appid, bridged=needs_bridge(_sup_app),
+                            local=bool(ensure.get("started") or ensure.get("reused") or ensure.get("error")))
+
         def _supervised_tick(status, prog, a):
             # Bind the relay to THIS run as soon as the platform names it, so the bridge scopes its
             # own stop decision to the run it is actually serving.
@@ -1206,16 +1413,22 @@ def cmd_assess_run(args):
             note = _supervise_bridge(c, _sup_app, args=args, owned=owned)
             if note:
                 print(f"  {note}", file=sys.stderr)
+            pnote = guard.tick(status, a, outage_note=note)
+            if pnote:
+                print(f"  {pnote}", file=sys.stderr)
             if tw.enabled:
                 _tw_tick(status, prog, a)
             elif not args.json:
                 _tick(status, prog, a)
         feed_interval = min(args.interval, 4) if tw.enabled else args.interval
         res = None
+        bridge_gone = None
         try:
             with tw:
                 res = c.run(appid, args.name, wait=True,
                             interval=feed_interval, timeout=args.timeout, on_tick=_supervised_tick)
+        except _BridgeUnavailable as e:
+            bridge_gone = e
         finally:
             # Release the relay WE started — including one the watchdog restarted mid-run — but
             # ONLY once this run is genuinely finished. `c.run` also returns early when it recovers
@@ -1234,6 +1447,21 @@ def cmd_assess_run(args):
                      and str(res.get("status", "")).lower() in _api.TERMINAL_STATUSES)
             if _done:
                 _release_bridge(appid, owned)
+        if bridge_gone is not None:
+            # Nothing answers this run's probes and nothing here can change that. Waiting on is
+            # ten minutes of the same line and then a non-zero exit; say it now, with the way out.
+            _release_bridge(appid, owned)
+            aid = bridge_gone.assessment_id
+            if args.json:
+                print(json.dumps({"app_id": appid, "assessment_id": aid, "status": "paused",
+                                  "error": str(bridge_gone)}), flush=True)
+            print(f"error: {bridge_gone}\n"
+                  f"  The platform pauses a run whose probes go unanswered; the run stays paused, "
+                  f"nothing was measured.\n"
+                  f"  Fix the cause, then:\n"
+                  f"    ascend bridge start --app {args.app!r}\n"
+                  f"    ascend assess resume --app {args.app!r} --assessment {aid}", file=sys.stderr)
+            sys.exit(EXIT_ERROR)
     else:
         res = c.run(appid, args.name, wait=False,
                     interval=args.interval, timeout=args.timeout, on_tick=None)
@@ -1256,6 +1484,17 @@ def cmd_assess_run(args):
                  f"  findings: ascend assess results --app {args.app} "
                  f"--assessment {res['assessment_id']} --detail")
     _out(res, args, human=human)
+    # Asked to wait, and the run is not finished: that is never a success. This is the belt to
+    # api.run()'s braces -- whatever path handed back a non-terminal row, a pipeline must not read
+    # exit 0 as "assessed". Observed live: a truncated create response, a 2-second `assess run`,
+    # and a run still going on the platform.
+    if (not args.no_wait and isinstance(res, dict)
+            and str(res.get("status", "")).lower() not in api.TERMINAL_STATUSES):
+        print(f"error: the assessment is still {res.get('status') or 'in progress'} and this "
+              f"command was asked to wait for it. Follow it with:\n"
+              f"  ascend assess watch --app {args.app!r} --assessment {res.get('assessment_id')}",
+              file=sys.stderr)
+        sys.exit(EXIT_ERROR)
     # Bridge-type app but no relay could be ensured: the run exists but will score a FALSE PASS
     # until a bridge answers it. Exit non-zero so a pipeline notices — the run was created either way.
     if ensure.get("skip") or ensure.get("error"):
@@ -1365,6 +1604,8 @@ def _watch_many(args, c):
                     out = "\n".join(f"{l:<118}" for l in lines)
                 print(out, flush=True)
                 printed = len(lines)
+            if getattr(args, "once", False):
+                return                      # one snapshot was asked for; the single-app loop already stops here
             if rows and all(r["status"] in api.TERMINAL_STATUSES for r in rows):
                 return
             if not rows:
@@ -1529,7 +1770,7 @@ def cmd_assess_list(args):
 def cmd_assess_pause(args):
     c = _client(args)
     _say(args, f"Pausing {args.assessment}...")
-    res = c.pause(_resolve_app(c, args.app), args.assessment)
+    res = c.pause(_resolve_app(c, args.app, exact=True), args.assessment)
     # Probes are generated up front and cannot be recalled: pause stops NEW scheduling, but
     # already-created probes still run their course. Say so, or the drain looks like a bug.
     _out(res, args, human="paused — note: probes already generated will still drain, so your "
@@ -1540,7 +1781,7 @@ def cmd_assess_pause(args):
 
 def cmd_assess_resume(args):
     c = _client(args)
-    appid = _resolve_app(c, args.app)
+    appid = _resolve_app(c, args.app, exact=True)
     _say(args, f"Resuming {args.assessment}...")
     res = c.resume(appid, args.assessment)
     # The reliable answer to "resumed from the Console": the local relay may have idle-stopped or
@@ -1762,63 +2003,70 @@ def cmd_runtime_start(args):
             n = 0
             terminal_since = None
             while True:
-                rec = S.read_status(app_id) or {}
-                # The bridge is often started BEFORE its assessment exists (ensure-before-create),
-                # so the id cannot come from argv alone: the parent writes the real id into this
-                # status file once the run is created, and we pick it up here. That binding is what
-                # scopes the stop decision to OUR run instead of "whatever ran on this app last".
-                bound = tracked_id or rec.get("assessment_id")
-                rec.update({"app_id": app_id, "config": args.config, "adapter": args.adapter,
-                            "pid": os.getpid(), "ts": time.time(),
-                            "state": "serving" if not client.fatal_error else "fatal",
-                            "stats": dict(client.stats),
-                            "assessment_id": bound,
-                            "fatal_error": client.fatal_error})
-                rec.setdefault("started_at", time.time())
-                # Heartbeat FIRST. Liveness is judged by heartbeat age, and the reconcile below is a
-                # network call that can take as long as the API timeout; writing after it let a slow
-                # control plane push a perfectly healthy bridge toward "stale".
                 try:
-                    S.write_status(app_id, rec)
-                except Exception:
-                    pass
-                # Reconcile on a slower cadence (~every 3rd beat = 30s) to bound control-plane load.
-                if control is not None and n % 3 == 0:
+                    rec = S.read_status(app_id) or {}
+                    # The bridge is often started BEFORE its assessment exists (ensure-before-create),
+                    # so the id cannot come from argv alone: the parent writes the real id into this
+                    # status file once the run is created, and we pick it up here. That binding is what
+                    # scopes the stop decision to OUR run instead of "whatever ran on this app last".
+                    bound = tracked_id or rec.get("assessment_id")
+                    rec.update({"app_id": app_id, "config": args.config, "adapter": args.adapter,
+                                "pid": os.getpid(), "ts": time.time(),
+                                "state": "serving" if not client.fatal_error else "fatal",
+                                "stats": dict(client.stats),
+                                "assessment_id": bound,
+                                "fatal_error": client.fatal_error})
+                    rec.setdefault("started_at", time.time())
+                    # Heartbeat FIRST. Liveness is judged by heartbeat age, and the reconcile below is a
+                    # network call that can take as long as the API timeout; writing after it let a slow
+                    # control plane push a perfectly healthy bridge toward "stale".
                     try:
-                        asmts = _assessments_for(control, app_id)
-                        rec["reconcile_error"] = None
-                        cur = None
-                        if bound:
-                            cur = next((a for a in asmts if a.get("id") == bound), None)
-                        cur = cur or (_latest(asmts)[0] if asmts else None)
-                        rec["asmt_status"] = (cur or {}).get("status")
-                        decision, terminal_since = _reconcile_step(
-                            asmts, now=time.time(), started_at=rec.get("started_at"),
-                            last_probe_ts=client.last_probe_ts,
-                            idle_timeout_s=idle_timeout_s, control_ok=True,
-                            terminal_since=terminal_since, bound_id=bound)
-                    except Exception as e:
-                        # Could not verify — keep serving. Never self-kill on a transient error:
-                        # an unanswered probe scores a FALSE PASS.
-                        rec["reconcile_error"] = f"{type(e).__name__}: {e}"
-                        decision = "serve"
-                    if decision != "serve":
-                        rec["state"] = ("stopped-complete" if decision == "stop-terminal"
-                                        else "stopped-idle")
+                        S.write_status(app_id, rec)
+                    except Exception:
+                        pass
+                    # Reconcile on a slower cadence (~every 3rd beat = 30s) to bound control-plane load.
+                    if control is not None and n % 3 == 0:
                         try:
-                            S.write_status(app_id, rec)
-                        except Exception:
-                            pass
-                        logging.getLogger("ascendbridge").info(
-                            "self-reconcile: %s — stopping bridge for %s", decision, app_id)
-                        client.stop()
+                            asmts = _assessments_for(control, app_id)
+                            rec["reconcile_error"] = None
+                            cur = None
+                            if bound:
+                                cur = next((a for a in asmts if a.get("id") == bound), None)
+                            cur = cur or (_latest(asmts)[0] if asmts else None)
+                            rec["asmt_status"] = (cur or {}).get("status")
+                            decision, terminal_since = _reconcile_step(
+                                asmts, now=time.time(), started_at=rec.get("started_at"),
+                                last_probe_ts=client.last_probe_ts,
+                                idle_timeout_s=idle_timeout_s, control_ok=True,
+                                terminal_since=terminal_since, bound_id=bound)
+                        except Exception as e:
+                            # Could not verify — keep serving. Never self-kill on a transient error:
+                            # an unanswered probe scores a FALSE PASS.
+                            rec["reconcile_error"] = f"{type(e).__name__}: {e}"
+                            decision = "serve"
+                        if decision != "serve":
+                            rec["state"] = ("stopped-complete" if decision == "stop-terminal"
+                                            else "stopped-idle")
+                            try:
+                                S.write_status(app_id, rec)
+                            except Exception:
+                                pass
+                            logging.getLogger("ascendbridge").info(
+                                "self-reconcile: %s — stopping bridge for %s", decision, app_id)
+                            client.stop()
+                            return
+                    try:
+                        S.write_status(app_id, rec)
+                    except Exception:
+                        pass
+                    if client.fatal_error:
                         return
-                try:
-                    S.write_status(app_id, rec)
-                except Exception:
-                    pass
-                if client.fatal_error:
-                    return
+                except Exception as e:  # noqa: BLE001
+                    # The heartbeat IS liveness. A crash here used to end the thread silently: the
+                    # process lived on, the heartbeat aged past HEARTBEAT_STALE_S, and the relay became
+                    # the alive-but-not-serving state that blocked its own replacement.
+                    logging.getLogger("ascendbridge").warning("heartbeat error: %s: %s",
+                                                                 type(e).__name__, e)
                 n += 1
                 time.sleep(10)
 
@@ -3403,23 +3651,23 @@ def cmd_target_check(args):
 
 def cmd_target_rm(args):
     """Forget a target: delete the application and drop its stored key."""
-    import creds as C
     ref = args.target
-    app_id = ref if str(ref).startswith("aapp_") else _resolve_app(_client(args), ref)
-    removed_key = False
-    if not getattr(args, "keep_key", False):
-        try:
-            removed_key = C.remove(app_id)
-        except Exception:
-            removed_key = False
-    deleted = False
+    c = _client(args)
+    app_id = ref if str(ref).startswith("aapp_") else _resolve_app(c, ref, exact=True)
+    _confirm_destroy(args, f"delete target {ref!r} ({app_id}) and every assessment under it?")
     try:
-        _client(args).delete_app(app_id)
-        deleted = True
+        r = _retire_app(c, app_id, keep_key=getattr(args, "keep_key", False))
     except Exception as e:
-        print(f"warning: could not delete the application ({type(e).__name__})", file=sys.stderr)
-    _out({"app_id": app_id, "app_deleted": deleted, "key_removed": removed_key}, args,
-         human=f"removed {app_id}  (app_deleted={deleted}, key_removed={removed_key})")
+        # The key is still stored (the retire order keeps it when the delete fails), so the target
+        # can still be served and retried. If the app is already gone, `keys prune` drops the key.
+        hint = ("\n  the app no longer exists; drop its dead key with:  ascend keys prune"
+                if "404" in str(e) else "")
+        _out({"app_id": app_id, "app_deleted": False, "key_removed": False, "error": str(e)},
+             args, human=f"error: could not delete the application ({type(e).__name__}: {e}){hint}")
+        sys.exit(EXIT_ERROR)
+    _out({"app_id": app_id, "app_deleted": True, "key_removed": r["key_removed"],
+          "bridge_stopped": r["bridge_stopped"]}, args,
+         human=f"removed {app_id}  (app_deleted=True, key_removed={r['key_removed']})")
 
 
 def _looks_like_jsonl(path, sample=20):
@@ -4401,7 +4649,7 @@ def cmd_relay_stop(args):
     if args.all:
         targets = [r["app_id"] for r in S.ls()]
     for ref in (args.app or []):
-        targets.append(ref if str(ref).startswith("aapp_") else _resolve_app(_client(args), ref))
+        targets.append(ref if str(ref).startswith("aapp_") else _resolve_app(_client(args), ref, exact=True))
     if not targets:
         _die("pass --app <name> (repeatable) or --all")
     _say(args, f"Stopping {len(dict.fromkeys(targets))} bridge(s)...")
@@ -4501,7 +4749,7 @@ def cmd_keys_add(args):
     if not str(args.key).startswith("tc-"):
         _die("a bridge key looks like 'tc-…' — that does not")
     c = _client(args)
-    app_id = _resolve_app(c, args.app)
+    app_id = _resolve_app(c, args.app, exact=True)
     name = None
     try:
         name = (c.get_app(app_id) or {}).get("name")
@@ -4521,21 +4769,20 @@ def cmd_keys_rm(args):
     """
     import creds as C
     c = _client(args) if (not str(args.app).startswith("aapp_") or args.delete_app) else None
-    app_id = args.app if str(args.app).startswith("aapp_") else _resolve_app(c, args.app)
+    app_id = args.app if str(args.app).startswith("aapp_") else _resolve_app(c, args.app, exact=True)
+    if args.delete_app:
+        _confirm_destroy(args, f"delete app {args.app!r} ({app_id}) and its stored key?")
+    else:
+        _confirm_destroy(args, f"forget the stored bridge key for {args.app!r}? It cannot be re-read")
     _say(args, f"Removing the stored key for {args.app}...")
-    removed = C.remove(app_id)
-    if removed:
-        _say(args, "key removed", done=True)
     app_deleted = False
     if args.delete_app:
-        try:
-            import supervisor as S
-            if S.is_running(app_id):
-                S.stop(app_id)
-        except Exception:
-            pass
-        c.delete_app(app_id)
-        app_deleted = True
+        r = _retire_app(c, app_id)
+        removed, app_deleted = r["key_removed"], True
+    else:
+        removed = C.remove(app_id)
+    if removed:
+        _say(args, "key removed", done=True)
     human = ("removed the stored key" if removed else "no stored key for that app")
     if app_deleted:
         human += " · deleted the Ascend app too"
@@ -4809,7 +5056,7 @@ def cmd_policy_push(args):
         _die(f"no policy file at {P.policy_path(getattr(args, 'policy', None))}\n"
              f"  create one:  ascend policy set --app {args.app!r} --category data_leak=high")
 
-    app_id = _resolve_app(c, args.app)
+    app_id = _resolve_app(c, args.app, exact=True)
     app = c.get_app(app_id)
     app_name = app.get("name") or args.app
 
@@ -6268,6 +6515,8 @@ def build_parser():
     s.add_argument("app", help="app name or aapp_ id")
     s.add_argument("--keep-key", action="store_true",
                    help="keep the stored bridge key (default: remove it — a key without its app is dead)")
+    s.add_argument("--yes", action="store_true",
+                   help="skip the confirmation prompt (non-interactive runs never prompt)")
     s.set_defaults(func=cmd_app_delete)
 
     # controls
@@ -6556,6 +6805,8 @@ def build_parser():
                       help="delete the application and drop its stored key")
     s.add_argument("target", help="target name or aapp_ id")
     s.add_argument("--keep-key", action="store_true", help="leave the stored bridge key in place")
+    s.add_argument("--yes", action="store_true",
+                   help="skip the confirmation prompt (non-interactive runs never prompt)")
     s.set_defaults(func=cmd_target_rm)
     # The registry of adapter TYPES, i.e. "what kinds of target can this onboard?". It was only
     # reachable as `adapter list`, which was the single reason anyone still needed that noun.
@@ -6717,6 +6968,8 @@ def build_parser():
     s.add_argument("app", help="app name or aapp_ id")
     s.add_argument("--delete-app", action="store_true",
                    help="also delete the Ascend app (retire the pair: a keyless app can't be served)")
+    s.add_argument("--yes", action="store_true",
+                   help="skip the confirmation prompt (non-interactive runs never prompt)")
     s.set_defaults(func=cmd_keys_rm)
 
     # tenant (the single-tenant lock)

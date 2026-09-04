@@ -28,6 +28,17 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ### Fixed
 
+- **An `env:` credential reference now resolves, or fails loudly.** Two defects pushed operators
+  straight back to plaintext secrets, which is the one outcome the feature exists to prevent.
+  `--login-body 'client_id=env:DEMO_ID&...'` POSTed the literal string `env:DEMO_ID` — the refs
+  were recorded into the runtime auth block correctly, but the CLI's own onboarding-time login
+  call never resolved them, so the exchange 401'd and the documented fallback was to type the
+  secret on the command line. And a relay inherits `os.environ`, so one started from a shell that
+  does not export the referenced variable came up healthy and was then refused by the target on
+  every probe — which scores as no findings, i.e. exactly the false pass the design exists to
+  prevent. `bridge start` now refuses, names the missing variable, and says what would have
+  happened. Both found by driving real onboardings against gated targets.
+
 - **A recovered assessment that is running no longer reads like a failure.** `assess run`
   absorbs a transport error after the assessment is created — it asks the platform what state the
   run is really in, rather than reporting a failure the operator would retry into a duplicate run.

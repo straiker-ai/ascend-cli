@@ -8,10 +8,10 @@ usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] m
        [--cookie 'k=v; k2=v2'] [--token-file PATH] [--body-field key=value] [--login-url URL]
        [--login-body JSON|FORM] [--token-path DOTPATH] [--login-method {POST,GET}]
        [--token-regex RE] [--token-header NAME] [--insecure] [--ca-bundle PATH]
-       [--client-cert PATH] [--client-key PATH] [--proxy URL] [--prompt-hint PROMPT_HINT]
-       [--allow-internal] [--timeout TIMEOUT] [--prompt PROMPT] [--headless] [--no-headless]
-       [--manual] [--settle SETTLE] [--response-path DOTPATH] [--save-evidence SAVE_EVIDENCE]
-       [--code] [--out OUT]
+       [--client-cert PATH] [--client-key PATH] [--proxy URL] [--cdp [ENDPOINT]]
+       [--prompt-hint PROMPT_HINT] [--allow-internal] [--timeout TIMEOUT] [--prompt PROMPT]
+       [--headless] [--no-headless] [--manual] [--settle SETTLE] [--response-path DOTPATH]
+       [--save-evidence SAVE_EVIDENCE] [--code] [--out OUT]
        [evidence]
 
 positional arguments:
@@ -67,6 +67,11 @@ options:
   --client-cert PATH    client certificate (PEM) for mTLS (default: None)
   --client-key PATH     client private key (PEM) for mTLS (default: None)
   --proxy URL           HTTP(S) proxy for the probe/validate calls (default: None)
+  --cdp [ENDPOINT]      with --url: attach to a browser you are ALREADY signed into (start it with
+                        `chrome --remote-debugging-port=9222`) instead of launching one. The only
+                        route into an Entra / SAML / SSO-gated target. Default endpoint
+                        http://127.0.0.1:9222; the written adapter attaches the same way, and your
+                        browser is never closed. (default: None)
   --prompt-hint PROMPT_HINT
                         with --curl: the literal prompt text used in that command (default: None)
   --allow-internal      allow link-local/cloud-metadata hosts (169.254/fd00::) — off by default

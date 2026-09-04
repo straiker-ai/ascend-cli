@@ -11,9 +11,9 @@ usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] o
        [--login-url URL] [--login-body JSON|FORM] [--token-path DOTPATH]
        [--login-method {POST,GET}] [--token-regex RE] [--token-header NAME] [--insecure]
        [--ca-bundle PATH] [--client-cert PATH] [--client-key PATH] [--proxy URL]
-       [--prompt-hint PROMPT_HINT] [--size {small,medium,large}] [--qpm QPM] [--prompt PROMPT]
-       [--settle SETTLE] [--headless] [--manual] [--timeout TIMEOUT] [--dry-run] [--force]
-       [--wait] [--detail] [--interval INTERVAL] [--timeout-assess TIMEOUT_ASSESS]
+       [--cdp [ENDPOINT]] [--prompt-hint PROMPT_HINT] [--size {small,medium,large}] [--qpm QPM]
+       [--prompt PROMPT] [--settle SETTLE] [--headless] [--manual] [--timeout TIMEOUT] [--dry-run]
+       [--force] [--wait] [--detail] [--interval INTERVAL] [--timeout-assess TIMEOUT_ASSESS]
        [--assessment-name ASSESSMENT_NAME] [-v]
 
 options:
@@ -79,6 +79,11 @@ options:
   --client-cert PATH    client certificate (PEM) for mTLS
   --client-key PATH     client private key (PEM) for mTLS
   --proxy URL           HTTP(S) proxy for the probe/validate calls
+  --cdp [ENDPOINT]      with --url: attach to a browser you are ALREADY signed into (start it with
+                        `chrome --remote-debugging-port=9222`) instead of launching one. The only
+                        route into an Entra / SAML / SSO-gated target. Default endpoint
+                        http://127.0.0.1:9222; the written adapter attaches the same way, and your
+                        browser is never closed.
   --prompt-hint PROMPT_HINT
                         with --curl: the literal prompt text used in that command
   --size {small,medium,large}

@@ -9,6 +9,21 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ### Fixed
 
+- **`--cdp`: onboard a target behind Entra / SAML / SSO by attaching to a browser you are already
+  signed into.** `runtime/adapters/browser.py` has supported `cdp_url` all along, but the capture
+  (`--url`) launched its own Chromium, which stopped at the login wall and never saw the widget, so
+  no config could be derived. `target add --url … --cdp` (default `http://127.0.0.1:9222`, from
+  `chrome --remote-debugging-port=9222`) attaches instead, reuses the signed-in context, never closes
+  your browser, and stamps `cdp_url` on the written config so the assessment attaches the same way
+  the capture proved. On all five onboarding commands.
+- **`app create --type api` refuses a config whose auth is a handshake.** `_spec_from_config`
+  borrowed url/headers/body and silently dropped `auth`; an `api`-type app is called by the platform
+  directly and can carry only static headers, so an OAuth2/CSRF target registered that way 401'd on
+  every probe unwarned. Now refused with the fix named — and refused *before* the platform client is
+  built, because a local check on a local file must not need a credential (it used to print "no
+  token" instead of the real problem).
+- `target add --login-url` no longer prints `wrote <config>` twice.
+
 - **`target add` can now onboard a target that is behind a login.** Driven against a matrix of
   auth-gated agents, 4 of 8 schemes could not be onboarded through the primary command at all, and
   the cause was three seams that were built and never joined — not missing capability.

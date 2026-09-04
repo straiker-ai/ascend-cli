@@ -297,7 +297,7 @@ assessment findings summary
 | Flag | Value | Default | What it does |
 |---|---|---|---|
 | `--app` **(required)** | `APP` | — | app name or aapp_ id |
-| `--assessment` **(required)** | `ASSESSMENT` | — | assessment id (asmt_...) |
+| `--assessment` | `ASSESSMENT` | — | assessment id (asmt_...); default: the latest finished run on the app |
 | `--detail` | — | — | show key findings per control |
 
 ### `ascend assess resume`
@@ -431,6 +431,7 @@ reconcile bridges to assessment state — start for running/paused apps, stop fo
 | Flag | Value | Default | What it does |
 |---|---|---|---|
 | `--no-stop` | — | — | only start missing bridges; never stop one |
+| `--app` *(repeatable)* | `APP` | — | only these apps (repeatable; name or aapp_ id). Default: every app on the tenant |
 
 ### `ascend chat`
 

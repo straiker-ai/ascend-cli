@@ -185,6 +185,12 @@ def _extract(data: Any, path: str) -> Any:
 
     Blocks are joined with no separator because they are consecutive runs of one message, not a
     list of distinct items; the fragments above concatenate into the original sentence.
+
+    A NEGATIVE index counts from the end, so ``messages.-1.content`` is "the last message". That
+    is the shape of every transcript-returning target — a gateway or GraphQL envelope that hands
+    back the whole conversation, user turn first, assistant reply last. Without it the deriver had
+    to name a fixed index: ``messages.0.content`` scores the probe's OWN prompt echoed back, and
+    ``messages.1.content`` breaks the moment the target adds a system turn.
     """
     # `content[].text` splits as ["content[]", "text"], so a trailing `[]` expands into its key
     # plus a wildcard segment; a bare `[]` is the wildcard on its own.

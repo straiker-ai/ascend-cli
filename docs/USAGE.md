@@ -258,7 +258,7 @@ replay it:  ascend results captures/mybot-20260816-204133.jsonl
 ```
 
 Everything is recorded by default in the same evidence format the relay writes, so a
-manual session and an Iris-driven run are analysed the same way. To watch a live
+manual session and a platform-driven run are analysed the same way. To watch a live
 assessment relay its probes in real time:
 
 ```bash

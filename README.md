@@ -71,7 +71,7 @@ the legacy bridge hit cannot occur here.
 ```mermaid
 sequenceDiagram
     autonumber
-    participant I as Straiker Ascend<br/>(Iris engine)
+    participant I as Straiker Ascend AI
     participant B as ascend bridge<br/>(pull-mode)
     participant A as Adapter<br/>(1 of 15)
     participant T as Your AI target

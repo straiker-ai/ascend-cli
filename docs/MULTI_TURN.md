@@ -8,9 +8,9 @@ responsible for that continuity. The default policy is *sequential*.
 
 ## Why the client owns continuity
 
-Ascend's assessment engine (Iris) puts **only the prompt** on the wire. A probe body carries the
-rendered prompt and nothing else. There is no `conversation_id` field: Iris `Probe` has a `prompt`
-field and no `conversation_id`. For a *direct* `api` app, Iris runs the per-target
+Ascend AI puts **only the prompt** on the wire. A probe body carries the
+rendered prompt and nothing else. There is no `conversation_id` field: a probe carries a `prompt`
+and no `conversation_id`. For a *direct* `api` app, the platform runs the per-target
 session/conversation logic server-side in its own plugins. For a **bridge** app that logic is
 absent, so it lives in the runtime, in `runtime/dispatch.py`.
 
@@ -27,7 +27,7 @@ per-conversation lock so a stateful adapter's turns stay strictly ordered even u
 
 ## The correctness problem and the default policy
 
-Iris gives the runtime **no correlation id**, so the runtime cannot tell which in-flight probe
+The platform gives the runtime **no correlation id**, so the runtime cannot tell which in-flight probe
 belongs to which conversation. If it ran probes concurrently against a single shared stateful
 instance, turns from different logical conversations would interleave and corrupt each other.
 
@@ -166,7 +166,7 @@ is for rotating the whole *identity/session*.
 
 | Concern | Where it lives | Default |
 |---|---|---|
-| Prompt-only wire, no conversation id | Iris `Probe` | — |
+| Prompt-only wire, no conversation id | the probe payload | — |
 | Per-conversation session continuity | persistent adapter instance in `ConversationRouter` | one instance per key |
 | No correlation id → interleave risk | sequential policy | `max_workers=1` for stateful |
 | Opt-in concurrency | `conversation_key` (`header:` / `body:`) | off (sequential) |

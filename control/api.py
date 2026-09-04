@@ -46,7 +46,7 @@ GOTCHAS (a bad create returns a vague `400 rejected by the upstream service`)
   - The assessment-create body only takes `{"name": ...}`; the run inherits the
     APP's controls / size / QPM, so scope those on the app (create or PATCH).
   - Created assessments start `paused` — you MUST resume() to run them.
-  - Progress % is non-monotonic for agentic strategies (Iris grows the probe set
+  - Progress % is non-monotonic for agentic strategies (the platform grows the probe set
     mid-run); poll `progress` (0->1) and `status`, not just the score.
 
 CLI

@@ -2997,7 +2997,7 @@ def _finish_discovery(cfg, args, *, source, browser_recipe=None, response_sample
     # looks right, passes the gate, and quietly scores wire noise for the whole assessment.
     cfg, vres = _upgrade_streaming_shape(cfg, vres, args, V)
 
-    # Per-app ADAPTER as code (Iris -> Bridge -> Adapter -> App). The 15 built-ins are the common
+    # Per-app ADAPTER as code (platform -> bridge -> adapter -> target). The 15 built-ins are the common
     # patterns; --code emits a self-contained module for THIS app and proves the CODE (not just the
     # contract) against the live target.
     if getattr(args, "agent", False):
@@ -4182,7 +4182,7 @@ def _read_records(path):
 def _norm_record(rec, pending):
     """Normalize one evidence record to a turn {prompt, response, status, ok}.
 
-    Handles BOTH shapes so manual sessions and Iris-driven bridge runs read the same:
+    Handles BOTH shapes so manual sessions and platform-driven bridge runs read the same:
       * chat writes kind="turn" (prompt+response together)
       * the bridge writes kind="probe" then kind="result" for the same request_id
     """
@@ -4206,7 +4206,7 @@ def _norm_record(rec, pending):
         return {"id": rid, "prompt": pending.pop(rid, ""),
                 "response": str(body.get("response", "")), "status": rec.get("status_code"),
                 "ok": rec.get("status_code") == 200 and bool(body.get("response")),
-                "ms": None, "source": "iris"}
+                "ms": None, "source": "platform"}
     return None
 
 
@@ -7085,7 +7085,7 @@ def build_parser():
     rcp = sub.add_parser("recon", parents=[GLOBALS], formatter_class=_Fmt,
                          help="reconnaissance: enumerate what the target can do, before or instead of attack probes",
                          description=("Reconnaissance is a run of its own, as in the Console's Reconnaissance tab: "
-                                      "Iris asks the target what it can do — tools, data access, guardrails, "
+                                      "Ascend asks the target what it can do — tools, data access, guardrails, "
                                       "rendering, sub-agents — and records which capabilities it confirmed. "
                                       "A found capability is the surface an assessment should target.\n\n"
                                       "  ascend recon run --app 'My Bot'                 # recon only\n"
@@ -8117,7 +8117,7 @@ def _flow_diagram(stream=None, *, color=None):
     bridge = list(BRIDGE) + [" "] * (ROWS - len(BRIDGE))
     adapter = list(ADAPTER) + [" "] * (ROWS - len(ADAPTER))
 
-    cloud = ["Iris", "  makes the probes", "  scores the replies",
+    cloud = ["Ascend AI", "  makes the probes", "  scores the replies",
              "", "findings", "  severity", "  controls"]
     cmds = ["", c("target add", B), c("target check", DIM), c("assess run", B),
             c(f"results {g['dot']} ci", DIM), "", ""]
@@ -8193,7 +8193,7 @@ def _flow_diagram_narrow(stream=None, *, color=None):
     def c(s, code):
         return f"{code}{s}{OFF}" if color else s
     return [
-        "  " + c("straiker cloud", DIM) + c("   Iris makes the probes, scores the replies", DIM),
+        "  " + c("straiker cloud", DIM) + c("   Ascend AI makes the probes, scores the replies", DIM),
         f"      {up}  {c('bridge', B)}  {c('leases probes over https, returns the replies', DIM)}",
         "  " + c("your machine", DIM) + c("     ascend cli", DIM),
         f"      {dn}  {c('adapter', B)} {c('speaks the target protocol — one per target', DIM)}",

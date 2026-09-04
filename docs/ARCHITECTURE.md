@@ -21,10 +21,10 @@ route into your network.
 ```mermaid
 flowchart LR
     subgraph straiker["Straiker Ascend cloud"]
-        IRIS["Iris engine<br/>generates attacks<br/>scores responses"]
+        ASCEND["Ascend AI<br/>generates attacks<br/>scores responses"]
         LEASE["lease service<br/>/v2/lease · /v2/result"]
         API["v3 API<br/>apps · assessments<br/>controls · findings"]
-        IRIS <--> LEASE
+        ASCEND <--> LEASE
     end
     subgraph yours["Your network / laptop"]
         CLI["<b>ascend</b> CLI"]
@@ -63,7 +63,7 @@ bridge dropped", they nearly always mean their own bridge process is not running
 ```mermaid
 sequenceDiagram
     autonumber
-    participant I as Iris (Straiker)
+    participant I as Ascend AI (Straiker cloud)
     participant R as bridge (yours)
     participant A as adapter
     participant T as your agent

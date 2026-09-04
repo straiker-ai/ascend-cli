@@ -28,6 +28,25 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ### Fixed
 
+- **No internal service name reaches a customer.** The launch-screen diagram named the assessment
+  engine "Iris" — an internal service name. In the customer's world that is **Ascend AI**, running
+  in the Straiker cloud, and that is what the diagram, the recon help, the generated adapter
+  scaffold, six docs pages and the architecture diagram now say. `probe_shadow` became "the lease
+  service" and the bridge artifact is named for the product. `tests/test_no_internal_codenames.py`
+  fails on any shipped file that names one, so a new leak cannot ship quietly.
+
+- **The answer path on a target that returns the whole conversation.** Found in the second
+  forge-and-test loop against a GraphQL target: the derived path landed on a GraphQL `__typename`
+  ("SendMessagePayload"), which the constant-response guard refused — the safety net held, but the
+  target could not be onboarded by following the CLI's own advice. Three general causes, none
+  GraphQL-specific: `__typename` was an eligible answer leaf; a role-tagged transcript had no way
+  to say "the last turn", so the deriver could select the probe's OWN echoed prompt; and the
+  block-index rule then concatenated the echo onto the reply. A transcript now resolves to its
+  last agent turn, a negative index (`messages.-1.content`) selects from the end, and a list of
+  role-tagged turns is never wildcarded. This also fixes a pre-existing bug the same rule caused
+  on OpenAI-style `choices`, which its own docstring said must not happen: two alternative
+  completions were concatenated into one answer.
+
 - **Patterns from the first forge-and-test loop.** Each reproduced against `agent-forge` and fixed at
   one seam. A WebSocket target with the API key in the query string: `--api-key …:in=query` was
   folded into an HTTP URL and silently dropped for a `ws://` one, and the runtime never folded auth
@@ -657,7 +676,7 @@ first, and then `$ASCEND_PLATFORM_PROBE_WINDOW_MS` tells the CLI about it.
 First release for the SE team. A single, scriptable CLI that connects the **Straiker Ascend**
 assessment cloud to any AI target and runs a red-team assessment end to end.
 
-The model is **Iris → Bridge → Adapter → App**: the bridge is generic; the *adapter* is the
+The model is **Ascend → bridge → adapter → target**: the bridge is generic; the *adapter* is the
 per-app piece that knows how to talk to one specific target.
 
 ### Connecting to targets

@@ -1,7 +1,7 @@
 # Reconnaissance
 
 Reconnaissance is a run of its own. In the Console it lives on the **Reconnaissance** tab and is
-started separately from an assessment: Iris asks the target what it *can do* — which tools it has,
+started separately from an assessment: Ascend asks the target what it *can do* — which tools it has,
 what data it can reach, how its guardrails behave, what it renders, whether sub-agents exist — and
 records which capabilities it confirmed. A confirmed capability is the surface an assessment should
 then attack. The five categories are Architecture, General, I/O Handling, PII Discovery and Tool

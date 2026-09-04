@@ -168,6 +168,8 @@ _ID_LEAF_KEYS = {
     "chatid", "chat_id", "messageid", "message_id", "runid", "run_id", "model",
     "object", "type", "role", "status", "state", "created", "created_at",
     "createdat", "updated_at", "timestamp", "finish_reason", "finishreason",
+    # GraphQL stamps __typename on every object; its value is a type name, never an answer.
+    "__typename", "typename",
     "stop_reason", "stopreason", "version", "provider", "engine", "index",
     "code", "locale", "language", "mimetype", "content_type", "contenttype",
 }

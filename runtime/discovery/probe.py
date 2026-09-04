@@ -966,7 +966,7 @@ class _State:
         return self.fivexx.get(url, 0) >= _MAX_5XX_PER_ENDPOINT
 
     # -- the single request -------------------------------------------------
-    def try_candidate(self, url: str, shape: Shape) -> Attempt:
+    def try_candidate(self, url: str, shape: Shape, *, retried: bool = False) -> Attempt:
         """Send ONE benign request and record everything we learned from it."""
         import requests  # lazy: keeps this module import-time network-free
 
@@ -1060,8 +1060,19 @@ class _State:
             att.outcome, att.detail = "rate_limited", "HTTP 429 — target is rate limiting us"
             if self.rate_limited >= _MAX_RATE_LIMITED:
                 self.aborted = "rate_limited"
-            return self._record(att, target, shape, json_body, data_body, params,
-                                headers, status, har_h, body, ctype)
+            self._record(att, target, shape, json_body, data_body, params,
+                         headers, status, har_h, body, ctype)
+            # One 429 on the real endpoint sent the probe on to nineteen other paths and a
+            # "not found" verdict. Wait what the target asked (bounded) and try THIS candidate
+            # once more; a second 429 stands and counts toward the abort.
+            if not retried and not self.aborted:
+                try:
+                    wait = min(max(float(lower_h.get("retry-after") or 2), 0.5), 10.0)
+                except ValueError:
+                    wait = 2.0
+                time.sleep(wait)
+                return self.try_candidate(url, shape, retried=True)
+            return att
 
         if status >= 500:
             self.fivexx[target] = self.fivexx.get(target, 0) + 1
@@ -1306,6 +1317,13 @@ def _diagnose(state: _State, host: str, tried: List[str]) -> Tuple[str, str, str
                 "Export a HAR of one real exchange from the browser and pass --har <file> — the "
                 "two-step contract is derived from it — or write the two calls yourself: "
                 "`ascend target add --scaffold ./my_adapter.py`, then `--module ./my_adapter.py`.")
+    limited = [a.url for a in state.attempts if a.outcome == "rate_limited"]
+    if limited:
+        return ("rate_limited",
+                f"{limited[0]} answered HTTP 429 — the target is rate limiting this client, and "
+                f"no other candidate path answered.",
+                "Wait, then re-run; or ask the owner for the probe's allow-list / a higher limit. "
+                "The probe already retried once after Retry-After.")
     return ("not_found",
             f"{host} is UP (it answered {len(statuses)} request(s)) but none of the "
             f"{len(tried)} candidate paths behaved like a chat endpoint. Tried: {tried_str}",

@@ -173,3 +173,25 @@ class TestWebSocketQueryKey:
         src = inspect.getsource(ascend.cmd_onboard)
         i = src.index("res = probe_ws(")
         assert "auth_query" in src[i - 600:i] and "probe_ws(ws_url" in src
+
+
+class TestProbeRateLimit:
+    def test_a_429_on_the_real_endpoint_is_retried_once(self, monkeypatch):
+        seen = {"n": 0}
+        def handler(method, url, kw):
+            if url.endswith("/chat"):
+                seen["n"] += 1
+                if seen["n"] == 1:
+                    return FakeResponse(429, {"error": "rate limited"}, headers={**JSON_CT, "Retry-After": "1"})
+                return FakeResponse(200, {"reply": "Yes, we are open until 6pm on weekdays."}, headers=JSON_CT)
+            return FakeResponse(404, {"detail": "Not Found"}, headers=JSON_CT)
+        res, _ = run(monkeypatch, handler, "https://bot.example.com/chat")
+        assert res.ok is True and seen["n"] == 2, (res.diagnosis, res.message)
+
+    def test_a_persistently_rate_limited_endpoint_is_named_not_lost(self, monkeypatch):
+        def handler(method, url, kw):
+            if url.endswith("/chat"):
+                return FakeResponse(429, {"error": "rate limited"}, headers=JSON_CT)
+            return FakeResponse(404, {"detail": "Not Found"}, headers=JSON_CT)
+        res, _ = run(monkeypatch, handler, "https://bot.example.com/chat")
+        assert res.diagnosis == "rate_limited" and "429" in res.message

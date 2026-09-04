@@ -39,6 +39,16 @@ import tenant as _tenant
 
 REPO = Path(__file__).resolve().parent.parent
 HEARTBEAT_STALE_S = 180.0        # no heartbeat for this long => "dead", not "serving"
+STARTUP_GRACE_S = 3.0            # longest start() watches a fresh child for its first heartbeat or its death
+
+
+def _startup_grace_s() -> float:
+    """$ASCEND_STARTUP_GRACE_S overrides the startup watch (0 disables it) — for tests that spawn
+    stand-in children, and for an operator whose relays legitimately take longer to say hello."""
+    try:
+        return float(os.environ.get("ASCEND_STARTUP_GRACE_S", STARTUP_GRACE_S))
+    except ValueError:
+        return STARTUP_GRACE_S
 STALE_REAP_S = 86_400.0          # a relay dead this long is history, not state (see prune())
 
 
@@ -201,7 +211,30 @@ def start(app_id: str, *, config: str, adapter: Optional[str], api_key: str,
                           "adapter": adapter, "pid": proc.pid, "state": "starting",
                           "assessment_id": assessment_id, "asmt_status": None,
                           "started_at": time.time(), "ts": time.time(), "stats": {}})
+    # A relay that dies at startup — a config that does not exist, an adapter that fails to
+    # import, a key of the wrong shape — used to be reported "started" with a pid; the operator
+    # learned otherwise from an empty `bridge ls`, or from a run that scored clean having asked
+    # nobody. Give it a moment and look.
+    deadline = time.time() + _startup_grace_s()
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            _clear(app_id)
+            return {"app_id": app_id, "log": str(p["log"]),
+                    "error": f"relay exited at startup (code {proc.returncode}): {_log_tail(p['log'])}"}
+        st = read_status(app_id) or {}
+        if st.get("pid") == proc.pid and st.get("state") in ("serving", "fatal"):
+            break                                   # the child's first heartbeat: it is up
+        time.sleep(0.1)
     return {"app_id": app_id, "pid": proc.pid, "log": str(p["log"])}
+
+
+def _log_tail(path) -> str:
+    """The last non-empty line of a relay log — the `error:` line, when there is one."""
+    try:
+        lines = [l.strip() for l in Path(path).read_text(errors="replace").splitlines() if l.strip()]
+        return lines[-1][:200] if lines else "(no log output)"
+    except OSError:
+        return "(log unreadable)"
 
 
 def stop(app_id: str, *, grace_s: float = 8.0) -> Dict[str, Any]:
@@ -232,6 +265,21 @@ def stop(app_id: str, *, grace_s: float = 8.0) -> Dict[str, Any]:
         pass
     _clear(app_id)
     return {"app_id": app_id, "stopped": True, "pid": pid, "how": "SIGKILL (was draining a lease)"}
+
+
+def forget(app_id: str) -> bool:
+    """Drop every state file for one app's relay — after the app itself was deleted. Refuses while
+    the relay is alive: forgetting a running relay would orphan it. Returns whether anything went."""
+    if is_running(app_id):
+        return False
+    gone = False
+    for k, path in paths_for(app_id).items():
+        try:
+            path.unlink()
+            gone = True
+        except FileNotFoundError:
+            pass
+    return gone
 
 
 def prune(max_age_s: float = STALE_REAP_S) -> List[str]:

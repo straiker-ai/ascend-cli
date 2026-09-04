@@ -1182,12 +1182,23 @@ def _diagnose(state: _State, host: str, tried: List[str]) -> Tuple[str, str, str
         else:
             rerun = ("re-run with --bearer '<token>' | --api-key 'x-api-key:<key>' | "
                      "--basic '<user>:<pass>' | --cookie '<name>=<value>'")
+        # Every flag named below now exists on `target add` as well as `adapter build`. It did
+        # not: this hint recommended --basic, --cookie and --login-* while `target add`'s parser
+        # registered none of them, so following the CLI's own printed advice on the command the
+        # docs make step one returned `unrecognized arguments`.
         return ("auth_required",
                 f"{host} is up and the paths exist, but every request was rejected with "
                 f"401/403.{scheme_line} The probe stopped rather than keep knocking.",
-                f"Supply credentials and {rerun}. For a login/access-code flow, use "
-                "--login-url + --login-body + --token-path. "
-                "(--header 'Authorization: Bearer <token>' also works.)")
+                f"Supply credentials and {rerun}.\n"
+                "  a login that mints a token:  --login-url URL --login-body "
+                "'grant_type=client_credentials&client_id=…' --token-path access_token\n"
+                "  a page that sets a session:  --login-url URL --login-method GET\n"
+                "  a CSRF token in the HTML:    --login-url URL --login-method GET "
+                "--token-regex 'csrf-token\" content=\"([^\"]+)' --token-header X-CSRF-Token\n"
+                "  (--header 'Authorization: Bearer <token>' also works.)\n"
+                "  If the target SIGNS each request (HMAC / X-Signature) or needs a fresh nonce, "
+                "no flag can express that — the credential is computed per request. Write a small "
+                "adapter instead:  ascend target add <url> --scaffold mybot.py")
 
     statuses = [s for lst in state.endpoint_status.values() for s in lst]
     auth_hits = [s for s in statuses if s in (401, 403, 407)]

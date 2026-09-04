@@ -7,6 +7,41 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **`target add` can now onboard a target that is behind a login.** Driven against a matrix of
+  auth-gated agents, 4 of 8 schemes could not be onboarded through the primary command at all, and
+  the cause was three seams that were built and never joined — not missing capability.
+  `runtime/layers/auth.py` has implemented `static`/`oauth2`/`csrf`/`derived_multihop` plus four
+  refresh lifecycles all along, and the bridge re-authenticates before every probe; nothing on
+  `target add` could describe a handshake to it. Measured after: **8 of 8** gated schemes onboard
+  with a real answer (api-key header/query, basic, access-code, token-ttl, OAuth2 client
+  credentials, cookie session, CSRF); HMAC and per-request nonce are refused and routed to
+  `--scaffold`, which is correct — a per-request signature is not static config.
+
+  - **The login flow was orphaned.** `_login_for_token` computed a proper `derived_multihop` block
+    with a `reauth_on_401` lifecycle, and `_apply_login_auth` wrote one onto a config — but each
+    had exactly one caller, on different commands, and neither path ran both. So `adapter build
+    --login-url` shipped a *frozen* `Authorization: Bearer <token>` and no auth block, precisely the
+    failure its own comment says the mechanism exists to prevent; a 60-second token was dead 70
+    seconds later. One `_prepare_target_auth` now runs the exchange for both commands and both
+    write paths attach the recipe. The one-shot token is stripped from the written config: it
+    pinned an expiring credential, shadowed the re-minted one, and put a live secret in a file.
+  - **`target add` lacked the flags its own error recommends.** The 401 hint named `--basic`,
+    `--cookie` and `--login-url`; the parser registered none of them, so following the CLI's
+    printed advice returned `unrecognized arguments`. One shared `_add_target_auth_args` block now
+    feeds `target add`, `onboard`, `adapter build`, `map` and `discover` — the primary command had
+    been strictly *less* capable for auth than the one 1.1.2 demoted. No flag was removed anywhere.
+  - **`--login-body` was JSON-only**, so RFC 6749 `client_credentials` — form-encoded, and the most
+    common enterprise flow — could not be expressed on any command. Shape now decides: a JSON
+    object is JSON, `a=b&c=d` is form-encoded, and the recipe replays with whichever encoding the
+    live exchange actually succeeded with.
+  - **New: `--login-method GET`, `--token-regex`, `--token-header`.** A GET bootstrap that sets a
+    session cookie, or embeds a CSRF token in HTML to be echoed in its own header, is a different
+    shape from a POST login and just as common. Neither could be expressed before.
+  - The auth error now names only flags the printing command accepts, and says plainly that a
+    signed request needs a custom adapter.
+
 ### Added
 
 - **CI (workflow pending a token scope — see `docs/CHANGE_CONTROL.md`).** `.github/` contained only `dependabot.yml`. The test suite, the back-compat corpus, the
@@ -19,6 +54,53 @@ All notable changes to the Ascend CLI. Newest first. Format follows
   protects and what still depends on a person.
 
 - **`ascend ci --app <name>` resolves the latest finished run.** `--assessment` is now optional.
+
+### Changed
+
+- **Exit codes and `--json` shapes a pipeline can rely on.** argparse's own usage errors exited
+  **2** — the same code as `EXIT_FINDINGS` — with plain text under `--json`, so a typo'd flag in an
+  `ascend ci` step read as "findings present". They now exit 3 (`EXIT_USAGE`) through the same
+  path as every other bad invocation, with one JSON error object under `--json`. Intended
+  back-compat change: `ascend not-a-command` and `ascend adapter not-a-verb` exit 3, not 2 (both
+  corpora re-recorded). Also: `bridge start --json` and `bridge sync --json` now exit 1 when
+  nothing could be started (they returned 0 before their failure check); `bridge sync` reports —
+  rather than fails on — live runs on apps this machine holds no key for, takes `--app` to scope
+  itself, and fails only on a start that failed or a scoped app it cannot serve; `assess watch
+  --json` no longer prints the final row twice; `target add <url> --scaffold` no longer trips the
+  "not both" source conflict; `bridge start --foreground` completes its namespace from the
+  `runtime start` parser's own defaults instead of a hand-kept list (it crashed on
+  `wait_ms=None / 1000`) and registers under the app ID with the fleet's consumer scheme (a relay
+  known only by a name was invisible to `is_serving()`, so `assess run` started a second one);
+  `bridge start` refuses an explicit `--config` that does not exist and reports a relay that
+  died at startup as an error with the last line of its log, instead of "started" with a pid
+  that was already gone; `app resolve` and `bridge logs` honour `--json`; `export --out` writes
+  its "wrote …" line to stderr.
+
+- **One rule behind every `--controls`.** `app create` refused an unknown control id unless
+  `--force`, `assess run` only warned and quietly ran the rest, `app update` and onboarding
+  refused with no `--force` at all. `_validated_control_ids` is now the single check: an unknown
+  id is refused (exit 3) unless `--force` applies the ids as given, a set that can generate no
+  probes is refused unless `--force`, warnings are printed. A run narrowed silently scores clean
+  on less than was asked for.
+
+- **`assess results` defaults to the latest finished run.** `--assessment` is optional, resolved
+  by the same `_resolve_assessment` that `ci` and `export` use — it now truly has the three callers
+  its docstring names. Under `--json` a false-pass-suspect run carries `false_pass_suspect: true`
+  and `false_pass_warning` alongside the numbers they qualify.
+- **Several targets on one machine behave.** Audited live with four differently-authenticated
+  targets side by side. `target add --name X` when an app named X already existed **created a
+  second app with the same name** and reported success — after which every command naming X
+  (`assess run`, `results`, `ci`, `export`, `target rm`) was refused as ambiguous. Registration
+  now refuses a duplicate name and spells out the two ways forward (`--app X` adopts the existing
+  app; a new `--name` registers another). `target list` flags same-named targets with their ids.
+  `chat` accepts a target's name (it took only config names, so the name just read in `target
+  list` was refused). The fleet form `assess run --app A --app B` **waits** like the single form —
+  per-run bridge watchdog and pause guard, one summary table, one JSON document, non-zero on
+  anything unfinished (`--no-wait` keeps the fire-and-forget form; it read as success to a
+  pipeline that went straight on to `ci`). `assess results` on a run still going says so and
+  points at `watch` instead of printing `?` fields. Deleting a target names the runs it cancels
+  and forgets the relay's state files, so `bridge ls` stops listing a dead relay for an app that
+  no longer exists. `target add` ends with `talk to it: ascend chat '<name>'`.
 
 ### Fixed
 
@@ -42,6 +124,45 @@ All notable changes to the Ascend CLI. Newest first. Format follows
   the one-line `AuthError` every other auth failure produces. `_materialize_oauth2`,
   `_materialize_csrf` and `_materialize_multihop` — the only three methods in the file that do
   real HTTP — now have error-path coverage.
+- **First-five-minutes polish.** `ascend doctor` says what to do about a failed check (`fix: export
+  STRAIKER_PAT=…`, and `fixes` under `--json`); `ascend target list` works with no PAT in the shell
+  (the list is local — the platform check is a bonus, and used to be a fatal one); `docs/USAGE.md`
+  matches what landed (`assess results` defaults to the latest finished run, `target rm` asks on a
+  terminal, `bridge sync --app`, `chat` by target name, exact names for mutating commands).
+
+- **A wedged relay blocked its own replacement, and the run waited on it to the timeout.** A
+  relay that was alive but had stopped heartbeating was "not serving" to the auto-lifecycle and
+  "already running" to `supervisor.start()`, so every watchdog tick printed *a relay is already
+  running for this app* while the run sat paused — ten minutes of the same line, then exit 1.
+  `_ensure_bridge` now stops a relay that has not beaten in `HEARTBEAT_STALE_S` and starts a fresh
+  one in its place, saying which pid it replaced. A relay that reported a fatal error (a bridge key
+  the lease service rejected) is not churned — its error is surfaced instead. The relay's heartbeat
+  loop is guarded so a crash in it can no longer end liveness silently while the process lives on.
+
+- **A run the platform paused during a relay outage stayed paused after the relay came back.**
+  The watchdog restarted the bridge and nothing resumed the run. A `_PauseGuard` in the `assess run`
+  poll now lifts a pause that follows an outage this command saw and fixed (at most
+  `AUTO_RESUME_MAX` times per run, never a pause it did not see happen — an operator's
+  `assess pause` is left alone and said once), and when a paused run has had no relay startable for
+  `PAUSED_NO_BRIDGE_TICKS` polls it exits 1 immediately with the reason and the two commands that
+  continue the run, instead of polling to the timeout. `--json` gets the same as an object.
+
+- **`assess watch --all --once` never returned.** `--once` was honoured only by the single-app loop.
+
+- **A probe is never sent unauthenticated when the target's login failed.** When the auth layer
+  recorded an error, `TargetCaller.handler` still sent the probe naked — the target's refusal then
+  scored as the target's answer. The probe is now answered locally with a 401 and `_error: auth: …`
+  and never leaves the machine; the same applies when a re-authentication after a 401 fails.
+
+- **`assess run` exited 0 with the assessment still running.** The platform truncates the
+  create-assessment response often enough that the CLI's recovery path is the common one, not the
+  rare one. Recovery found the run, saw `running`, and returned that row — from a `wait=True`
+  call — so `assess run` printed the `--no-wait` hints and exited 0 in two seconds while the
+  probes were still being answered. A pipeline read that as a passing gate. Two seams fed it:
+  `poll_assessment` raised on a single failed GET, and `run()`'s recovery returned whatever state
+  it found regardless of `wait`. Polling now absorbs a few consecutive transport errors, recovery
+  re-resumes and keeps polling when asked to wait, and `assess run` exits non-zero if it was asked
+  to wait and the run is not terminal — a wait that returns early can never be green.
 
 - **`ascend ci` and `ascend export` requested `/assessments/None`.** Both take an optional
   `--assessment` and passed it straight into the URL, so omitting it produced
@@ -120,6 +241,17 @@ All notable changes to the Ascend CLI. Newest first. Format follows
   — two copies of one rule was the defect.
 
   Found by recording the docs walkthrough: the failure was captured on screen mid-take.
+
+- **A command that changes or deletes an app takes its exact name.** `_resolve_app` falls back
+  from an exact name to a case-insensitive substring match — right for `assess results --app bot`,
+  wrong for `target rm bot`, which deleted "Demo Bot" when that was the one app containing "bot".
+  `app update`/`delete`, `target rm`, `keys add`/`rm`, `bridge stop`, `assess pause`/`resume` and
+  `policy push` now refuse a near miss and list the candidates (exit 3). The three deletes confirm
+  on a terminal — never in a pipeline or under `--json`; `--yes` skips it — and share one retire
+  path that stops the relay, deletes the app, and only then drops the stored bridge key. `target rm`
+  used to drop the key first and exit 0 when the delete then failed, leaving an app nobody could
+  serve; it now keeps the key and exits 1 with the reason. Intended `--help` change: `app delete`
+  and `keys rm` gain `--yes` (both back-compat corpora re-recorded; nothing else moved).
 
 ## [1.1.2] — 2026-09-03
 

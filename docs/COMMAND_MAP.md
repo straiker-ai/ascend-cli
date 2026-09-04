@@ -20,7 +20,7 @@
 | `0` | success / clean |
 | `1` | tool or target error — including *could not read results*, never a pass |
 | `2` | findings gate failed (`ascend ci`) |
-| `3` | bad invocation (unknown control id, missing per-type field, malformed flag) |
+| `3` | bad invocation (unknown control id, missing per-type field, malformed or unknown flag or command) |
 
 ## Also available
 
@@ -50,14 +50,17 @@ Build an adapter config for a target and PROVE it against the live target before
 | `--token-file` | `PATH` | — | read a bearer token from this file |
 | `--body-field` *(repeatable)* | `key=value` | — | extra JSON body field, repeatable — for agents whose key/tenant lives in the BODY, e.g. --body-field apiKey=abc --body-field workspace=support. Use key:=raw for a non-string literal (true/1/{...}). |
 | `--login-url` | `URL` | — | POST here first to exchange creds/code for a token |
-| `--login-body` | `JSON` | — | JSON body for --login-url, e.g. '{"code":"1234"}' |
+| `--login-body` | `JSON|FORM` | — | body for --login-url. JSON ('{"code":"1234"}') or form-encoded ('grant_type=client_credentials&client_id=…') — OAuth2 is form-encoded. |
 | `--token-path` | `DOTPATH` | `token` | dot-path to the token in the login response (default: token) |
-| `--prompt-hint` | `PROMPT_HINT` | — | with --curl: the literal prompt text used in that command |
+| `--login-method` | `POST|GET` | `POST` | verb for --login-url (default: POST). GET for a bootstrap page that sets a session cookie or embeds a CSRF token. |
+| `--token-regex` | `RE` | — | extract the token with a regex (first capture group) instead of --token-path — for a token embedded in HTML, e.g. 'csrf-token" content="([^"]+)' |
+| `--token-header` | `NAME` | — | send the extracted token in this header verbatim (e.g. X-CSRF-Token) instead of as 'Authorization: Bearer <token>' |
 | `--insecure` | — | — | skip TLS verification (self-signed internal targets) |
 | `--ca-bundle` | `PATH` | — | custom CA bundle for TLS verification |
 | `--client-cert` | `PATH` | — | client certificate (PEM) for mTLS |
 | `--client-key` | `PATH` | — | client private key (PEM) for mTLS |
 | `--proxy` | `URL` | — | HTTP(S) proxy for the probe/validate calls |
+| `--prompt-hint` | `PROMPT_HINT` | — | with --curl: the literal prompt text used in that command |
 | `--allow-internal` | — | — | allow link-local/cloud-metadata hosts (169.254/fd00::) — off by default |
 | `--timeout` | `TIMEOUT` | `20.0` | per-request timeout in seconds |
 | `--prompt` | `PROMPT` | `Hello, what can you help me with?` | benign prompt to send during capture |
@@ -194,6 +197,7 @@ delete an application (also stops its bridge + drops its stored key)
 | Flag | Value | Default | What it does |
 |---|---|---|---|
 | `--keep-key` | — | — | keep the stored bridge key (default: remove it — a key without its app is dead) |
+| `--yes` | — | — | skip the confirmation prompt (non-interactive runs never prompt) |
 
 ### `ascend app get`
 
@@ -296,7 +300,7 @@ assessment findings summary
 | Flag | Value | Default | What it does |
 |---|---|---|---|
 | `--app` **(required)** | `APP` | — | app name or aapp_ id |
-| `--assessment` **(required)** | `ASSESSMENT` | — | assessment id (asmt_...) |
+| `--assessment` | `ASSESSMENT` | — | assessment id (asmt_...); default: the latest finished run on the app |
 | `--detail` | — | — | show key findings per control |
 
 ### `ascend assess resume`
@@ -430,6 +434,7 @@ reconcile bridges to assessment state — start for running/paused apps, stop fo
 | Flag | Value | Default | What it does |
 |---|---|---|---|
 | `--no-stop` | — | — | only start missing bridges; never stop one |
+| `--app` *(repeatable)* | `APP` | — | only these apps (repeatable; name or aapp_ id). Default: every app on the tenant |
 
 ### `ascend chat`
 
@@ -589,6 +594,7 @@ remove a stored key (optionally the Ascend app with it)
 | Flag | Value | Default | What it does |
 |---|---|---|---|
 | `--delete-app` | — | — | also delete the Ascend app (retire the pair: a keyless app can't be served) |
+| `--yes` | — | — | skip the confirmation prompt (non-interactive runs never prompt) |
 
 ### `ascend map`
 
@@ -614,14 +620,17 @@ remove a stored key (optionally the Ascend app with it)
 | `--token-file` | `PATH` | — | read a bearer token from this file |
 | `--body-field` *(repeatable)* | `key=value` | — | extra JSON body field, repeatable — for agents whose key/tenant lives in the BODY, e.g. --body-field apiKey=abc --body-field workspace=support. Use key:=raw for a non-string literal (true/1/{...}). |
 | `--login-url` | `URL` | — | POST here first to exchange creds/code for a token |
-| `--login-body` | `JSON` | — | JSON body for --login-url, e.g. '{"code":"1234"}' |
+| `--login-body` | `JSON|FORM` | — | body for --login-url. JSON ('{"code":"1234"}') or form-encoded ('grant_type=client_credentials&client_id=…') — OAuth2 is form-encoded. |
 | `--token-path` | `DOTPATH` | `token` | dot-path to the token in the login response (default: token) |
-| `--prompt-hint` | `PROMPT_HINT` | — | with --curl: the literal prompt text used in that command |
+| `--login-method` | `POST|GET` | `POST` | verb for --login-url (default: POST). GET for a bootstrap page that sets a session cookie or embeds a CSRF token. |
+| `--token-regex` | `RE` | — | extract the token with a regex (first capture group) instead of --token-path — for a token embedded in HTML, e.g. 'csrf-token" content="([^"]+)' |
+| `--token-header` | `NAME` | — | send the extracted token in this header verbatim (e.g. X-CSRF-Token) instead of as 'Authorization: Bearer <token>' |
 | `--insecure` | — | — | skip TLS verification (self-signed internal targets) |
 | `--ca-bundle` | `PATH` | — | custom CA bundle for TLS verification |
 | `--client-cert` | `PATH` | — | client certificate (PEM) for mTLS |
 | `--client-key` | `PATH` | — | client private key (PEM) for mTLS |
 | `--proxy` | `URL` | — | HTTP(S) proxy for the probe/validate calls |
+| `--prompt-hint` | `PROMPT_HINT` | — | with --curl: the literal prompt text used in that command |
 | `--allow-internal` | — | — | allow link-local/cloud-metadata hosts (169.254/fd00::) — off by default |
 | `--timeout` | `TIMEOUT` | `20.0` | per-request timeout in seconds |
 | `--prompt` | `PROMPT` | `Hello, what can you help me with?` | benign prompt to send during capture |
@@ -655,12 +664,25 @@ zero to a running assessment in one command (build -> validate -> register -> br
 | `--system-prompt` | `SYSTEM_PROMPT` | — | what the target is, for the assessment context |
 | `--controls` | `CONTROLS` | — | comma-separated control ids (validated before the run) |
 | `--adapter` | `ADAPTER` | — | override the adapter type (default: from the config) |
-| `--bearer` | `TOKEN` | — | Authorization: Bearer <token> (with --api/--curl) |
-| `--api-key` | `NAME:VALUE[:in=header|query]` | — | API key (with --api) |
-| `--header` *(repeatable)* | `'Name: value'` | — | raw header (repeatable) |
-| `--body-field` *(repeatable)* | `key=value` | — | extra JSON body field (repeatable) — for a key/tenant that lives in the body |
+| `--header` *(repeatable)* | `'Name: value'` | — | raw header (repeatable), honored by all sources, e.g. 'X-Api-Key: …' |
+| `--bearer` | `TOKEN` | — | Authorization: Bearer <token> |
+| `--api-key` | `NAME:VALUE[:in=header|query]` | — | API key, e.g. 'x-api-key:abc' or 'key:abc:in=query' |
+| `--basic` | `USER:PASS` | — | HTTP Basic auth |
+| `--cookie` | `'k=v; k2=v2'` | — | Cookie header for a session-gated target |
+| `--token-file` | `PATH` | — | read a bearer token from this file |
+| `--body-field` *(repeatable)* | `key=value` | — | extra JSON body field, repeatable — for agents whose key/tenant lives in the BODY, e.g. --body-field apiKey=abc --body-field workspace=support. Use key:=raw for a non-string literal (true/1/{...}). |
+| `--login-url` | `URL` | — | POST here first to exchange creds/code for a token |
+| `--login-body` | `JSON|FORM` | — | body for --login-url. JSON ('{"code":"1234"}') or form-encoded ('grant_type=client_credentials&client_id=…') — OAuth2 is form-encoded. |
+| `--token-path` | `DOTPATH` | `token` | dot-path to the token in the login response (default: token) |
+| `--login-method` | `POST|GET` | `POST` | verb for --login-url (default: POST). GET for a bootstrap page that sets a session cookie or embeds a CSRF token. |
+| `--token-regex` | `RE` | — | extract the token with a regex (first capture group) instead of --token-path — for a token embedded in HTML, e.g. 'csrf-token" content="([^"]+)' |
+| `--token-header` | `NAME` | — | send the extracted token in this header verbatim (e.g. X-CSRF-Token) instead of as 'Authorization: Bearer <token>' |
+| `--insecure` | — | — | skip TLS verification (self-signed internal targets) |
+| `--ca-bundle` | `PATH` | — | custom CA bundle for TLS verification |
+| `--client-cert` | `PATH` | — | client certificate (PEM) for mTLS |
+| `--client-key` | `PATH` | — | client private key (PEM) for mTLS |
+| `--proxy` | `URL` | — | HTTP(S) proxy for the probe/validate calls |
 | `--prompt-hint` | `PROMPT_HINT` | — | with --curl: the literal prompt text used in that command |
-| `--insecure` | — | — | skip TLS verification (self-signed internal) |
 | `--size` | `small|medium|large` | `small` | assessment size |
 | `--qpm` | `QPM` | `20` | queries per minute against the target |
 | `--prompt` | `PROMPT` | `Hello, what can you help me with?` | benign prompt used for capture and validation |
@@ -872,12 +894,25 @@ onboard a target from a URL, a cURL/HAR file, or a saved config
 | `--system-prompt` | `SYSTEM_PROMPT` | — | what the target is, for the assessment context |
 | `--controls` | `CONTROLS` | — | comma-separated control ids (validated before the run) |
 | `--adapter` | `ADAPTER` | — | override the adapter type (default: from the config) |
-| `--bearer` | `TOKEN` | — | Authorization: Bearer <token> (with --api/--curl) |
-| `--api-key` | `NAME:VALUE[:in=header|query]` | — | API key (with --api) |
-| `--header` *(repeatable)* | `'Name: value'` | — | raw header (repeatable) |
-| `--body-field` *(repeatable)* | `key=value` | — | extra JSON body field (repeatable) — for a key/tenant that lives in the body |
+| `--header` *(repeatable)* | `'Name: value'` | — | raw header (repeatable), honored by all sources, e.g. 'X-Api-Key: …' |
+| `--bearer` | `TOKEN` | — | Authorization: Bearer <token> |
+| `--api-key` | `NAME:VALUE[:in=header|query]` | — | API key, e.g. 'x-api-key:abc' or 'key:abc:in=query' |
+| `--basic` | `USER:PASS` | — | HTTP Basic auth |
+| `--cookie` | `'k=v; k2=v2'` | — | Cookie header for a session-gated target |
+| `--token-file` | `PATH` | — | read a bearer token from this file |
+| `--body-field` *(repeatable)* | `key=value` | — | extra JSON body field, repeatable — for agents whose key/tenant lives in the BODY, e.g. --body-field apiKey=abc --body-field workspace=support. Use key:=raw for a non-string literal (true/1/{...}). |
+| `--login-url` | `URL` | — | POST here first to exchange creds/code for a token |
+| `--login-body` | `JSON|FORM` | — | body for --login-url. JSON ('{"code":"1234"}') or form-encoded ('grant_type=client_credentials&client_id=…') — OAuth2 is form-encoded. |
+| `--token-path` | `DOTPATH` | `token` | dot-path to the token in the login response (default: token) |
+| `--login-method` | `POST|GET` | `POST` | verb for --login-url (default: POST). GET for a bootstrap page that sets a session cookie or embeds a CSRF token. |
+| `--token-regex` | `RE` | — | extract the token with a regex (first capture group) instead of --token-path — for a token embedded in HTML, e.g. 'csrf-token" content="([^"]+)' |
+| `--token-header` | `NAME` | — | send the extracted token in this header verbatim (e.g. X-CSRF-Token) instead of as 'Authorization: Bearer <token>' |
+| `--insecure` | — | — | skip TLS verification (self-signed internal targets) |
+| `--ca-bundle` | `PATH` | — | custom CA bundle for TLS verification |
+| `--client-cert` | `PATH` | — | client certificate (PEM) for mTLS |
+| `--client-key` | `PATH` | — | client private key (PEM) for mTLS |
+| `--proxy` | `URL` | — | HTTP(S) proxy for the probe/validate calls |
 | `--prompt-hint` | `PROMPT_HINT` | — | with --curl: the literal prompt text used in that command |
-| `--insecure` | — | — | skip TLS verification (self-signed internal) |
 | `--size` | `small|medium|large` | `small` | assessment size |
 | `--qpm` | `QPM` | `20` | queries per minute against the target |
 | `--prompt` | `PROMPT` | `Hello, what can you help me with?` | benign prompt used for capture and validation |
@@ -931,6 +966,7 @@ delete the application and drop its stored key
 | Flag | Value | Default | What it does |
 |---|---|---|---|
 | `--keep-key` | — | — | leave the stored bridge key in place |
+| `--yes` | — | — | skip the confirmation prompt (non-interactive runs never prompt) |
 
 ### `ascend target show`
 

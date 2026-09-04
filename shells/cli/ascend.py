@@ -174,8 +174,14 @@ def _unwrap_list(payload, *keys):
     return []
 
 
-def _resolve_app(client, ref):
-    """Accept an aapp_ id or a name; return the app id."""
+def _resolve_app(client, ref, *, exact=False):
+    """Accept an aapp_ id or a name; return the app id.
+
+    A name that matches no app exactly falls back to a case-insensitive substring match, so
+    `assess results --app bot` finds "Demo Bot". `exact=True` refuses that fallback and is what
+    every command that changes or destroys an app passes: `target rm bot` deleting "Demo Bot" is
+    not a convenience. The candidates are still shown, so the fix is one copy-paste away.
+    """
     if not ref:
         _die("no application given: pass --app <name-or-aapp_id>")
     if ref.startswith("aapp_"):
@@ -183,6 +189,14 @@ def _resolve_app(client, ref):
     data = client.list_apps()
     apps = _unwrap_list(data)
     matches = [a for a in apps if (a.get("name") or "") == ref]
+    if not matches and exact:
+        near = [a for a in apps if ref.lower() in (a.get("name") or "").lower()]
+        hint = ""
+        if near:
+            hint = "\n  did you mean:\n  " + "\n  ".join(
+                f"{a.get('id')}  {a.get('name', '')}" for a in near[:10])
+        _die(f"no app named exactly {ref!r}. This command changes or deletes an app, so it takes "
+             f"the exact name or the aapp_ id.{hint}")
     if not matches:
         matches = [a for a in apps if ref.lower() in (a.get("name") or "").lower()]
     if not matches:
@@ -373,7 +387,8 @@ def cmd_app_get(args):
 
 def cmd_app_resolve(args):
     c = _client(args)
-    print(_resolve_app(c, args.name))
+    app_id = _resolve_app(c, args.name)
+    _out({"app_id": app_id, "ref": args.name}, args, human=app_id)
 
 
 
@@ -547,6 +562,35 @@ def _scope_run_controls(c, app_id, ctrl_ids, args):
     return f"scoped to {len(ctrl_ids)} control(s){was} — this is now the app's control set"
 
 
+def _validated_control_ids(c, ids, *, force=False, say=None, what="this app"):
+    """The one check behind every `--controls`. Returns the ids to apply, or dies.
+
+    Four commands took a control list and each validated it its own way: `app create` refused an
+    unknown id unless --force, `assess run` only warned and quietly ran the rest, `app update` and
+    onboarding refused with no --force at all. Same input, three policies. One rule now:
+      unknown id       -> refused (exit 3) unless --force, which applies the ids as given
+      nothing scorable -> refused unless --force
+      warnings         -> printed (deprecated ids, agentic notes)
+    An unknown id is refused rather than dropped because a run narrowed silently scores clean on
+    less than was asked for — the false-pass shape again.
+    """
+    say = say or (lambda m: print(m, file=sys.stderr))
+    v = c.validate_controls(list(ids))
+    for w in v.get("warnings") or []:
+        say(f"warning: {w}")
+    if v.get("unknown") and not force:
+        _die(f"unknown control id(s): {', '.join(v['unknown'])}\n"
+             f"  list them:  ascend controls list\n"
+             f"  a control that does not exist generates zero probes, so {what} would score clean "
+             f"without ever being tested (--force to apply the ids as given)",
+             error_code="unknown_control")
+    if not v.get("valid") and not force:
+        _die("none of the selected controls can generate probes\n"
+             "  check:  ascend controls validate " + ",".join(ids) + "\n"
+             "  (--force to apply them anyway)", error_code="no_scorable_controls")
+    return list(v.get("valid") or ids)
+
+
 def cmd_app_create(args):
     """Create an Ascend application of any of the four types the platform supports.
 
@@ -562,25 +606,10 @@ def cmd_app_create(args):
 
     ctrl = args.controls.split(",") if args.controls else None
     if ctrl:
-        v = c.validate_controls(ctrl)
-        for w in v["warnings"]:
-            print(f"warning: {w}", file=sys.stderr)
         # `v["valid"] or ctrl` used to fall back to the ORIGINAL list when nothing validated, so
-        # `--controls not_a_real_control` created an app pinned to a control that does not exist.
-        # It even printed "this run would generate zero probes" and created it anyway — an app
-        # whose every future assessment comes back perfectly clean having tested nothing.
-        if v.get("unknown") and not args.force:
-            _die(f"unknown control id(s): {', '.join(v['unknown'])}\n"
-                 f"  list them:  ascend controls list\n"
-                 f"  a control that does not exist generates zero probes, so this app would "
-                 f"score clean without ever being tested (--force to create it anyway)",
-                 error_code="unknown_control")
-        if not v.get("valid") and not args.force:
-            _die("none of the selected controls can generate probes\n"
-                 "  check:  ascend controls validate " + ",".join(ctrl) + "\n"
-                 "  (--force to create the app anyway)",
-                 error_code="no_scorable_controls")
-        ctrl = v["valid"] or ctrl
+        # `--controls not_a_real_control` created an app pinned to a control that does not exist —
+        # an app whose every future assessment comes back clean having tested nothing.
+        ctrl = _validated_control_ids(c, ctrl, force=args.force, what="this app")
 
     ctrl = _resolve_all_controls(c, args, ctrl)
 
@@ -706,6 +735,80 @@ def _read_maybe_file(v):
     return v
 
 
+def _stdio_is_tty():
+    """Is a person at the keyboard? Both ends must be terminals: a piped stdout is a script."""
+    try:
+        return bool(sys.stdin.isatty() and sys.stdout.isatty())
+    except Exception:
+        return False
+
+
+def _confirm_destroy(args, what):
+    """Ask before an irreversible action — on a terminal, unless --yes.
+
+    Scripts, CI and `--json` are never prompted: a question nobody can answer hangs a pipeline, and
+    those callers already had to spell the app out (exact name or aapp_ id). The prompt is for the
+    person at a keyboard, where one slip deletes an app and every assessment under it.
+    """
+    if getattr(args, "yes", False) or getattr(args, "json", False):
+        return
+    if not _stdio_is_tty():
+        return
+    try:
+        ans = input(f"  {what} [y/N]: ").strip().lower()
+    except EOFError:
+        ans = ""
+    if ans not in ("y", "yes"):
+        _die("aborted — nothing was changed", code=EXIT_ERROR)
+
+
+def _retire_app(c, app_id, *, keep_key=False):
+    """Delete an app and everything that only existed to serve it, in the order that fails safe.
+
+    Stop its relay, delete the app, THEN drop the stored key. The key goes last on purpose: a
+    bridge key is shown once and cannot be re-read, so dropping it before a delete that then fails
+    leaves an app nobody can ever serve again — which is what `target rm` used to do. Raises
+    AscendAPIError when the platform refuses the delete; the key is untouched then. One helper for
+    `app delete`, `target rm` and `keys rm --delete-app`, so the three cannot drift apart again.
+    """
+    live = _live_runs(c, app_id)
+    stopped = None
+    try:                                   # a live bridge for a deleted app is pointless
+        import supervisor as S
+        if S.is_running(app_id):
+            stopped = S.stop(app_id)
+    except Exception:
+        stopped = None
+    res = c.delete_app(app_id)
+    try:                                   # a dead relay row for an app that no longer exists is noise
+        import supervisor as S
+        S.forget(app_id)
+    except Exception:
+        pass
+    key_removed = False
+    if not keep_key:
+        try:
+            import creds as C
+            key_removed = C.remove(app_id)
+        except Exception:
+            key_removed = False
+    return {"app_id": app_id, "api_response": res, "bridge_stopped": bool(stopped),
+            "key_removed": key_removed, "live_runs_cancelled": live}
+
+
+def _live_runs(c, app_id):
+    """How many of this app's assessments are running or paused right now (0 when unknowable)."""
+    try:
+        return sum(1 for x in _assessments_for(c, app_id)
+                   if str(x.get("status", "")).lower() in RUNNING_STATES)
+    except Exception:
+        return 0
+
+
+def _cancel_note(n):
+    return f" {n} assessment(s) still running will be cancelled." if n else ""
+
+
 def cmd_app_update(args):
     """Change an existing app's settings in place — no delete/recreate, so the bridge key survives.
 
@@ -713,7 +816,7 @@ def cmd_app_update(args):
     QPM, controls, system prompt, category severities, input guardrail, frequency, strategy.
     """
     c = _client(args)
-    app_id = _resolve_app(c, args.app)
+    app_id = _resolve_app(c, args.app, exact=True)
     import api
     patch = {}
     if args.name:
@@ -727,15 +830,9 @@ def cmd_app_update(args):
     if args.frequency:
         patch["frequency"] = args.frequency
     if args.controls:
-        ctrl = args.controls.split(",")
-        v = c.validate_controls(ctrl)
-        for w in v["warnings"]:
-            print(f"warning: {w}", file=sys.stderr)
-        if v.get("unknown"):
-            _die(f"unknown control id(s): {', '.join(v['unknown'])}\n  list them: ascend controls list",
-                 error_code="unknown_control")
         patch["control_type"] = "custom"
-        patch["control_ids"] = v["valid"] or ctrl
+        patch["control_ids"] = _validated_control_ids(c, args.controls.split(","),
+                                                      force=getattr(args, "force", False), what="this app")
     sev = _parse_kv_pairs(getattr(args, "category_severity", None), "category-severity")
     if sev:
         clamped = api.clamped_severities(sev)
@@ -809,38 +906,25 @@ def cmd_app_delete(args):
     together: `--keep-key` opts out.
     """
     c = _client(args)
-    app_id = _resolve_app(c, args.app)
-    _say(args, f"Deleting {args.app}...")
+    app_id = _resolve_app(c, args.app, exact=True)
     name = None
     try:
         name = (c.get_app(app_id) or {}).get("name")
     except Exception:
         pass
-
-    stopped = None
-    try:                                   # a live bridge for a deleted app is pointless
-        import supervisor as S
-        if S.is_running(app_id):
-            stopped = S.stop(app_id)
-    except Exception:
-        pass
-
-    res = c.delete_app(app_id)
-    key_removed = False
-    if not args.keep_key:
-        try:
-            import creds as C
-            key_removed = C.remove(app_id)
-        except Exception:
-            pass
-
+    _confirm_destroy(args, f"delete app {name or args.app!r} ({app_id}) and every assessment under it?"
+                     + _cancel_note(_live_runs(c, app_id)))
+    _say(args, f"Deleting {args.app}...")
+    r = _retire_app(c, app_id, keep_key=args.keep_key)
     payload = {"deleted": True, "app_id": app_id, "app_name": name,
-               "key_removed": key_removed, "bridge_stopped": bool(stopped),
-               "api_response": res}
+               "key_removed": r["key_removed"], "bridge_stopped": r["bridge_stopped"],
+               "api_response": r["api_response"]}
     human = f"deleted {name or app_id}"
-    if stopped:
+    if r.get("live_runs_cancelled"):
+        human += f"\n  cancelled {r['live_runs_cancelled']} assessment(s) that were still running"
+    if r["bridge_stopped"]:
         human += "\n  stopped its bridge"
-    if key_removed:
+    if r["key_removed"]:
         human += "\n  removed its stored bridge key (a key without its app is a dead secret)"
     elif args.keep_key:
         human += "\n  kept the stored key (--keep-key)"
@@ -994,9 +1078,10 @@ def _assess_run_many(args, c, refs, scope_ids=None):
     started = [r for r in out if r.get("assessment_id")]
     unbridged = [r for r in started
                  if (r.get("bridge") or {}).get("skip") or (r.get("bridge") or {}).get("error")]
-    if args.json:
+    waiting = bool(started) and not getattr(args, "no_wait", False)
+    if args.json and not waiting:
         _out(out, args)
-    else:
+    elif not args.json:
         for r in out:
             if r.get("assessment_id"):
                 tag = "  (recovered)" if r.get("recovered") else ""
@@ -1008,15 +1093,101 @@ def _assess_run_many(args, c, refs, scope_ids=None):
                 print(f"  FAILED   {r['app']:28} {r.get('error')}")
         print(f"\n  {len(started)}/{len(out)} assessment(s) started "
               f"(bridges auto-started for bridge-type apps)")
-        if started:
+        if started and not waiting:
             print("  watch them:  ascend assess watch --all")
         if unbridged:
             print("  ! these have NO bridge and will score a FALSE PASS until one serves them:")
             for r in unbridged:
                 b = r.get("bridge") or {}
                 print(f"      {r['app']}: {b.get('skip') or b.get('error')}")
-    if len(started) < len(out) or unbridged:
+    failed_start = len(started) < len(out) or bool(unbridged)
+    if not waiting:
+        if failed_start:
+            sys.exit(EXIT_ERROR)
+        return
+    # Wait, exactly as the single-app form does. Fire-and-forget read as success to a pipeline
+    # that went straight on to `ci`, which then gated on whatever OLDER run had finished — the
+    # false-pass shape, multiplied by the fleet. Each run keeps its own bridge watchdog and pause
+    # guard; one summary table at the end; one JSON document under --json.
+    import api
+    finals = _wait_for_fleet(args, c, started)
+    rows = []
+    for r in started:
+        a = finals.get(r["app_id"]) or {}
+        failed, total = api.probe_counts(a) if a else (None, None)
+        rows.append({"app": r["app"], "app_id": r["app_id"], "assessment_id": r["assessment_id"],
+                     "status": str(a.get("status") or "unfinished").lower(), "severity": a.get("severity"),
+                     "failed": failed, "total": total, "error": a.get("_error")})
+    unfinished = [x for x in rows if x["status"] not in api.TERMINAL_STATUSES or x["error"]]
+    if args.json:
+        _out({"started": out, "results": rows}, args)
+    else:
+        print(f"\n  {'APP':28} {'STATUS':11} {'RISK':8} {'FAILED':>8}  ASSESSMENT")
+        for x in rows:
+            probes = f"{x['failed']}/{x['total']}" if x["total"] is not None else "-"
+            print(f"  {str(x['app'])[:28]:28} {x['status'][:11]:11} {str(x['severity'] or '-')[:8]:8} "
+                  f"{probes:>8}  {x['assessment_id']}")
+        for x in unfinished:
+            print(f"  ! {x['app']}: {x['error'] or 'did not finish within --timeout; it continues on the platform'}")
+        print(f"\n  findings:  ascend assess results --app <name>     gate:  ascend ci --app <name>")
+    if failed_start or unfinished:
         sys.exit(EXIT_ERROR)
+
+
+def _wait_for_fleet(args, c, started):
+    """Poll every started run to a terminal state (or --timeout), with the same bridge watchdog and
+    pause guard as the single-app path. Returns {app_id: final assessment payload}; a run the guard
+    gave up on carries `_error`. Prints one line per app per status change — readable in a CI log."""
+    import api
+    apps = {a.get("id"): a for a in _unwrap_list(c.list_apps())}
+    pending = {r["app_id"]: r for r in started}
+    owned = {aid: dict(r.get("bridge") or {}) for aid, r in pending.items()}
+    guards = {aid: _PauseGuard(c, aid, bridged=needs_bridge(apps.get(aid, {"id": aid})),
+                               # a start that FAILED is this machine's problem too (review finding)
+                               local=bool(owned[aid].get("started") or owned[aid].get("reused")
+                                          or owned[aid].get("error")))
+              for aid in pending}
+    for aid, r in pending.items():
+        _bind_assessment(aid, r["assessment_id"])
+    finals, last, errors = {}, {}, 0
+    deadline = time.time() + args.timeout
+    while pending and time.time() < deadline:
+        for aid, r in list(pending.items()):
+            try:
+                a = c.get_assessment(aid, r["assessment_id"])
+                errors = 0
+            except Exception as e:
+                errors += 1
+                if errors >= api.POLL_MAX_CONSECUTIVE_ERRORS:
+                    print(f"  ! polling failed {errors} times in a row ({type(e).__name__}); giving up on the wait",
+                          file=sys.stderr)
+                    return finals
+                continue
+            st = str(a.get("status", "")).lower()
+            note = _supervise_bridge(c, apps.get(aid, aid), args=args, owned=owned[aid])
+            if note:
+                print(f"  {r['app']}: {note}", file=sys.stderr)
+            try:
+                pnote = guards[aid].tick(st, a, outage_note=note)
+            except _BridgeUnavailable as e:
+                finals[aid] = {**a, "_error": str(e)}
+                pending.pop(aid)
+                _release_bridge(aid, owned[aid])
+                continue
+            if pnote:
+                print(f"  {r['app']}: {pnote}", file=sys.stderr)
+            prog = a.get("progress")
+            line = f"{st}  {int(round(float(prog) * 100)) if isinstance(prog, (int, float)) else 0}%"
+            if not args.json and last.get(aid) != line:
+                print(f"  {r['app']:28} {line}")
+                last[aid] = line
+            if st in api.TERMINAL_STATUSES:
+                finals[aid] = a
+                pending.pop(aid)
+                _release_bridge(aid, owned[aid])
+        if pending:
+            time.sleep(max(2, min(int(args.interval or 5), 10)))
+    return finals
 
 
 # ----------------------------------------------------------------------------- assess
@@ -1050,6 +1221,9 @@ def _ensure_bridge(c, app, *, assessment_id=None, args=None):
                 "reason": "native app — Ascend calls it directly (no bridge needed)"}
     if S.is_serving(app_id):
         return {"app_id": app_id, "ensured": True, "reused": True}
+    reclaimed = _reclaim_wedged_relay(S, app_id)
+    if reclaimed.get("error"):
+        return {"app_id": app_id, "ensured": False, "error": reclaimed["error"]}
     t = _target_for(app_id)
     if t.get("skip"):
         return {"app_id": app_id, "ensured": False, "skip": t["skip"]}
@@ -1060,7 +1234,40 @@ def _ensure_bridge(c, app, *, assessment_id=None, args=None):
                 wait_ms=getattr(args, "wait_ms", None))
     if "error" in r:
         return {"app_id": app_id, "ensured": False, "error": r["error"]}
-    return {"app_id": app_id, "ensured": True, "started": True, "pid": r.get("pid")}
+    out = {"app_id": app_id, "ensured": True, "started": True, "pid": r.get("pid")}
+    if reclaimed.get("pid"):
+        out["reclaimed"] = reclaimed["pid"]
+    return out
+
+
+def _reclaim_wedged_relay(S, app_id):
+    """Make room for a new relay when the recorded one is alive but not serving.
+
+    Returns {} when there is nothing to reclaim, {"pid": n} after stopping a wedged relay, or
+    {"error": why} when the relay has to be left alone.
+
+    `is_serving()` is pid-alive AND heartbeat-fresh; `start()` refuses on pid-alive alone. Between
+    those two tests sits a relay that is alive and has not beaten for HEARTBEAT_STALE_S — wedged —
+    and nothing ever replaced it: every watchdog tick printed "a relay is already running for this
+    app" while the run sat paused until its timeout (seen live). A relay that has not beaten in
+    three minutes is answering nobody, so it is stopped and a fresh one started in its place. A
+    relay that was just spawned cannot be mistaken for this one: start() stamps a fresh heartbeat
+    the moment it spawns.
+
+    The one alive-but-silent relay NOT replaced is one that reported a fatal error (a bridge key
+    the lease service rejected, say). A replacement would hit the same wall, so the error is
+    surfaced for the operator instead of churning a new relay into it every three minutes.
+    """
+    if not S.is_running(app_id):
+        return {}
+    pid = S.read_pid(app_id)
+    rec = S.read_status(app_id) or {}
+    if rec.get("state") == "fatal" or rec.get("fatal_error"):
+        return {"error": (f"relay pid {pid} is alive but reported a fatal error and is not serving: "
+                          f"{rec.get('fatal_error') or 'unknown'}. Fix the cause, then "
+                          f"`ascend bridge stop --app <name>` and `ascend bridge start --app <name>`")}
+    st = S.stop(app_id, grace_s=3.0)
+    return {"pid": st.get("pid") or pid}
 
 
 def _ensure_note(res):
@@ -1068,6 +1275,9 @@ def _ensure_note(res):
     if res.get("reused"):
         return "bridge: already serving this app — reused."
     if res.get("started"):
+        if res.get("reclaimed"):
+            return (f"bridge: relay pid {res['reclaimed']} was alive but had stopped answering — "
+                    f"replaced (pid {res.get('pid')}); it self-stops when the run ends.")
         return f"bridge: started for this run (pid {res.get('pid')}); it self-stops when the run ends."
     if res.get("skip") or res.get("error"):
         return (f"! bridge NOT started ({res.get('skip') or res.get('error')}). Probes will go "
@@ -1095,6 +1305,112 @@ def _bind_assessment(app_id, assessment_id):
             S.write_status(app_id, rec)
     except Exception:
         pass
+
+
+PAUSED_NO_BRIDGE_TICKS = 3    # polls a run may sit paused with no relay startable before we give up
+AUTO_RESUME_MAX = 3           # per run: lift a platform pause after an outage; never fight an operator
+HEALTHY_TICKS_TO_FORGET = 5   # running+serving polls after which an old outage no longer explains a pause
+RESUME_SETTLE_TICKS = 3       # polls the platform may still say "paused" after we resumed it
+
+
+class _BridgeUnavailable(Exception):
+    """Raised from the poll tick when a bridge-type run is paused and no relay can be brought up."""
+
+    def __init__(self, msg, *, assessment_id=None, reason=None):
+        super().__init__(msg)
+        self.assessment_id = assessment_id
+        self.reason = reason
+
+
+class _PauseGuard:
+    """What a paused bridge-type run needs, decided once per poll tick.
+
+    The platform pauses a run whose probes go unanswered. Seen live, both halves of what follows
+    were missing: a run paused during a relay outage stayed paused after the watchdog brought the
+    relay back, because nothing resumed it; and a run whose relay could not be brought back was
+    polled to its full timeout — ten minutes of "could not be restarted" before a non-zero exit.
+
+      * paused, relay serving, an outage was seen here  -> resume: the pause was ours to cause
+      * paused, no relay for PAUSED_NO_BRIDGE_TICKS polls -> raise _BridgeUnavailable, with the reason
+      * paused, relay serving, no outage seen here       -> somebody's `assess pause`: say so once
+
+    `local` is whether THIS machine runs the relay (the initial ensure started or reused one). When
+    the bridge runs elsewhere — a jump host with a route to the target — `is_serving()` here knows
+    nothing about it, so the guard only ever hints. Native apps are never touched. Raises nothing
+    but _BridgeUnavailable.
+    """
+
+    def __init__(self, c, app_id, *, bridged, local=True):
+        self.c, self.app_id, self.bridged, self.local = c, app_id, bridged, local
+        self.paused_noserve = 0
+        self.healthy = 0
+        self.outage_seen = False
+        self.resumes = 0
+        self.hinted = False
+        self.last_reason = None
+        self.settling = 0          # polls to wait after a resume before reading "paused" again
+
+    def tick(self, status, a, *, outage_note=None):
+        if not self.bridged:
+            return None
+        st = str(status or "").lower()
+        aid = (a or {}).get("id")
+        if not self.local:
+            if st == "paused" and not self.hinted:
+                self.hinted = True
+                return ("run is paused; no bridge is configured on this machine. If one runs "
+                        "elsewhere, check it there — else `ascend bridge start --app <name>`, then "
+                        "`ascend assess resume`")
+            return None
+        import supervisor as S
+        try:
+            serving = S.is_serving(self.app_id)
+        except Exception:
+            serving = False
+        if outage_note:
+            self.outage_seen = True
+            if outage_note.startswith("!"):
+                self.last_reason = outage_note.lstrip("! ")
+        if not serving:
+            self.outage_seen = True
+            self.healthy = 0
+        if st != "paused":
+            self.paused_noserve = 0
+            self.settling = 0
+            if st == "running" and serving:
+                self.healthy += 1
+                if self.healthy >= HEALTHY_TICKS_TO_FORGET:
+                    self.outage_seen = False
+            return None
+        if not serving:
+            self.paused_noserve += 1
+            if self.paused_noserve >= PAUSED_NO_BRIDGE_TICKS:
+                why = f" ({self.last_reason})" if self.last_reason else ""
+                raise _BridgeUnavailable(
+                    f"the run is paused and no bridge could be brought up in "
+                    f"{self.paused_noserve} consecutive polls{why}",
+                    assessment_id=aid, reason=self.last_reason)
+            return None
+        self.paused_noserve = 0
+        if self.settling:
+            # The platform takes a poll or two to leave "paused" after a resume. Reading that as
+            # somebody's pause would print the wrong hint.
+            self.settling -= 1
+            return None
+        if self.outage_seen and aid and self.resumes < AUTO_RESUME_MAX:
+            self.resumes += 1
+            self.outage_seen = False
+            self.settling = RESUME_SETTLE_TICKS
+            try:
+                self.c.resume(self.app_id, aid)
+            except Exception as e:
+                return f"! run is paused and the bridge is back, but resuming it failed: {e}"
+            return "run was paused by the platform while the bridge was down — bridge is back, resumed"
+        if not self.hinted and not self.outage_seen:
+            self.hinted = True
+            return ("run is paused and no bridge outage was seen here — left alone. "
+                    "`ascend assess resume` continues it; Ctrl-C detaches")
+        return None
 
 
 def _release_bridge(app_id, ensure):
@@ -1133,6 +1449,9 @@ def _supervise_bridge(c, app, *, assessment_id=None, args=None, owned=None):
             # recording that, a relay the watchdog revived outlived the run that needed it.
             if owned is not None:
                 owned["started"] = True
+            if r.get("reclaimed"):
+                return (f"bridge relay pid {r['reclaimed']} was alive but had stopped answering — "
+                        f"replaced (pid {r.get('pid')})")
             return f"bridge went down mid-run — restarted (pid {r.get('pid')})"
         if r.get("skip") or r.get("error"):
             return f"! bridge down and could not be restarted: {r.get('skip') or r.get('error')}"
@@ -1152,15 +1471,10 @@ def cmd_assess_run(args):
     # Validate the control set ONCE, not per app (each call refetches the whole catalog).
     scope_ids = None
     if args.controls:
-        v = c.validate_controls(args.controls.split(","))
-        for w in v["warnings"]:
-            print(f"warning: {w}", file=sys.stderr)
-        if not v["valid"] and not args.force:
-            _die("selected controls generate zero probes (use --force to run anyway)")
         # The validated ids are what gets APPLIED. Before 1.1.2 they were validated and then
         # dropped, so `--controls` narrowed nothing and the run used the app's whole registered
         # set -- 62 controls and 665 probes where the operator asked for one control.
-        scope_ids = v["valid"] or (args.controls.split(",") if args.force else None)
+        scope_ids = _validated_control_ids(c, args.controls.split(","), force=args.force, what="this run")
 
     if len(refs) > 1:
         return _assess_run_many(args, c, refs, scope_ids=scope_ids)
@@ -1195,6 +1509,12 @@ def cmd_assess_run(args):
         # existing relay.
         owned = dict(ensure)
 
+        # `local` = this machine is responsible for the relay: it started one, reused one, or TRIED
+        # to start one and failed. Only a `skip` (no key or config stored here) means the bridge may
+        # legitimately live elsewhere, where is_serving() cannot see it.
+        guard = _PauseGuard(c, appid, bridged=needs_bridge(_sup_app),
+                            local=bool(ensure.get("started") or ensure.get("reused") or ensure.get("error")))
+
         def _supervised_tick(status, prog, a):
             # Bind the relay to THIS run as soon as the platform names it, so the bridge scopes its
             # own stop decision to the run it is actually serving.
@@ -1202,16 +1522,22 @@ def cmd_assess_run(args):
             note = _supervise_bridge(c, _sup_app, args=args, owned=owned)
             if note:
                 print(f"  {note}", file=sys.stderr)
+            pnote = guard.tick(status, a, outage_note=note)
+            if pnote:
+                print(f"  {pnote}", file=sys.stderr)
             if tw.enabled:
                 _tw_tick(status, prog, a)
             elif not args.json:
                 _tick(status, prog, a)
         feed_interval = min(args.interval, 4) if tw.enabled else args.interval
         res = None
+        bridge_gone = None
         try:
             with tw:
                 res = c.run(appid, args.name, wait=True,
                             interval=feed_interval, timeout=args.timeout, on_tick=_supervised_tick)
+        except _BridgeUnavailable as e:
+            bridge_gone = e
         finally:
             # Release the relay WE started — including one the watchdog restarted mid-run — but
             # ONLY once this run is genuinely finished. `c.run` also returns early when it recovers
@@ -1230,6 +1556,21 @@ def cmd_assess_run(args):
                      and str(res.get("status", "")).lower() in _api.TERMINAL_STATUSES)
             if _done:
                 _release_bridge(appid, owned)
+        if bridge_gone is not None:
+            # Nothing answers this run's probes and nothing here can change that. Waiting on is
+            # ten minutes of the same line and then a non-zero exit; say it now, with the way out.
+            _release_bridge(appid, owned)
+            aid = bridge_gone.assessment_id
+            if args.json:
+                print(json.dumps({"app_id": appid, "assessment_id": aid, "status": "paused",
+                                  "error": str(bridge_gone)}), flush=True)
+            print(f"error: {bridge_gone}\n"
+                  f"  The platform pauses a run whose probes go unanswered; the run stays paused, "
+                  f"nothing was measured.\n"
+                  f"  Fix the cause, then:\n"
+                  f"    ascend bridge start --app {args.app!r}\n"
+                  f"    ascend assess resume --app {args.app!r} --assessment {aid}", file=sys.stderr)
+            sys.exit(EXIT_ERROR)
     else:
         res = c.run(appid, args.name, wait=False,
                     interval=args.interval, timeout=args.timeout, on_tick=None)
@@ -1252,6 +1593,17 @@ def cmd_assess_run(args):
                  f"  findings: ascend assess results --app {args.app} "
                  f"--assessment {res['assessment_id']} --detail")
     _out(res, args, human=human)
+    # Asked to wait, and the run is not finished: that is never a success. This is the belt to
+    # api.run()'s braces -- whatever path handed back a non-terminal row, a pipeline must not read
+    # exit 0 as "assessed". Observed live: a truncated create response, a 2-second `assess run`,
+    # and a run still going on the platform.
+    if (not args.no_wait and isinstance(res, dict)
+            and str(res.get("status", "")).lower() not in api.TERMINAL_STATUSES):
+        print(f"error: the assessment is still {res.get('status') or 'in progress'} and this "
+              f"command was asked to wait for it. Follow it with:\n"
+              f"  ascend assess watch --app {args.app!r} --assessment {res.get('assessment_id')}",
+              file=sys.stderr)
+        sys.exit(EXIT_ERROR)
     # Bridge-type app but no relay could be ensured: the run exists but will score a FALSE PASS
     # until a bridge answers it. Exit non-zero so a pipeline notices — the run was created either way.
     if ensure.get("skip") or ensure.get("error"):
@@ -1361,6 +1713,8 @@ def _watch_many(args, c):
                     out = "\n".join(f"{l:<118}" for l in lines)
                 print(out, flush=True)
                 printed = len(lines)
+            if getattr(args, "once", False):
+                return                      # one snapshot was asked for; the single-app loop already stops here
             if rows and all(r["status"] in api.TERMINAL_STATUSES for r in rows):
                 return
             if not rows:
@@ -1429,7 +1783,8 @@ def cmd_assess_watch(args):
                 if tty:
                     print()
                 print("", file=sys.stderr)
-                _out(a, args, human=_verdict(a, detail=args.detail))
+                if not args.json:             # --json already printed this row in the loop above
+                    _out(a, args, human=_verdict(a, detail=args.detail))
                 return
             if getattr(args, "once", False):
                 # One snapshot, then out — what `assess status` used to be. Reported through the
@@ -1469,12 +1824,29 @@ def _false_pass_warning(a):
 
 def cmd_assess_results(args):
     c = _client(args)
-    a = c.get_assessment(_resolve_app(c, args.app), args.assessment)
+    app_id = _resolve_app(c, args.app)
+    a = c.get_assessment(app_id, _resolve_assessment(c, app_id, args, verb="reading"))
     import api
+    st = str(a.get("status", "")).lower()
+    if st not in api.TERMINAL_STATUSES and not args.json:
+        # `risk ?  probes ? failed / ? total` is honest and unreadable. Say what is happening.
+        prog = a.get("progress")
+        pct = f"{int(round(float(prog) * 100))}%" if isinstance(prog, (int, float)) else "starting"
+        _out(a, args, human=(f"assessment {a.get('id')} is still {st or 'in progress'} ({pct}) — findings "
+                             f"arrive when it finishes\n  follow it:  ascend assess watch --app {args.app!r} "
+                             f"--assessment {a.get('id')}"))
+        return
     human = _verdict(a, detail=getattr(args, "detail", False))
     warn = _false_pass_warning(a)
-    if warn and not args.json:
-        human = f"{human}\n\n{warn}"
+    if warn:
+        if args.json:
+            # The warning travels with the numbers it qualifies, or a pipeline reads a clean score
+            # from a run that measured nothing. Same field name `reports --detail` uses.
+            a = dict(a)
+            a["false_pass_suspect"] = True
+            a["false_pass_warning"] = warn
+        else:
+            human = f"{human}\n\n{warn}"
     _out(a, args, human=human)
 
 
@@ -1517,7 +1889,7 @@ def cmd_assess_list(args):
 def cmd_assess_pause(args):
     c = _client(args)
     _say(args, f"Pausing {args.assessment}...")
-    res = c.pause(_resolve_app(c, args.app), args.assessment)
+    res = c.pause(_resolve_app(c, args.app, exact=True), args.assessment)
     # Probes are generated up front and cannot be recalled: pause stops NEW scheduling, but
     # already-created probes still run their course. Say so, or the drain looks like a bug.
     _out(res, args, human="paused — note: probes already generated will still drain, so your "
@@ -1528,7 +1900,7 @@ def cmd_assess_pause(args):
 
 def cmd_assess_resume(args):
     c = _client(args)
-    appid = _resolve_app(c, args.app)
+    appid = _resolve_app(c, args.app, exact=True)
     _say(args, f"Resuming {args.assessment}...")
     res = c.resume(appid, args.assessment)
     # The reliable answer to "resumed from the Console": the local relay may have idle-stopped or
@@ -1750,63 +2122,70 @@ def cmd_runtime_start(args):
             n = 0
             terminal_since = None
             while True:
-                rec = S.read_status(app_id) or {}
-                # The bridge is often started BEFORE its assessment exists (ensure-before-create),
-                # so the id cannot come from argv alone: the parent writes the real id into this
-                # status file once the run is created, and we pick it up here. That binding is what
-                # scopes the stop decision to OUR run instead of "whatever ran on this app last".
-                bound = tracked_id or rec.get("assessment_id")
-                rec.update({"app_id": app_id, "config": args.config, "adapter": args.adapter,
-                            "pid": os.getpid(), "ts": time.time(),
-                            "state": "serving" if not client.fatal_error else "fatal",
-                            "stats": dict(client.stats),
-                            "assessment_id": bound,
-                            "fatal_error": client.fatal_error})
-                rec.setdefault("started_at", time.time())
-                # Heartbeat FIRST. Liveness is judged by heartbeat age, and the reconcile below is a
-                # network call that can take as long as the API timeout; writing after it let a slow
-                # control plane push a perfectly healthy bridge toward "stale".
                 try:
-                    S.write_status(app_id, rec)
-                except Exception:
-                    pass
-                # Reconcile on a slower cadence (~every 3rd beat = 30s) to bound control-plane load.
-                if control is not None and n % 3 == 0:
+                    rec = S.read_status(app_id) or {}
+                    # The bridge is often started BEFORE its assessment exists (ensure-before-create),
+                    # so the id cannot come from argv alone: the parent writes the real id into this
+                    # status file once the run is created, and we pick it up here. That binding is what
+                    # scopes the stop decision to OUR run instead of "whatever ran on this app last".
+                    bound = tracked_id or rec.get("assessment_id")
+                    rec.update({"app_id": app_id, "config": args.config, "adapter": args.adapter,
+                                "pid": os.getpid(), "ts": time.time(),
+                                "state": "serving" if not client.fatal_error else "fatal",
+                                "stats": dict(client.stats),
+                                "assessment_id": bound,
+                                "fatal_error": client.fatal_error})
+                    rec.setdefault("started_at", time.time())
+                    # Heartbeat FIRST. Liveness is judged by heartbeat age, and the reconcile below is a
+                    # network call that can take as long as the API timeout; writing after it let a slow
+                    # control plane push a perfectly healthy bridge toward "stale".
                     try:
-                        asmts = _assessments_for(control, app_id)
-                        rec["reconcile_error"] = None
-                        cur = None
-                        if bound:
-                            cur = next((a for a in asmts if a.get("id") == bound), None)
-                        cur = cur or (_latest(asmts)[0] if asmts else None)
-                        rec["asmt_status"] = (cur or {}).get("status")
-                        decision, terminal_since = _reconcile_step(
-                            asmts, now=time.time(), started_at=rec.get("started_at"),
-                            last_probe_ts=client.last_probe_ts,
-                            idle_timeout_s=idle_timeout_s, control_ok=True,
-                            terminal_since=terminal_since, bound_id=bound)
-                    except Exception as e:
-                        # Could not verify — keep serving. Never self-kill on a transient error:
-                        # an unanswered probe scores a FALSE PASS.
-                        rec["reconcile_error"] = f"{type(e).__name__}: {e}"
-                        decision = "serve"
-                    if decision != "serve":
-                        rec["state"] = ("stopped-complete" if decision == "stop-terminal"
-                                        else "stopped-idle")
+                        S.write_status(app_id, rec)
+                    except Exception:
+                        pass
+                    # Reconcile on a slower cadence (~every 3rd beat = 30s) to bound control-plane load.
+                    if control is not None and n % 3 == 0:
                         try:
-                            S.write_status(app_id, rec)
-                        except Exception:
-                            pass
-                        logging.getLogger("ascendbridge").info(
-                            "self-reconcile: %s — stopping bridge for %s", decision, app_id)
-                        client.stop()
+                            asmts = _assessments_for(control, app_id)
+                            rec["reconcile_error"] = None
+                            cur = None
+                            if bound:
+                                cur = next((a for a in asmts if a.get("id") == bound), None)
+                            cur = cur or (_latest(asmts)[0] if asmts else None)
+                            rec["asmt_status"] = (cur or {}).get("status")
+                            decision, terminal_since = _reconcile_step(
+                                asmts, now=time.time(), started_at=rec.get("started_at"),
+                                last_probe_ts=client.last_probe_ts,
+                                idle_timeout_s=idle_timeout_s, control_ok=True,
+                                terminal_since=terminal_since, bound_id=bound)
+                        except Exception as e:
+                            # Could not verify — keep serving. Never self-kill on a transient error:
+                            # an unanswered probe scores a FALSE PASS.
+                            rec["reconcile_error"] = f"{type(e).__name__}: {e}"
+                            decision = "serve"
+                        if decision != "serve":
+                            rec["state"] = ("stopped-complete" if decision == "stop-terminal"
+                                            else "stopped-idle")
+                            try:
+                                S.write_status(app_id, rec)
+                            except Exception:
+                                pass
+                            logging.getLogger("ascendbridge").info(
+                                "self-reconcile: %s — stopping bridge for %s", decision, app_id)
+                            client.stop()
+                            return
+                    try:
+                        S.write_status(app_id, rec)
+                    except Exception:
+                        pass
+                    if client.fatal_error:
                         return
-                try:
-                    S.write_status(app_id, rec)
-                except Exception:
-                    pass
-                if client.fatal_error:
-                    return
+                except Exception as e:  # noqa: BLE001
+                    # The heartbeat IS liveness. A crash here used to end the thread silently: the
+                    # process lived on, the heartbeat aged past HEARTBEAT_STALE_S, and the relay became
+                    # the alive-but-not-serving state that blocked its own replacement.
+                    logging.getLogger("ascendbridge").warning("heartbeat error: %s: %s",
+                                                                 type(e).__name__, e)
                 n += 1
                 time.sleep(10)
 
@@ -1956,40 +2335,60 @@ def _login_for_token(args):
     AND an `auth` block so the bridge re-authenticates on its own during a long run."""
     import requests
     url = args.login_url
-    try:
-        body = json.loads(args.login_body) if args.login_body else {}
-    except json.JSONDecodeError as e:
-        _die(f"--login-body is not valid JSON: {e}")
+    body, form = _parse_login_body(args.login_body)
     print(f"[build] logging in at {url} ...", file=sys.stderr)
     try:
-        r = requests.post(url, json=body, timeout=args.timeout,
-                          verify=not getattr(args, "insecure", False),
-                          allow_redirects=True)
+        method = (getattr(args, "login_method", None) or "POST").upper()
+        # A GET bootstrap carries no body — sending one makes some servers 400, and there is
+        # nothing to send anyway: the point of the GET is the Set-Cookie or the embedded token.
+        kw = {} if method == "GET" else (
+            {"data": form} if form is not None else {"json": body})
+        r = requests.request(method, url, timeout=args.timeout,
+                             verify=not getattr(args, "insecure", False),
+                             allow_redirects=True, **kw)
     except requests.RequestException as e:
         _die(f"login request failed: {e}", code=EXIT_ERROR)
     if r.status_code >= 400:
         _die(f"login returned HTTP {r.status_code}: {r.text[:200]}", code=EXIT_ERROR)
     headers = {}
-    # 1) a token in the JSON body at --token-path
     tok = None
-    try:
-        obj = r.json()
-        tok = obj
-        for part in str(args.token_path).split("."):
-            tok = tok.get(part) if isinstance(tok, dict) else None
-    except ValueError:
-        tok = None
+    # 0) a token matched by regex — the only way to reach one embedded in an HTML bootstrap page,
+    #    e.g. <meta name="csrf-token" content="...">, which no dot-path can address.
+    if getattr(args, "token_regex", None):
+        m = re.search(args.token_regex, r.text or "")
+        if m:
+            tok = m.group(1) if m.groups() else m.group(0)
+    # 1) a token in the JSON body at --token-path
+    if tok is None:
+        try:
+            obj = r.json()
+            tok = obj
+            for part in str(args.token_path).split("."):
+                tok = tok.get(part) if isinstance(tok, dict) else None
+        except ValueError:
+            tok = None
+    # Which header the token rides in. `Authorization: Bearer <tok>` is the common case, but a
+    # CSRF token is echoed verbatim in its own header — sending that as a bearer authenticates
+    # nothing, and the target's 403 says "bad or missing X-CSRF-Token" while the operator stares
+    # at a token they can see is correct.
+    hdr = getattr(args, "token_header", None)
     if tok:
-        headers["Authorization"] = f"Bearer {tok}"
-        print(f"[build] got a token at '{args.token_path}' ({len(str(tok))} chars)", file=sys.stderr)
-    # 2) otherwise ride the session cookie the login set
-    elif r.cookies:
+        headers[hdr or "Authorization"] = str(tok) if hdr else f"Bearer {tok}"
+        where = "the regex" if getattr(args, "token_regex", None) else f"'{args.token_path}'"
+        print(f"[build] got a token via {where} ({len(str(tok))} chars)"
+              f"{' -> ' + hdr if hdr else ''}", file=sys.stderr)
+    # 2) ALSO ride any cookie the bootstrap set. Not `elif`: a CSRF bootstrap commonly sets a
+    #    session cookie AND embeds a token, and the target checks both.
+    if r.cookies:
         jar = "; ".join(f"{c.name}={c.value}" for c in r.cookies)
         headers["Cookie"] = jar
-        print(f"[build] no token at '{args.token_path}'; using the login session cookie", file=sys.stderr)
-    else:
-        _die(f"login succeeded but no token at '{args.token_path}' and no session cookie was set.\n"
-             f"  response: {r.text[:200]}", code=EXIT_ERROR)
+        if not tok:
+            print("[build] no token found; using the session cookie the bootstrap set",
+                  file=sys.stderr)
+    if not headers:
+        _die(f"the login succeeded but produced no credential: nothing at "
+             f"{'the regex' if getattr(args, 'token_regex', None) else repr(args.token_path)} "
+             f"and no cookie was set.\n  response: {r.text[:200]}", code=EXIT_ERROR)
 
     # Record the login as a REPEATABLE recipe, not just the token it produced.
     #
@@ -2003,18 +2402,27 @@ def _login_for_token(args):
     # `derived_multihop` + `reauth_on_401` is exactly this shape: re-issue the login, extract the
     # token again, re-attach it. Values written as `env:NAME` become `inputs` references so the
     # credential itself stays out of the config file.
-    inputs, step_json = {}, {}
-    for k, v in (body or {}).items():
+    inputs, step_body = {}, {}
+    for k, v in ((form if form is not None else body) or {}).items():
         if isinstance(v, str) and v.startswith("env:"):
             var = re.sub(r"[^A-Z0-9]+", "_", k.upper()).strip("_") or "SECRET"
             inputs[var] = v
-            step_json[k] = "{{%s}}" % var
+            step_body[k] = "{{%s}}" % var
         else:
-            step_json[k] = v
-    step = {"method": "POST", "url": url, "json": step_json}
+            step_body[k] = v
+    # Replay with the SAME encoding the exchange just succeeded with. `derived_multihop` reads
+    # `json` or `data` per step, and posting an OAuth2 grant as JSON gets `invalid_client` from a
+    # spec-compliant token endpoint — so a recipe that recorded the wrong one would authenticate
+    # during onboarding and then fail on every re-auth, which is the worst time to find out.
+    _method = (getattr(args, "login_method", None) or "POST").upper()
+    step = {"method": _method, "url": url}
+    if _method != "GET":                 # a GET bootstrap carries no body
+        step.update({"data": step_body} if form is not None else {"json": step_body})
     if tok:
-        step["extract"] = [{"var": "TOKEN", "path": str(args.token_path)}]
-        attach = {"headers": {"Authorization": "Bearer {{TOKEN}}"}}
+        step["extract"] = [{"var": "TOKEN", "regex": args.token_regex} if getattr(args, "token_regex", None)
+                           else {"var": "TOKEN", "path": str(args.token_path)}]
+        attach = {"headers": {hdr: "{{TOKEN}}"} if hdr
+                  else {"Authorization": "Bearer {{TOKEN}}"}}
         lifecycle = "reauth_on_401"
     else:
         # A cookie-based login has nothing to extract: re-running the step re-establishes the
@@ -2122,6 +2530,83 @@ def resolve_out_path(out) -> Path:
     return p
 
 
+def _parse_login_body(raw):
+    """Return ``(json_body, form_body)`` — exactly one is non-None — for ``--login-body``.
+
+    This accepted JSON only, and that made the single most common enterprise auth flow
+    unreachable: **RFC 6749 client_credentials is form-encoded.** Pasting the grant the spec
+    documents, and that every IdP's own docs print --
+
+        --login-body 'grant_type=client_credentials&client_id=…&client_secret=…'
+
+    -- died with ``--login-body is not valid JSON``. The runtime's own OAuth2 materializer has
+    always POSTed form-encoded (`layers/auth.py` uses ``data=``); only this CLI helper disagreed,
+    so a flow the adapter could execute could not be described to it.
+
+    Shape decides, not a flag: a body that parses as a JSON *object* is JSON; otherwise a
+    ``a=b&c=d`` string is form-encoded. Both spellings of an empty body stay JSON ``{}``, which is
+    what the non-OAuth login endpoints in the wild expect.
+    """
+    if not raw or not str(raw).strip():
+        return {}, None
+    text = str(raw).strip()
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, dict):
+            return obj, None
+        # A bare scalar (`"x"`, `5`) is valid JSON but not a body any endpoint accepts; fall
+        # through to the form reading rather than POSTing something meaningless.
+    except json.JSONDecodeError:
+        pass
+    from urllib.parse import parse_qsl
+    # An "=" is required before this is called form-encoded. Without that check `parse_qsl` happily
+    # turns any garbage into a single blank-valued key -- `not json at all` becomes
+    # {"not json at all": ""} -- and the CLI would POST it instead of saying the body is malformed.
+    pairs = parse_qsl(text, keep_blank_values=True) if "=" in text else []
+    if pairs:
+        return None, dict(pairs)
+    _die(f"--login-body is neither JSON nor form-encoded: {text[:80]!r}\n"
+         f"  JSON:  --login-body '{{\"code\":\"1234\"}}'\n"
+         f"  form:  --login-body 'grant_type=client_credentials&client_id=…&client_secret=…'",
+         error_code="bad_login_body")
+
+
+def _prepare_target_auth(args):
+    """Run the login/access-code exchange ONCE, up front, whichever command is onboarding.
+
+    Returns ``(auth_headers, auth_query)`` for the probe, and stashes ``args._login_auth`` so
+    :func:`_apply_login_auth` can attach the *repeatable* recipe to the config that gets written.
+
+    BOTH halves have to run on the same path, and before this they never did:
+
+      * ``_login_for_token`` had exactly one caller, ``cmd_discover`` — it minted a token and
+        flattened it into ``args.header`` as a literal, so `adapter build --login-url` shipped a
+        FROZEN ``Authorization: Bearer …``. The `auth` block it also computed was dropped on the
+        floor, because ``_finish_discovery`` never called ``_apply_login_auth``.
+      * ``_apply_login_auth`` had exactly one caller, ``cmd_onboard`` — which could not run a
+        login at all, because ``--login-url`` was not on its parser.
+
+    So the mechanism whose own comment says it exists to stop "the token expires mid-run, every
+    probe after that 401s" did precisely nothing, on either command. A 60-second token was dead 70
+    seconds later in field testing, and no test covered the pair.
+
+    One function, called by both, is the fix; ``tests/test_auth_flag_parity.py`` asserts both
+    commands call it and that neither re-implements the exchange.
+    """
+    if getattr(args, "proxy", None):                 # honored by requests (probe/spec/validate)
+        os.environ["HTTP_PROXY"] = os.environ["HTTPS_PROXY"] = args.proxy
+    # The exchange runs once; its token/cookie is injected as a header so every source (and the
+    # hard gate, via _target_auth) authenticates with it during THIS run, while the auth block
+    # stashed on args carries the repeatable recipe into the written config.
+    if getattr(args, "login_url", None):
+        login_headers = _login_for_token(args)
+        args.header = (args.header or []) + [f"{k}: {v}" for k, v in login_headers.items()]
+        # Remembered so _apply_login_auth can strip exactly these from the written config: they are
+        # this run's credential, not a durable one, and the auth block re-mints them per probe.
+        args._login_minted_headers = set(login_headers)
+    return _target_auth(args)
+
+
 def _apply_login_auth(cfg, args):
     """Attach the repeatable login recipe recorded by `_login_for_token` to a built config.
 
@@ -2134,6 +2619,23 @@ def _apply_login_auth(cfg, args):
         return cfg
     cfg["auth"] = block["auth"]
     cfg["auth_lifecycle"] = block["auth_lifecycle"]
+    # Drop the ONE-SHOT header the exchange minted for this run. It was injected into args.header
+    # so the probe and the hard gate could authenticate right now, and `_bake_auth` then wrote it
+    # into cfg["headers"] as a literal. Leaving it there is actively harmful in two ways: it pins a
+    # token that is already expiring (and would shadow the freshly minted one the auth block
+    # produces), and it writes a live credential into a file the operator may well commit.
+    #
+    # Exactly the names the exchange minted are removed — recorded by `_prepare_target_auth` rather
+    # than inferred from `attach`, because the cookie path attaches nothing (the session rides the
+    # request jar) yet still injects a `Cookie:` header that would go stale the same way. A genuine
+    # `--header` the operator passed alongside the login survives untouched.
+    minted = {h.lower() for h in (getattr(args, "_login_minted_headers", None) or ())}
+    if minted and isinstance(cfg.get("headers"), dict):
+        kept = {k: v for k, v in cfg["headers"].items() if k.lower() not in minted}
+        if kept:
+            cfg["headers"] = kept
+        else:
+            cfg.pop("headers", None)
     return cfg
 
 
@@ -2226,6 +2728,11 @@ def _finish_discovery(cfg, args, *, source, browser_recipe=None, response_sample
     auth_headers, auth_query = _target_auth(args)
     _bake_auth(cfg, auth_headers, auth_query)
     _bake_body_fields(cfg, _body_fields(args))   # body-carried key/tenant must persist too
+    # Attach the REPEATABLE login recipe, not just the one token the exchange happened to mint.
+    # This call was missing, and its absence is the whole bug: `adapter build --login-url` baked a
+    # frozen `Authorization: Bearer <token>` and no `auth` block, so nothing could re-mint when it
+    # expired mid-run. `cmd_onboard` already made this call; this is the other half.
+    cfg = _apply_login_auth(cfg, args)
     # carry TLS/mTLS options into the written config so runtime/assess use them too
     if getattr(args, "insecure", False):
         cfg["verify_tls"] = False
@@ -2452,8 +2959,8 @@ def _resolve_chat_target(args):
     """
     target = args.target or args.config or args.file
     if not target:
-        _die("what should I talk to?  ascend chat <config-name | config.json | https://url>\n"
-             "  list what you have:  ascend adapter configs")
+        _die("what should I talk to?  ascend chat <target-name | config-name | config.json | https://url>\n"
+             "  list what you have:  ascend target list")
     if str(target).startswith(("http://", "https://")):
         from runtime.discovery.probe import probe_api, build_config
         print(f"discovering {target} ...", file=sys.stderr)
@@ -2466,8 +2973,35 @@ def _resolve_chat_target(args):
         name = (target.split("//")[-1].split("/")[0]).replace(":", "-")
         print(f"found {res.method} {res.endpoint}", file=sys.stderr)
         return cfg, cfg.get("adapter", "direct_api"), name
+    bound = _config_for_target(target)
+    if bound:
+        print(f"target {target!r} -> config {bound!r}", file=sys.stderr)
+        target = bound
     cfg = _load_named_config(target)
     return cfg, args.adapter or cfg.get("adapter"), Path(str(target)).stem
+
+
+def _config_for_target(ref):
+    """The config bound to a TARGET — an app name or aapp_ id from `target list` — else None.
+
+    `target list` shows targets by name and `chat` took only config names, so the name a person had
+    just read in that table was refused with "no config named 'Multi A'". A config that really is
+    called that still wins; the lookup only runs when no config resolves.
+    """
+    ref = str(ref or "")
+    if not ref or ref.startswith(("http://", "https://")) or ref.endswith(".json"):
+        return None
+    try:
+        if resolve_config_path(ref) is not None:
+            return None
+        import creds as C
+        rows = C.load_all() or {}
+    except Exception:
+        return None
+    if ref.startswith("aapp_"):
+        return (rows.get(ref) or {}).get("config")
+    hits = [rec.get("config") for rec in rows.values() if (rec.get("app_name") or "") == ref and rec.get("config")]
+    return hits[0] if len(hits) == 1 else None
 
 
 def cmd_chat(args):
@@ -2883,6 +3417,23 @@ def _config_from_module(module_path_str, timeout_ms=None, target_hint=None):
     return cfg
 
 
+def _refuse_duplicate_app_name(c, wanted, cfg_name):
+    """Registration must not create a second app with a name that already exists on the tenant.
+
+    It did, and it looked like success — after which every command naming it (`assess run`,
+    `results`, `ci`, `export`, `target rm`) was refused as ambiguous. Seen live. Exit 3 with the
+    two ways forward; the config written in the steps before this one is kept.
+    """
+    dup = [a for a in _unwrap_list(c.list_apps()) if (a.get("name") or "") == wanted]
+    if not dup:
+        return None
+    _die(f"an app named {wanted!r} already exists ({dup[0].get('id')}).\n"
+         f"  re-onboard THAT app (keeps its key and history):  add  --app {wanted!r}  to this command\n"
+         f"  or register another under a new name:             --name '<new name>'\n"
+         f"  (the config {cfg_name!r} was saved; nothing was registered)",
+         error_code="duplicate_app_name")
+
+
 def cmd_onboard(args):
     """Zero to a running assessment in one command.
 
@@ -2942,7 +3493,7 @@ def cmd_onboard(args):
         # the simple-contract one-liner: one probe, no browser, no adapter to author
         _step(1, total, f"probing {args.api}")
         from runtime.discovery.probe import probe_api, build_config
-        auth_headers, auth_query = _target_auth(args)
+        auth_headers, auth_query = _prepare_target_auth(args)
         api_url = args.api
         if auth_query:
             sep = "&" if "?" in api_url else "?"
@@ -2959,7 +3510,7 @@ def cmd_onboard(args):
     elif getattr(args, "ws", None):
         _step(1, total, f"probing {args.ws}")
         from runtime.discovery.probe import probe_ws, build_ws_config
-        auth_headers, _auth_query = _target_auth(args)
+        auth_headers, _auth_query = _prepare_target_auth(args)
         res = probe_ws(args.ws, prompt=args.prompt or "hello",
                        headers=auth_headers or None,
                        timeout_s=args.timeout or 30)
@@ -3015,7 +3566,17 @@ def cmd_onboard(args):
     except Exception:
         pass
 
+    _before_login = json.dumps(cfg, sort_keys=True, default=str)
     cfg = _apply_login_auth(cfg, args)
+    if json.dumps(cfg, sort_keys=True, default=str) != _before_login and cfg_path:
+        # Every source branch above writes the config as soon as it derives one, and this call
+        # runs after all of them — so the login recipe was being attached to the in-memory dict
+        # and never reaching the file. The config on disk kept a frozen `Authorization` header and
+        # no `auth` block: the exact shape that dies when the token expires mid-run.
+        #
+        # Re-written only when something actually changed, so the no-login path stays byte-identical
+        # and `--config <existing>` is not rewritten for nothing.
+        cfg_path, cfg_name = _write_named_config(cfg, cfg_name, exact=True)
     adapter = args.adapter or cfg.get("adapter")
     if not adapter:
         _die("could not determine the adapter type; set 'adapter' in the config or pass --adapter")
@@ -3055,23 +3616,11 @@ def cmd_onboard(args):
     c = _client(args)
     controls = args.controls.split(",") if args.controls else None
     if controls:
-        v = c.validate_controls(controls)
-        for w in v["warnings"]:
-            _ok(f"warning: {w}")
         # Same trap as `app create`: `v["valid"] or controls` fell back to the ORIGINAL list when
         # nothing validated, so a typo'd control was sent to the platform verbatim and onboard
         # went on to run an assessment that could only ever come back clean.
-        if v.get("unknown"):
-            _die(f"unknown control id(s): {', '.join(v['unknown'])}\n"
-                 f"  list them:  ascend controls list\n"
-                 f"  a control that does not exist generates zero probes, so this run would "
-                 f"score clean without testing anything",
-                 error_code="unknown_control")
-        if not v.get("valid"):
-            _die("none of the selected controls can generate probes — refusing to onboard an app "
-                 "whose assessments cannot measure anything",
-                 error_code="no_scorable_controls")
-        controls = v["valid"]
+        controls = _validated_control_ids(c, controls, force=getattr(args, "force", False),
+                                          say=_ok, what="this run")
     # Without this, `target add` with no --controls sent control_type "all" and the platform
     # refused with a bare "the request was rejected by the upstream service" -- 100% of the time,
     # on the default invocation of the command 1.1.2 makes primary.
@@ -3112,6 +3661,7 @@ def cmd_onboard(args):
         # printed "no --controls given — registering with all 62 catalog controls" while
         # registering nothing at all. Reported by @ryan-straiker in #36.
         controls = _resolve_all_controls(c, args, controls)
+        _refuse_duplicate_app_name(c, args.name or name, cfg_name)
         app = c.create_app(api.build_thin_spec(
             name=args.name or name, system_prompt=args.system_prompt or name,
             control_ids=controls, assessment_size=args.size, qpm=args.qpm))
@@ -3140,6 +3690,7 @@ def cmd_onboard(args):
                     f"  app       {app_id}\n"
                     f"  adapter   {adapter}   (config '{cfg_name}', proven against the live target)\n"
                     f"  run it    ascend assess run --app '{label}'\n"
+                    f"  talk to it ascend chat '{label}'\n"
                     f"  re-check  ascend target check '{label}'"))
         return
 
@@ -3284,7 +3835,7 @@ def cmd_target_add(args):
                  error_code="spec_needs_build",
                  hint=(f"ascend adapter build --spec {src} --out mybot\n"
                        f"  then:  ascend target add mybot"))
-        if any(getattr(args, f, None) for f in ("api", "ws", "url", "curl", "har", "spec", "config", "module", "scaffold")):
+        if any(getattr(args, f, None) for f in ("api", "ws", "url", "curl", "har", "spec", "config", "module")):
             _die("give either a source argument or an explicit source flag, not both")
         setattr(args, flag, value)
         _say(args, f"detected {flag} source: {value}")
@@ -3296,15 +3847,28 @@ def cmd_target_add(args):
     return cmd_onboard(args)
 
 
+def _has_token(args) -> bool:
+    """Is a PAT available at all? `getattr`, not `args.token`: a caller can build the namespace
+    without the global flags (every skill and several tests do), and a command that only WANTS a
+    token must not crash on the absence of the attribute."""
+    return bool(getattr(args, "token", None) or os.environ.get("STRAIKER_PAT")
+                or os.environ.get("STRAIKER_TOKEN"))
+
+
 def cmd_target_list(args):
     """Every target this machine can run: its app, its proven adapter, and whether it is serving."""
     import creds as C
     recs = C.load_all() or {}
     live = None
-    try:
-        live = {a.get("id"): a for a in _unwrap_list(_client(args).list_apps())}
-    except Exception:
-        live = None
+    # The list is LOCAL (the key store); asking the platform whether each app still exists is a
+    # bonus. With no PAT this used to die on the token check before printing anything.
+    if _has_token(args):
+        try:
+            live = {a.get("id"): a for a in _unwrap_list(_client(args).list_apps())}
+        except Exception:
+            live = None
+    else:
+        print("  (no PAT in this shell: REGISTERED not checked against the platform)", file=sys.stderr)
     try:
         import supervisor as S
         serving = {r["app_id"] for r in S.ls() if r.get("state") == "serving"}
@@ -3344,6 +3908,15 @@ def cmd_target_list(args):
         print(f"  {str(r['target'])[:28]:28} {str(r['adapter'] or '-')[:14]:14} "
               f"{str(r['config'] or '-')[:16]:16} "
               f"{_ui.state(r['registered'], width=11)} {_ui.state(r['bridge'])}")
+    by_name = {}
+    for r in rows:
+        by_name.setdefault(r["target"], []).append(r)
+    for n, rs in sorted((n, rs) for n, rs in by_name.items() if n and len(rs) > 1):
+        # The table cannot tell them apart, and every command by that name is refused as ambiguous.
+        print(f"\n  ! {len(rs)} targets are named {n!r} — commands by name will be refused as ambiguous; use an id:")
+        for r in rs:
+            print(f"      {r['app_id']}  (config {r['config'] or '-'})")
+        print("    keep one:  ascend target rm <id>")
     print(f"\n{len(rows)} target(s)")
 
 
@@ -3378,7 +3951,7 @@ def cmd_target_show(args):
         # This is the state that reads as "the bridge is broken": the app and key are fine, so
         # nothing looks wrong, but no relay can start without a config to run.
         print(f"\n  the config named here does not resolve, so no bridge can start for this target."
-              f"\n  see what exists:  ascend adapter configs"
+              f"\n  see what exists:  ascend target list"
               f"\n  re-create it:     ascend target add <url|curl|har> --name '{out['target'] or app_id}'")
     print(f"\n  re-check it:  ascend target check '{out['target'] or app_id}'")
 
@@ -3403,23 +3976,24 @@ def cmd_target_check(args):
 
 def cmd_target_rm(args):
     """Forget a target: delete the application and drop its stored key."""
-    import creds as C
     ref = args.target
-    app_id = ref if str(ref).startswith("aapp_") else _resolve_app(_client(args), ref)
-    removed_key = False
-    if not getattr(args, "keep_key", False):
-        try:
-            removed_key = C.remove(app_id)
-        except Exception:
-            removed_key = False
-    deleted = False
+    c = _client(args)
+    app_id = ref if str(ref).startswith("aapp_") else _resolve_app(c, ref, exact=True)
+    _confirm_destroy(args, f"delete target {ref!r} ({app_id}) and every assessment under it?"
+                     + _cancel_note(_live_runs(c, app_id)))
     try:
-        _client(args).delete_app(app_id)
-        deleted = True
+        r = _retire_app(c, app_id, keep_key=getattr(args, "keep_key", False))
     except Exception as e:
-        print(f"warning: could not delete the application ({type(e).__name__})", file=sys.stderr)
-    _out({"app_id": app_id, "app_deleted": deleted, "key_removed": removed_key}, args,
-         human=f"removed {app_id}  (app_deleted={deleted}, key_removed={removed_key})")
+        # The key is still stored (the retire order keeps it when the delete fails), so the target
+        # can still be served and retried. If the app is already gone, `keys prune` drops the key.
+        hint = ("\n  the app no longer exists; drop its dead key with:  ascend keys prune"
+                if "404" in str(e) else "")
+        _out({"app_id": app_id, "app_deleted": False, "key_removed": False, "error": str(e)},
+             args, human=f"error: could not delete the application ({type(e).__name__}: {e}){hint}")
+        sys.exit(EXIT_ERROR)
+    _out({"app_id": app_id, "app_deleted": True, "key_removed": r["key_removed"],
+          "bridge_stopped": r["bridge_stopped"]}, args,
+         human=f"removed {app_id}  (app_deleted=True, key_removed={r['key_removed']})")
 
 
 def _looks_like_jsonl(path, sample=20):
@@ -4028,8 +4602,23 @@ def _target_for(app_id, *, name=None, config_override=None, store=None):
     if not cfg:
         return {"app_id": app_id, "app_name": name, "skip": "no config bound "
                 "(pass --config, or re-onboard so the binding is recorded)"}
+    if config_override and not _config_exists(config_override):
+        # Spawning anyway "started" a relay that died a second later on `no such config`.
+        return {"app_id": app_id, "app_name": name,
+                "skip": f"config {config_override!r} not found (ascend target list shows the names)"}
     return {"app_id": app_id, "app_name": name, "config": cfg,
             "adapter": rec.get("adapter"), "key": key}
+
+
+def _config_exists(name) -> bool:
+    """A config name resolvable in the config dir, or a path to a .json file."""
+    try:
+        direct = Path(os.path.expanduser(str(name)))
+        if direct.is_file() and direct.suffix == ".json":
+            return True
+        return resolve_config_path(str(name)) is not None
+    except Exception:
+        return False
 
 
 def _fleet_targets(args, c):
@@ -4057,6 +4646,35 @@ def _fleet_targets(args, c):
             for aid, name in picked.items()]
 
 
+def _add_runtime_start_args(s):
+    """Every `runtime start` flag. One definition: the parser uses it, and `bridge start --foreground`
+    reads the defaults from it to complete the namespace it hands to cmd_runtime_start."""
+    s.add_argument("--adapter", help="adapter type (default: from the config)")
+    s.add_argument("--config", required=True, help="config name in the config dir")
+    s.add_argument("--api-key", help="bridge key (tc-); else $STRAIKER_BRIDGE_API_KEY")
+    s.add_argument("--app", help="resolve the bridge key from the local key store for this app")
+    s.add_argument("--consumer", help="bridge consumer id (parallel bridges MUST differ; auto per app)")
+    s.add_argument("--log-file", help="write bridge logs here instead of stderr")
+    s.add_argument("--status-file",
+                   help="force heartbeat+stats publishing for a relay that cannot be resolved to "
+                        "an app id (supervised children pass this; when the app IS known the "
+                        "heartbeat is published under it automatically)")
+    s.add_argument("--qpm", type=int, default=None, help="queries per minute against the target")
+    s.add_argument("--max-workers", type=int, default=None, help="concurrency (auto: 1 for stateful targets)")
+    s.add_argument("--capture", default=None, help="jsonl file to record probe/result envelopes")
+    s.add_argument("--wait-ms", type=int, default=25000,
+                   help="long-poll hold in ms (server clamps to 0-55000)")
+    s.add_argument("--assessment-id", default=None,
+                   help="the assessment this bridge serves; it self-stops when that run ends")
+    s.add_argument("--idle-timeout", type=int, default=None,
+                   help="seconds a paused, already-probed bridge waits before self-stopping. "
+                        "0 never idle-stops (the default); the bridge stops when the run reaches a "
+                        "terminal state. $ASCEND_BRIDGE_IDLE_TIMEOUT sets this default for "
+                        "auto-managed runs.")
+    s.add_argument("--no-self-reconcile", action="store_true",
+                   help="do NOT self-stop on assessment completion (stay up until stopped manually)")
+
+
 def _bridge_start_foreground(args):
     """One bridge, in this terminal. Delegates to the same runtime the fleet spawns per app."""
     apps = getattr(args, "app", None) or []
@@ -4066,12 +4684,26 @@ def _bridge_start_foreground(args):
     if not args.config and not apps:
         _die("--foreground needs --config <name> (and usually --app <name> for its key)\n"
              "  example:  ascend bridge start --app 'My Bot' --foreground")
-    # cmd_runtime_start reads these attribute names; fill in what the fleet parser does not have.
+    # cmd_runtime_start reads the `runtime start` namespace. Complete it from that parser's OWN
+    # defaults — anything the fleet parser did not define, or left None — so a runtime flag added
+    # later is honoured here too. A hand-kept list missed --wait-ms, and the foreground bridge
+    # died on `None / 1000` the moment it tried to lease.
     args.app = apps[0] if apps else None
-    for attr, default in (("api_key", None), ("consumer", None), ("log_file", None),
-                          ("status_file", None), ("capture", None), ("adapter", None)):
-        if not hasattr(args, attr):
-            setattr(args, attr, default)
+    if args.app and not str(args.app).startswith("aapp_"):
+        # Register under the app ID, exactly as a detached relay does: a relay known only by a
+        # name is invisible to `is_serving()`, and `assess run` then starts a second one — two
+        # consumers splitting one app's probes. Same consumer scheme as supervisor.start().
+        args.app = _resolve_app(_client(args), args.app)
+    if args.app and not getattr(args, "consumer", None):
+        import supervisor as S
+        args.consumer = f"abv2-{S._safe(args.app)}"
+    rt = argparse.ArgumentParser(add_help=False)
+    _add_runtime_start_args(rt)
+    for a in rt._actions:
+        if a.dest == "help" or a.default is argparse.SUPPRESS:
+            continue
+        if getattr(args, a.dest, None) is None:
+            setattr(args, a.dest, a.default)
     if not args.config and args.app:
         _die("--foreground needs --config <name>: the app's bound config is only resolved for "
              "detached bridges\n  find it with:  ascend keys list")
@@ -4112,8 +4744,11 @@ def cmd_relay_start(args):
                     idle_timeout_s=_resolve_idle(args))
         results.append({"app_id": t["app_id"], "app_name": t.get("app_name"),
                         "started": "error" not in r, **({k: v for k, v in r.items() if k != "app_id"})})
+    n = sum(1 for r in results if r.get("started"))
     if args.json:
         _out(results, args)
+        if results and not n:
+            sys.exit(EXIT_ERROR)         # same contract as the human path below: none started is a failure
         return
     for r in results:
         if r.get("started"):
@@ -4121,7 +4756,6 @@ def cmd_relay_start(args):
                   f"log={r.get('log')}")
         else:
             print(f"  skipped  {r.get('app_name') or r['app_id']}  — {r.get('reason') or r.get('error')}")
-    n = sum(1 for r in results if r.get("started"))
     if n:
         _say(args, f"{n} bridge(s) running — check:  ascend bridge ls", done=True)
     print(f"\n  {n} bridge(s) started" + (f", qpm={qpm} each" if n and qpm else ""))
@@ -4144,11 +4778,22 @@ def cmd_relay_start(args):
 def cmd_bridge_sync(args):
     """Reconcile local bridges against platform assessment state. The reliable fallback for
     'someone paused/resumed a run in the Console': ensure a bridge for every app with a
-    running/paused assessment, and (unless --no-stop) stop bridges whose apps are all terminal."""
+    running/paused assessment, and (unless --no-stop) stop bridges whose apps are all terminal.
+
+    `--app` (repeatable) scopes the sync. Without it every app on the tenant is considered, and an
+    app this machine holds no key or config for is REPORTED, not counted as a failure: in a shared
+    tenant most live runs belong to other machines, and exiting 1 on each of them made the command
+    useless as a cron step. A start that actually failed, or a scoped app that cannot be served
+    from here, is a failure (exit 1) — under --json too.
+    """
     import supervisor as S
     from concurrent.futures import ThreadPoolExecutor
     c = _client(args)
     apps = _unwrap_list(c.list_apps())
+    scoped = bool(getattr(args, "app", None))
+    if scoped:
+        wanted = {_resolve_app(c, r) for r in args.app}
+        apps = [a for a in apps if a.get("id") in wanted]
 
     def state(a):
         try:
@@ -4158,7 +4803,7 @@ def cmd_bridge_sync(args):
 
     with ThreadPoolExecutor(max_workers=12) as pool:
         results = list(pool.map(state, apps))
-    started, stopped, reused, skipped = [], [], [], []
+    started, stopped, reused, unserved, failed = [], [], [], [], []
     for a, asmts in results:
         if not needs_bridge(a):
             continue
@@ -4166,28 +4811,41 @@ def cmd_bridge_sync(args):
         serving = S.is_serving(a["id"])
         if active and not serving:
             r = _ensure_bridge(c, a, args=args)
-            (started if r.get("started") else skipped).append((a.get("name"), r))
+            if r.get("started"):
+                started.append(a.get("name"))
+            elif r.get("skip") and not scoped:
+                unserved.append((a.get("name"), r["skip"]))       # not this machine's to serve
+            else:
+                failed.append((a.get("name"), r.get("skip") or r.get("error")))
         elif active and serving:
             reused.append(a.get("name"))
         elif not active and serving and not getattr(args, "no_stop", False):
             S.stop(a["id"])
             stopped.append(a.get("name"))
     if args.json:
-        _out({"started": [n for n, _ in started], "stopped": stopped, "reused": reused,
-              "skipped": [{"app": n, "reason": r.get("skip") or r.get("error")}
-                          for n, r in skipped]}, args)
+        skipped = [{"app": n, "reason": why} for n, why in unserved + failed]   # the pre-1.1.3 key
+        _out({"started": started, "stopped": stopped, "reused": reused, "skipped": skipped,
+              "unserved": [{"app": n, "reason": why} for n, why in unserved],
+              "failed": [{"app": n, "reason": why} for n, why in failed]}, args)
+        if failed:
+            sys.exit(EXIT_ERROR)
         return
-    for n, _ in started:
+    for n in started:
         print(f"  started  {n}")
     for n in stopped:
         print(f"  stopped  {n}  (no active assessment)")
     for n in reused:
         print(f"  ok       {n}  (already serving)")
-    for n, r in skipped:
-        print(f"  ! skip   {n}  — {r.get('skip') or r.get('error')}")
+    for n, why in failed:
+        print(f"  ! failed {n}  — {why}")
     print(f"\n  synced: {len(started)} started, {len(stopped)} stopped, "
-          f"{len(reused)} already serving, {len(skipped)} skipped")
-    if skipped:
+          f"{len(reused)} already serving, {len(failed)} failed")
+    if unserved:
+        names = ", ".join(str(n) for n, _ in unserved[:6]) + (" …" if len(unserved) > 6 else "")
+        print(f"  {len(unserved)} live run(s) on apps this machine holds no key or config for — not "
+              f"served from here: {names}\n"
+              f"  serve one:  ascend keys add <app> --key <tc-...>   ·   scope:  ascend bridge sync --app <name>")
+    if failed:
         sys.exit(EXIT_ERROR)
 
 
@@ -4317,7 +4975,7 @@ def cmd_relay_stop(args):
     if args.all:
         targets = [r["app_id"] for r in S.ls()]
     for ref in (args.app or []):
-        targets.append(ref if str(ref).startswith("aapp_") else _resolve_app(_client(args), ref))
+        targets.append(ref if str(ref).startswith("aapp_") else _resolve_app(_client(args), ref, exact=True))
     if not targets:
         _die("pass --app <name> (repeatable) or --all")
     _say(args, f"Stopping {len(dict.fromkeys(targets))} bridge(s)...")
@@ -4342,7 +5000,8 @@ def cmd_relay_logs(args):
         except KeyboardInterrupt:
             pass
         return
-    print(log.read_text()[-20000:])
+    tail = log.read_text()[-20000:]
+    _out({"app_id": app_id, "log": str(log), "tail": tail}, args, human=tail)
 
 
 # ----------------------------------------------------------------------------- keys
@@ -4416,7 +5075,7 @@ def cmd_keys_add(args):
     if not str(args.key).startswith("tc-"):
         _die("a bridge key looks like 'tc-…' — that does not")
     c = _client(args)
-    app_id = _resolve_app(c, args.app)
+    app_id = _resolve_app(c, args.app, exact=True)
     name = None
     try:
         name = (c.get_app(app_id) or {}).get("name")
@@ -4436,21 +5095,20 @@ def cmd_keys_rm(args):
     """
     import creds as C
     c = _client(args) if (not str(args.app).startswith("aapp_") or args.delete_app) else None
-    app_id = args.app if str(args.app).startswith("aapp_") else _resolve_app(c, args.app)
+    app_id = args.app if str(args.app).startswith("aapp_") else _resolve_app(c, args.app, exact=True)
+    if args.delete_app:
+        _confirm_destroy(args, f"delete app {args.app!r} ({app_id}) and its stored key?")
+    else:
+        _confirm_destroy(args, f"forget the stored bridge key for {args.app!r}? It cannot be re-read")
     _say(args, f"Removing the stored key for {args.app}...")
-    removed = C.remove(app_id)
-    if removed:
-        _say(args, "key removed", done=True)
     app_deleted = False
     if args.delete_app:
-        try:
-            import supervisor as S
-            if S.is_running(app_id):
-                S.stop(app_id)
-        except Exception:
-            pass
-        c.delete_app(app_id)
-        app_deleted = True
+        r = _retire_app(c, app_id)
+        removed, app_deleted = r["key_removed"], True
+    else:
+        removed = C.remove(app_id)
+    if removed:
+        _say(args, "key removed", done=True)
     human = ("removed the stored key" if removed else "no stored key for that app")
     if app_deleted:
         human += " · deleted the Ascend app too"
@@ -4508,6 +5166,17 @@ def _age(iso):
     if secs < 86400:
         return f"{int(secs // 3600)}h"
     return f"{int(secs // 86400)}d"
+
+
+def _failed_of(row):
+    """`failed` for a list row, derived from category_summary when the payload omits it."""
+    if row.get("failed") is not None:
+        return row.get("failed")
+    try:
+        import api
+        return api.probe_counts(row)[0]
+    except Exception:
+        return None
 
 
 def cmd_reports(args):
@@ -4572,7 +5241,7 @@ def cmd_reports(args):
                                  # total/failed are in the LIST payload — real, explainable
                                  # pass/fail with no extra call. (score is a platform index we
                                  # deliberately do not surface — it has no transparent formula.)
-                                 "total": r.get("total"), "failed": r.get("failed"),
+                                 "total": r.get("total"), "failed": _failed_of(r),
                                  "severity": r.get("severity")})
 
     # --- tier 2: probe/finding counts need the individual assessment -----------------
@@ -4713,7 +5382,7 @@ def cmd_policy_push(args):
         _die(f"no policy file at {P.policy_path(getattr(args, 'policy', None))}\n"
              f"  create one:  ascend policy set --app {args.app!r} --category data_leak=high")
 
-    app_id = _resolve_app(c, args.app)
+    app_id = _resolve_app(c, args.app, exact=True)
     app = c.get_app(app_id)
     app_name = app.get("name") or args.app
 
@@ -5098,17 +5767,20 @@ def cmd_doctor(args):
     if getattr(args, "update", False):
         return _doctor_update(args)
     import shutil, urllib.request
-    checks = []
+    checks = []       # (label, ok) or (label, ok, fix) — a failed check should say what to do
     tok = args.token or os.environ.get("STRAIKER_PAT") or os.environ.get("STRAIKER_TOKEN")
-    checks.append(("PAT present", bool(tok)))
+    checks.append(("PAT present", bool(tok),
+                   "export STRAIKER_PAT=s6r_pat_...   (Console -> Settings -> API keys), or pass --token"))
     if tok:
         try:
             c = _client(args)
             cat = c.list_controls()
             n = len(_unwrap_list(cat, "controls"))   # tolerate a bare-list response
-            checks.append((f"PAT exchange + /ascend/controls ({n} controls)", n > 0))
+            checks.append((f"PAT exchange + /ascend/controls ({n} controls)", n > 0,
+                           "the token authenticated but the control catalog came back empty; try again, then ask Straiker"))
         except Exception as e:
-            checks.append((f"PAT exchange FAILED: {str(e)[:80]}", False))
+            checks.append((f"PAT exchange FAILED: {str(e)[:80]}", False,
+                           "the token is expired, revoked, or issued for another tenant: ascend tenant show"))
     # Any HTTP status proves reachability (a 404/401 from the bridge means we got there).
     # Use requests so corporate proxy env vars are honoured — urllib ignored them and
     # reported a false negative behind a proxy, then told the user the tool was broken.
@@ -5133,7 +5805,8 @@ def cmd_doctor(args):
             bad_cfgs.append(f.name)
     checks.append(("all configs parse as JSON" if not bad_cfgs
                    else f"INVALID config JSON: {', '.join(bad_cfgs[:3])}", not bad_cfgs))
-    ok = all(v for _, v in checks)
+    checks = [(c + (None,))[:3] for c in checks]          # normalise to (label, ok, fix)
+    ok = all(v for _, v, _fix in checks)
 
     # Optional extras: each unlocks one capability. Missing = warn, never fail.
     def _has(mod):
@@ -5156,15 +5829,18 @@ def cmd_doctor(args):
     ver, kind, upd_cmd = _version_state()
     behind = ver["state"] in ("update_available", "update_recommended")
     if args.json:
-        _out({"ok": ok, "checks": {k: v for k, v in checks}, "optional": {k: v for k, v in soft},
+        _out({"ok": ok, "checks": {k: v for k, v, _ in checks}, "optional": {k: v for k, v in soft},
+              "fixes": {k: fix for k, v, fix in checks if not v and fix},
               "version": {"current": ver["current"], "latest": ver["latest"],
                           "state": ver["state"], "severity": ver["severity"],
                           "min_supported": ver.get("min_supported"), "install_method": kind,
                           "update_command": upd_cmd if behind else None,
                           "reason": ver.get("reason")}}, args)
     else:
-        for k, v in checks:
+        for k, v, fix in checks:
             print(f"  [{'ok' if v else 'XX'}] {k}")
+            if not v and fix:
+                print(f"       fix: {fix}")
         for k, v in soft:
             print(f"  [{'ok' if v else '..'}] {k} (optional)")
         cur, lat, st = ver["current"], ver["latest"], ver["state"]
@@ -5376,14 +6052,7 @@ def cmd_discover(args):
         if blocked:
             _die(f"refusing to probe {blocked}. Pass --allow-internal to override.",
                  code=EXIT_USAGE)
-    if getattr(args, "proxy", None):                 # honored by requests (probe/spec/validate)
-        os.environ["HTTP_PROXY"] = os.environ["HTTPS_PROXY"] = args.proxy
-    # A login / access-code exchange runs ONCE, up front; its token/cookie is injected as a
-    # header so every source (and the hard gate, via _target_auth) authenticates with it.
-    if getattr(args, "login_url", None):
-        login_headers = _login_for_token(args)
-        args.header = (args.header or []) + [f"{k}: {v}" for k, v in login_headers.items()]
-    auth_headers, auth_query = _target_auth(args)
+    auth_headers, auth_query = _prepare_target_auth(args)
 
     # ---- non-browser sources -------------------------------------------------
     if getattr(args, "api", None):
@@ -5700,7 +6369,8 @@ def cmd_export(args):
            "markdown": E.to_markdown}[fmt](a)
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)   # CI writes reports/x.sarif
-        Path(args.out).write_text(out); print(f"wrote {args.out}")
+        Path(args.out).write_text(out)
+        print(f"wrote {args.out}", file=sys.stderr)      # stdout stays empty: the report went to --out
     else:
         print(out)
 
@@ -5827,6 +6497,18 @@ def _global_flags() -> argparse.ArgumentParser:
 GLOBALS = _global_flags()
 
 
+class _Parser(argparse.ArgumentParser):
+    """argparse's own usage errors exit 2 with plain text on stderr — and 2 is EXIT_FINDINGS here,
+    so a typo'd flag in a CI step read as "findings present". Every other bad invocation exits
+    EXIT_USAGE (3) through _die, which also honours --json; this makes argparse's do the same.
+    Subparsers inherit the class, so one override covers every verb."""
+
+    def error(self, message):
+        if not _wants_json():
+            self.print_usage(sys.stderr)
+        _die(message, code=EXIT_USAGE)
+
+
 class _Fmt(argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter):
     """Show defaults AND stop argparse re-wrapping copy-pasteable examples."""
 
@@ -5882,6 +6564,65 @@ Full reference: docs/COMMAND_MAP.md  ·  building adapters: docs/BUILD_ADAPTER.m
 """
 
 
+def _add_target_auth_args(s):
+    """Target-authentication flags, defined ONCE and shared by every command that onboards.
+
+    These lived only on `adapter build`/`map`/`discover`. `target add` — the command 1.1.2 made
+    primary — had just `--bearer`, `--api-key`, `--header` and `--body-field`, which made it
+    strictly LESS capable for auth than the command it demoted.
+
+    That gap was not cosmetic. `runtime/discovery/probe.py` answers a 401 by telling the operator
+    to re-run with `--basic`, `--cookie`, or `--login-url` + `--login-body` + `--token-path` — and
+    `target add` accepted none of them, so following the CLI's own printed advice returned
+    `unrecognized arguments`. A dead end on the documented first step, for the commonest kind of
+    real target there is: one behind a login.
+
+    Defined here rather than copied into both parsers, because the copy is how they diverged in the
+    first place; `tests/test_auth_flag_parity.py` asserts both call this and neither re-declares a
+    flag of its own.
+    """
+    # --- one request's credentials -----------------------------------------------------------
+    s.add_argument("--header", action="append", metavar="'Name: value'",
+                   help="raw header (repeatable), honored by all sources, e.g. 'X-Api-Key: …'")
+    s.add_argument("--bearer", metavar="TOKEN", help="Authorization: Bearer <token>")
+    s.add_argument("--api-key", metavar="NAME:VALUE[:in=header|query]",
+                   help="API key, e.g. 'x-api-key:abc' or 'key:abc:in=query'")
+    s.add_argument("--basic", metavar="USER:PASS", help="HTTP Basic auth")
+    s.add_argument("--cookie", metavar="'k=v; k2=v2'", help="Cookie header for a session-gated target")
+    s.add_argument("--token-file", metavar="PATH", help="read a bearer token from this file")
+    s.add_argument("--body-field", action="append", metavar="key=value",
+                   help="extra JSON body field, repeatable — for agents whose key/tenant lives in "
+                        "the BODY, e.g. --body-field apiKey=abc --body-field workspace=support. "
+                        "Use key:=raw for a non-string literal (true/1/{...}).")
+    # --- login / access-code flow: POST creds, extract a token, then use it -------------------
+    s.add_argument("--login-url", metavar="URL", help="POST here first to exchange creds/code for a token")
+    s.add_argument("--login-body", metavar="JSON|FORM",
+                   help="body for --login-url. JSON ('{\"code\":\"1234\"}') or form-encoded "
+                        "('grant_type=client_credentials&client_id=…') — OAuth2 is form-encoded.")
+    s.add_argument("--token-path", metavar="DOTPATH", default="token",
+                   help="dot-path to the token in the login response (default: token)")
+    # A GET bootstrap is a different shape from a POST login and just as common: a session cookie
+    # handed out by GET /login, or a CSRF token embedded in the HTML of GET /. Neither could be
+    # expressed before, so both failed with the target's own 401/403 and no way forward.
+    s.add_argument("--login-method", choices=["POST", "GET"], default="POST",
+                   help="verb for --login-url (default: POST). GET for a bootstrap page that sets "
+                        "a session cookie or embeds a CSRF token.")
+    s.add_argument("--token-regex", metavar="RE",
+                   help="extract the token with a regex (first capture group) instead of "
+                        "--token-path — for a token embedded in HTML, e.g. "
+                        "'csrf-token\" content=\"([^\"]+)'")
+    s.add_argument("--token-header", metavar="NAME",
+                   help="send the extracted token in this header verbatim (e.g. X-CSRF-Token) "
+                        "instead of as 'Authorization: Bearer <token>'")
+    # --- transport / TLS ----------------------------------------------------------------------
+    s.add_argument("--insecure", action="store_true",
+                   help="skip TLS verification (self-signed internal targets)")
+    s.add_argument("--ca-bundle", metavar="PATH", help="custom CA bundle for TLS verification")
+    s.add_argument("--client-cert", metavar="PATH", help="client certificate (PEM) for mTLS")
+    s.add_argument("--client-key", metavar="PATH", help="client private key (PEM) for mTLS")
+    s.add_argument("--proxy", metavar="URL", help="HTTP(S) proxy for the probe/validate calls")
+
+
 def _add_onboard_args(s, *, require_source):
     """Every argument the onboard flow reads. Shared by `onboard` and `target add` so the two
     cannot drift apart — `target add` takes the same evidence, it just stops once registered."""
@@ -5917,13 +6658,8 @@ def _add_onboard_args(s, *, require_source):
     s.add_argument("--system-prompt", help="what the target is, for the assessment context")
     s.add_argument("--controls", help="comma-separated control ids (validated before the run)")
     s.add_argument("--adapter", help="override the adapter type (default: from the config)")
-    s.add_argument("--bearer", metavar="TOKEN", help="Authorization: Bearer <token> (with --api/--curl)")
-    s.add_argument("--api-key", metavar="NAME:VALUE[:in=header|query]", help="API key (with --api)")
-    s.add_argument("--header", action="append", metavar="'Name: value'", help="raw header (repeatable)")
-    s.add_argument("--body-field", action="append", metavar="key=value",
-                   help="extra JSON body field (repeatable) — for a key/tenant that lives in the body")
+    _add_target_auth_args(s)
     s.add_argument("--prompt-hint", help="with --curl: the literal prompt text used in that command")
-    s.add_argument("--insecure", action="store_true", help="skip TLS verification (self-signed internal)")
     s.add_argument("--size", default="small", choices=["small", "medium", "large"],
                    help="assessment size")
     s.add_argument("--qpm", type=int, default=20, help="queries per minute against the target")
@@ -5957,30 +6693,8 @@ def _add_build_args(s):
     s.add_argument("--spec", metavar="BASE_URL",
                    help="find an OpenAPI/Swagger spec under this base URL and build from it")
     s.add_argument("--har", help="HAR file to classify")
-    # --- target auth (honored by every source; baked into the written config) ---
-    s.add_argument("--header", action="append", metavar="'Name: value'",
-                   help="raw header (repeatable), honored by all sources, e.g. 'X-Api-Key: …'")
-    s.add_argument("--bearer", metavar="TOKEN", help="Authorization: Bearer <token>")
-    s.add_argument("--api-key", metavar="NAME:VALUE[:in=header|query]",
-                   help="API key, e.g. 'x-api-key:abc' or 'key:abc:in=query'")
-    s.add_argument("--basic", metavar="USER:PASS", help="HTTP Basic auth")
-    s.add_argument("--cookie", metavar="'k=v; k2=v2'", help="Cookie header for a session-gated target")
-    s.add_argument("--token-file", metavar="PATH", help="read a bearer token from this file")
-    s.add_argument("--body-field", action="append", metavar="key=value",
-                   help="extra JSON body field, repeatable — for agents whose key/tenant lives in "
-                        "the BODY, e.g. --body-field apiKey=abc --body-field workspace=support. "
-                        "Use key:=raw for a non-string literal (true/1/{...}).")
-    # --- login / access-code flow: POST creds, extract a token, then use it ---
-    s.add_argument("--login-url", metavar="URL", help="POST here first to exchange creds/code for a token")
-    s.add_argument("--login-body", metavar="JSON", help="JSON body for --login-url, e.g. '{\"code\":\"1234\"}'")
-    s.add_argument("--token-path", metavar="DOTPATH", default="token",
-                   help="dot-path to the token in the login response (default: token)")
+    _add_target_auth_args(s)
     s.add_argument("--prompt-hint", help="with --curl: the literal prompt text used in that command")
-    s.add_argument("--insecure", action="store_true", help="skip TLS verification (self-signed internal targets)")
-    s.add_argument("--ca-bundle", metavar="PATH", help="custom CA bundle for TLS verification")
-    s.add_argument("--client-cert", metavar="PATH", help="client certificate (PEM) for mTLS")
-    s.add_argument("--client-key", metavar="PATH", help="client private key (PEM) for mTLS")
-    s.add_argument("--proxy", metavar="URL", help="HTTP(S) proxy for the probe/validate calls")
     s.add_argument("--allow-internal", action="store_true",
                    help="allow link-local/cloud-metadata hosts (169.254/fd00::) — off by default")
     s.add_argument("--timeout", type=float, default=20.0, help="per-request timeout in seconds")
@@ -6012,7 +6726,7 @@ def _add_build_args(s):
 
 
 def build_parser():
-    p = argparse.ArgumentParser(
+    p = _Parser(
         prog="ascend", description=__doc__, parents=[GLOBALS],
         formatter_class=argparse.RawDescriptionHelpFormatter,
         # Explicit usage: the subparser listing is suppressed (see below), which would otherwise
@@ -6159,6 +6873,8 @@ def build_parser():
     s.add_argument("app", help="app name or aapp_ id")
     s.add_argument("--keep-key", action="store_true",
                    help="keep the stored bridge key (default: remove it — a key without its app is dead)")
+    s.add_argument("--yes", action="store_true",
+                   help="skip the confirmation prompt (non-interactive runs never prompt)")
     s.set_defaults(func=cmd_app_delete)
 
     # controls
@@ -6234,7 +6950,8 @@ def build_parser():
     s.set_defaults(func=cmd_assess_diff)
     s = asp.add_parser("results", parents=[GLOBALS], formatter_class=_Fmt, help="assessment findings summary")
     s.add_argument("--app", required=True, help="app name or aapp_ id")
-    s.add_argument("--assessment", required=True, help="assessment id (asmt_...)")
+    s.add_argument("--assessment",
+                   help="assessment id (asmt_...); default: the latest finished run on the app")
     s.add_argument("--detail", action="store_true", help="show key findings per control")
     s.set_defaults(func=cmd_assess_results)
     s = asp.add_parser("watch", parents=[GLOBALS], formatter_class=_Fmt,
@@ -6275,30 +6992,7 @@ def build_parser():
                         help=argparse.SUPPRESS).add_subparsers(dest="verb", required=True)
     s = rp.add_parser("start", parents=[GLOBALS], formatter_class=_Fmt, help="lease probes and relay them to a target via an adapter (see `bridge start --foreground`)",
                       epilog="example: STRAIKER_BRIDGE_API_KEY=tc-... ascend runtime start --adapter direct_api --config mybot")
-    s.add_argument("--adapter", help="adapter type (default: from the config)")
-    s.add_argument("--config", required=True, help="config name in the config dir")
-    s.add_argument("--api-key", help="bridge key (tc-); else $STRAIKER_BRIDGE_API_KEY")
-    s.add_argument("--app", help="resolve the bridge key from the local key store for this app")
-    s.add_argument("--consumer", help="bridge consumer id (parallel bridges MUST differ; auto per app)")
-    s.add_argument("--log-file", help="write bridge logs here instead of stderr")
-    s.add_argument("--status-file",
-                   help="force heartbeat+stats publishing for a relay that cannot be resolved to "
-                        "an app id (supervised children pass this; when the app IS known the "
-                        "heartbeat is published under it automatically)")
-    s.add_argument("--qpm", type=int, default=None, help="queries per minute against the target")
-    s.add_argument("--max-workers", type=int, default=None, help="concurrency (auto: 1 for stateful targets)")
-    s.add_argument("--capture", default=None, help="jsonl file to record probe/result envelopes")
-    s.add_argument("--wait-ms", type=int, default=25000,
-                   help="long-poll hold in ms (server clamps to 0-55000)")
-    s.add_argument("--assessment-id", default=None,
-                   help="the assessment this bridge serves; it self-stops when that run ends")
-    s.add_argument("--idle-timeout", type=int, default=None,
-                   help="seconds a paused, already-probed bridge waits before self-stopping. "
-                        "0 never idle-stops (the default); the bridge stops when the run reaches a "
-                        "terminal state. $ASCEND_BRIDGE_IDLE_TIMEOUT sets this default for "
-                        "auto-managed runs.")
-    s.add_argument("--no-self-reconcile", action="store_true",
-                   help="do NOT self-stop on assessment completion (stay up until stopped manually)")
+    _add_runtime_start_args(s)
     s.set_defaults(func=cmd_runtime_start)
 
     # adapter
@@ -6469,6 +7163,8 @@ def build_parser():
                       help="delete the application and drop its stored key")
     s.add_argument("target", help="target name or aapp_ id")
     s.add_argument("--keep-key", action="store_true", help="leave the stored bridge key in place")
+    s.add_argument("--yes", action="store_true",
+                   help="skip the confirmation prompt (non-interactive runs never prompt)")
     s.set_defaults(func=cmd_target_rm)
     # The registry of adapter TYPES, i.e. "what kinds of target can this onboard?". It was only
     # reachable as `adapter list`, which was the single reason anyone still needed that noun.
@@ -6599,6 +7295,8 @@ def build_parser():
                            "stop for terminal (the fallback after a Console-side change)")
     s.add_argument("--no-stop", action="store_true",
                    help="only start missing bridges; never stop one")
+    s.add_argument("--app", action="append",
+                   help="only these apps (repeatable; name or aapp_ id). Default: every app on the tenant")
     s.set_defaults(func=cmd_bridge_sync)
 
     # keys (the local bridge key store)
@@ -6628,6 +7326,8 @@ def build_parser():
     s.add_argument("app", help="app name or aapp_ id")
     s.add_argument("--delete-app", action="store_true",
                    help="also delete the Ascend app (retire the pair: a keyless app can't be served)")
+    s.add_argument("--yes", action="store_true",
+                   help="skip the confirmation prompt (non-interactive runs never prompt)")
     s.set_defaults(func=cmd_keys_rm)
 
     # tenant (the single-tenant lock)

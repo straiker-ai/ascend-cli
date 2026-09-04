@@ -101,6 +101,9 @@ class TestTheDocMatchesReality:
         t = DOC.read_text()
         assert "live_matrix.py" in t
         assert (REPO / "scripts" / "live_matrix.py").is_file()
+        # the auth gates are the other thing CI cannot prove: a target behind a login, live
+        assert "live_auth_matrix.py" in t
+        assert (REPO / "scripts" / "live_auth_matrix.py").is_file()
 
     def test_it_is_not_run_by_ci(self):
         assert "live_matrix.py" not in WF.read_text().split("# Deliberately NOT here")[-1].split(

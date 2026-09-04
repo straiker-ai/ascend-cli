@@ -7,6 +7,16 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`docs/AUTH.md`** — the one page for target authentication: what your target uses → what you
+  pass → what the written config carries → which app types can run it (static credentials with
+  `env:` references, login and OAuth2 recipes that re-authenticate, HMAC/nonce → `--scaffold`, SSO
+  via `--cdp`, TLS/mTLS/proxy, the egress guard, what gets printed).
+- **`scripts/live_auth_matrix.py`** — a release step, like `live_matrix.py`: onboards a real target
+  behind each of ten authentication gates and asserts what `target add` derives (auth block, no
+  secret in the config, refusal with the scaffold hint for signed requests). 10/10 on 2026-09-03.
+
 ### Fixed
 
 - **A credential given on the command line can be an `env:` reference, and then never lands in a

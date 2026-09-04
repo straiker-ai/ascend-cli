@@ -110,6 +110,30 @@ back, it resumes the run (a few times at most, and never a pause it did not see 
 started for three polls in a row, `assess run` exits 1 at once with the reason and the two commands
 that continue the run, instead of polling to its timeout.
 
+## Reading the relay's log
+
+`ascend bridge logs --app <name>` is the ground truth when a run looks wrong. The lines are
+prefixed by the component that wrote them, and those prefixes are the same three nouns the
+diagram uses:
+
+| log prefix | what it is |
+|---|---|
+| `ascendbridge.lease` | the bridge, talking to the Straiker cloud: leasing probes and posting results |
+| `ascendbridge` | the relay's own lifecycle — heartbeats, self-reconcile, shutdown |
+| `adapters.<type>` | the adapter, calling your target (`adapters.direct_api: DirectAPI: POST https://…`) |
+
+A line under `adapters.*` is your target's problem; a line under `ascendbridge.lease` is the
+Straiker edge. That split is the fastest triage this tool offers, and it is why
+`ascend bridge ls`'s `ANS` column and the log agree: `ANS` counts what the adapter answered.
+
+<a id="service-names"></a>
+Straiker's own service endpoints occasionally identify themselves by an internal service name in a
+raw HTTP response — the lease endpoint's health body is one. Those names are not part of any
+contract and are not used anywhere in this CLI, its output or its logs. Everything you need to
+troubleshoot is in the prefixes above; if you see an unfamiliar service name in a raw response,
+it is the Straiker cloud answering, and the product name for that half of the picture is
+**Ascend AI**.
+
 ## 3. Console and CLI sync cannot start a local process
 
 Pause/resume from the Console changes the assessment state, but the Console **cannot start the

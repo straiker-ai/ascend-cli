@@ -11,7 +11,7 @@ servers:
   - url: https://{host}
     variables:
       host:
-        default: probe-shadow.example.com
+        default: the Ascend lease service.example.com
         description: Provided per-environment by Straiker.
 security:
   - bearerAuth: []

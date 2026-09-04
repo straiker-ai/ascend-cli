@@ -50,7 +50,10 @@ def shipped_files():
 
 @pytest.mark.parametrize("word", sorted(INTERNAL))
 def test_no_shipped_file_names_an_internal_service(word):
-    pat = re.compile(rf"\b{re.escape(word)}\b", re.I)
+    # `probe_shadow` also ships as "Probe Shadow" and "probe-shadow"; the underscore-only pattern
+    # let the spaced form through in transport/openapi.yaml, which a customer downloads.
+    loose = re.escape(word).replace("_", "[ _-]?")
+    pat = re.compile(rf"\b{loose}\b", re.I)
     hits = []
     for p in shipped_files():
         try:

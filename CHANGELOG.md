@@ -22,6 +22,16 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ### Fixed
 
+- **`assess run` exited 0 with the assessment still running.** The platform truncates the
+  create-assessment response often enough that the CLI's recovery path is the common one, not the
+  rare one. Recovery found the run, saw `running`, and returned that row — from a `wait=True`
+  call — so `assess run` printed the `--no-wait` hints and exited 0 in two seconds while the
+  probes were still being answered. A pipeline read that as a passing gate. Two seams fed it:
+  `poll_assessment` raised on a single failed GET, and `run()`'s recovery returned whatever state
+  it found regardless of `wait`. Polling now absorbs a few consecutive transport errors, recovery
+  re-resumes and keeps polling when asked to wait, and `assess run` exits non-zero if it was asked
+  to wait and the run is not terminal — a wait that returns early can never be green.
+
 - **`ascend ci` and `ascend export` requested `/assessments/None`.** Both take an optional
   `--assessment` and passed it straight into the URL, so omitting it produced
 

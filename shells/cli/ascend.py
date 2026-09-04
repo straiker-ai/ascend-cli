@@ -1252,6 +1252,17 @@ def cmd_assess_run(args):
                  f"  findings: ascend assess results --app {args.app} "
                  f"--assessment {res['assessment_id']} --detail")
     _out(res, args, human=human)
+    # Asked to wait, and the run is not finished: that is never a success. This is the belt to
+    # api.run()'s braces -- whatever path handed back a non-terminal row, a pipeline must not read
+    # exit 0 as "assessed". Observed live: a truncated create response, a 2-second `assess run`,
+    # and a run still going on the platform.
+    if (not args.no_wait and isinstance(res, dict)
+            and str(res.get("status", "")).lower() not in api.TERMINAL_STATUSES):
+        print(f"error: the assessment is still {res.get('status') or 'in progress'} and this "
+              f"command was asked to wait for it. Follow it with:\n"
+              f"  ascend assess watch --app {args.app!r} --assessment {res.get('assessment_id')}",
+              file=sys.stderr)
+        sys.exit(EXIT_ERROR)
     # Bridge-type app but no relay could be ensured: the run exists but will score a FALSE PASS
     # until a bridge answers it. Exit non-zero so a pipeline notices — the run was created either way.
     if ensure.get("skip") or ensure.get("error"):

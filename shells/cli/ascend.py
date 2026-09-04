@@ -237,9 +237,12 @@ def _resolve_app(client, ref, *, exact=False):
         bound = [i for i in _locally_bound_app_ids(ref) if i in ids]
         listing = "\n  ".join(f"{a.get('id')}  {a.get('name','')}" for a in matches[:10])
         if len(bound) == 1:
-            print(f"  note: {len(matches)} apps on this tenant are named {ref!r}; using the one "
-                  f"this machine registered, {bound[0]}."
-                  f"\n        Pass --app <aapp_id> to choose a different one.", file=sys.stderr)
+            # Three short lines, not one long one: an aapp_ id is 27 characters, so the single
+            # sentence wrapped mid-id in an 80- or 100-column terminal and the id could not be
+            # copied by eye or by double-click.
+            print(f"  note: {len(matches)} apps on this tenant are named {ref!r}."
+                  f"\n        Using the one this machine registered: {bound[0]}"
+                  f"\n        Pass --app <aapp_id> to choose another.", file=sys.stderr)
             return bound[0]
         why = ("this machine has no target bound to that name"
                if not bound else

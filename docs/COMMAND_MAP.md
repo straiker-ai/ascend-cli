@@ -2,7 +2,7 @@
 
 *Generated from the CLI's argparse tree by `scripts/gen_command_map.py`. A test fails if this file is stale, so every flag here is a flag that exists.*
 
-20 command groups · 54 commands. Sections follow `ascend --help`.
+21 command groups · 59 commands. Sections follow `ascend --help`.
 
 ## Flags every command accepts
 
@@ -329,6 +329,9 @@ create->pause->resume->poll an assessment
 | `--interval` | `INTERVAL` | `20` | seconds between status polls |
 | `--timeout` | `TIMEOUT` | `7200` | max seconds to wait for completion |
 | `--force` | — | — | run even if the selected controls would generate zero probes |
+| `--with-recon` | — | — | run reconnaissance first (to completion), then the assessment |
+| `--recon-only` | — | — | run reconnaissance only — no attack probes (same as `ascend recon run`) |
+| `--recon-controls` | `IDS` | — | recon control ids for --with-recon/--recon-only (default: the whole recon catalog; see `ascend recon controls`) |
 
 ```bash
 ascend assess run --app 'My Bot' --name 'run 1'
@@ -761,6 +764,58 @@ show the effective policy
 | Flag | Value | Default | What it does |
 |---|---|---|---|
 | `--policy` | `POLICY` | — | policy file path |
+
+## `ascend recon`
+
+reconnaissance: enumerate what the target can do, before or instead of attack probes
+
+### `ascend recon controls`
+
+the recon catalog, by category
+
+
+### `ascend recon list`
+
+recon runs on an app
+
+
+| Flag | Value | Default | What it does |
+|---|---|---|---|
+| `--app` **(required)** | `APP` | — | app name or aapp_ id |
+
+### `ascend recon results`
+
+the app's confirmed capabilities, across runs
+
+
+| Flag | Value | Default | What it does |
+|---|---|---|---|
+| `--app` **(required)** | `APP` | — | app name or aapp_ id |
+| `--category` | `CATEGORY` | — | one recon category |
+
+### `ascend recon run`
+
+start a recon run and follow it to the end
+
+
+| Flag | Value | Default | What it does |
+|---|---|---|---|
+| `--app` **(required)** | `APP` | — | app name or aapp_ id |
+| `--name` | `NAME` | — | a label for this recon run |
+| `--controls` | `IDS` | — | recon control ids (default: the whole recon catalog) |
+| `--no-wait` | — | — | return as soon as recon starts |
+| `--interval` | `INTERVAL` | `10` | seconds between polls |
+| `--timeout` | `TIMEOUT` | `3600` | max seconds to wait |
+
+### `ascend recon show`
+
+one recon run in detail (default: the latest)
+
+
+| Flag | Value | Default | What it does |
+|---|---|---|---|
+| `--app` **(required)** | `APP` | — | app name or aapp_ id |
+| `--recon` | `RECON` | — | recon run id (default: the latest) |
 
 ### `ascend reports`
 

@@ -9,6 +9,15 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ### Added
 
+- **Reconnaissance as a first-class step.** In the Console, recon (capability enumeration) is
+  started separately from an assessment. The CLI gives it one noun and one decision:
+  `ascend recon run|list|show|results|controls`, and `ascend assess run --with-recon` (recon to
+  completion, then the attack run) or `--recon-only`; `--recon-controls` scopes the recon catalog.
+  The public v3 API does not expose recon yet, so every recon verb goes through one seam that turns
+  a 404 into a single honest line (`recon_unavailable` under `--json`); the paths the CLI expects
+  mirror the Console's own recon client and are listed in `docs/RECON.md`. Asked of Ascend
+  engineering on 2026-09-04.
+
 - **`docs/AUTH.md`** — the one page for target authentication: what your target uses → what you
   pass → what the written config carries → which app types can run it (static credentials with
   `env:` references, login and OAuth2 recipes that re-authenticate, HMAC/nonce → `--scaffold`, SSO

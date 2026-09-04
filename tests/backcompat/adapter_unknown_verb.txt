@@ -1,3 +1,3 @@
 $ ascend adapter not-a-verb
---- exit 2
+--- exit 3
 --- stdout

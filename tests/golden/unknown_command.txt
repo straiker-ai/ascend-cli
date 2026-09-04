@@ -1,6 +1,6 @@
 $ ascend not-a-command
---- exit 2
+--- exit 3
 --- stdout
 --- stderr
 usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags]
-ascend: error: argument <command>: invalid choice: 'not-a-command' (choose from <COMMANDS>)
+error: argument <command>: invalid choice: 'not-a-command' (choose from <COMMANDS>)

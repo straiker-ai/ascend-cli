@@ -174,8 +174,14 @@ def _unwrap_list(payload, *keys):
     return []
 
 
-def _resolve_app(client, ref):
-    """Accept an aapp_ id or a name; return the app id."""
+def _resolve_app(client, ref, *, exact=False):
+    """Accept an aapp_ id or a name; return the app id.
+
+    A name that matches no app exactly falls back to a case-insensitive substring match, so
+    `assess results --app bot` finds "Demo Bot". `exact=True` refuses that fallback and is what
+    every command that changes or destroys an app passes: `target rm bot` deleting "Demo Bot" is
+    not a convenience. The candidates are still shown, so the fix is one copy-paste away.
+    """
     if not ref:
         _die("no application given: pass --app <name-or-aapp_id>")
     if ref.startswith("aapp_"):
@@ -183,6 +189,14 @@ def _resolve_app(client, ref):
     data = client.list_apps()
     apps = _unwrap_list(data)
     matches = [a for a in apps if (a.get("name") or "") == ref]
+    if not matches and exact:
+        near = [a for a in apps if ref.lower() in (a.get("name") or "").lower()]
+        hint = ""
+        if near:
+            hint = "\n  did you mean:\n  " + "\n  ".join(
+                f"{a.get('id')}  {a.get('name', '')}" for a in near[:10])
+        _die(f"no app named exactly {ref!r}. This command changes or deletes an app, so it takes "
+             f"the exact name or the aapp_ id.{hint}")
     if not matches:
         matches = [a for a in apps if ref.lower() in (a.get("name") or "").lower()]
     if not matches:
@@ -373,7 +387,8 @@ def cmd_app_get(args):
 
 def cmd_app_resolve(args):
     c = _client(args)
-    print(_resolve_app(c, args.name))
+    app_id = _resolve_app(c, args.name)
+    _out({"app_id": app_id, "ref": args.name}, args, human=app_id)
 
 
 
@@ -547,6 +562,35 @@ def _scope_run_controls(c, app_id, ctrl_ids, args):
     return f"scoped to {len(ctrl_ids)} control(s){was} — this is now the app's control set"
 
 
+def _validated_control_ids(c, ids, *, force=False, say=None, what="this app"):
+    """The one check behind every `--controls`. Returns the ids to apply, or dies.
+
+    Four commands took a control list and each validated it its own way: `app create` refused an
+    unknown id unless --force, `assess run` only warned and quietly ran the rest, `app update` and
+    onboarding refused with no --force at all. Same input, three policies. One rule now:
+      unknown id       -> refused (exit 3) unless --force, which applies the ids as given
+      nothing scorable -> refused unless --force
+      warnings         -> printed (deprecated ids, agentic notes)
+    An unknown id is refused rather than dropped because a run narrowed silently scores clean on
+    less than was asked for — the false-pass shape again.
+    """
+    say = say or (lambda m: print(m, file=sys.stderr))
+    v = c.validate_controls(list(ids))
+    for w in v.get("warnings") or []:
+        say(f"warning: {w}")
+    if v.get("unknown") and not force:
+        _die(f"unknown control id(s): {', '.join(v['unknown'])}\n"
+             f"  list them:  ascend controls list\n"
+             f"  a control that does not exist generates zero probes, so {what} would score clean "
+             f"without ever being tested (--force to apply the ids as given)",
+             error_code="unknown_control")
+    if not v.get("valid") and not force:
+        _die("none of the selected controls can generate probes\n"
+             "  check:  ascend controls validate " + ",".join(ids) + "\n"
+             "  (--force to apply them anyway)", error_code="no_scorable_controls")
+    return list(v.get("valid") or ids)
+
+
 def cmd_app_create(args):
     """Create an Ascend application of any of the four types the platform supports.
 
@@ -562,25 +606,10 @@ def cmd_app_create(args):
 
     ctrl = args.controls.split(",") if args.controls else None
     if ctrl:
-        v = c.validate_controls(ctrl)
-        for w in v["warnings"]:
-            print(f"warning: {w}", file=sys.stderr)
         # `v["valid"] or ctrl` used to fall back to the ORIGINAL list when nothing validated, so
-        # `--controls not_a_real_control` created an app pinned to a control that does not exist.
-        # It even printed "this run would generate zero probes" and created it anyway — an app
-        # whose every future assessment comes back perfectly clean having tested nothing.
-        if v.get("unknown") and not args.force:
-            _die(f"unknown control id(s): {', '.join(v['unknown'])}\n"
-                 f"  list them:  ascend controls list\n"
-                 f"  a control that does not exist generates zero probes, so this app would "
-                 f"score clean without ever being tested (--force to create it anyway)",
-                 error_code="unknown_control")
-        if not v.get("valid") and not args.force:
-            _die("none of the selected controls can generate probes\n"
-                 "  check:  ascend controls validate " + ",".join(ctrl) + "\n"
-                 "  (--force to create the app anyway)",
-                 error_code="no_scorable_controls")
-        ctrl = v["valid"] or ctrl
+        # `--controls not_a_real_control` created an app pinned to a control that does not exist —
+        # an app whose every future assessment comes back clean having tested nothing.
+        ctrl = _validated_control_ids(c, ctrl, force=args.force, what="this app")
 
     ctrl = _resolve_all_controls(c, args, ctrl)
 
@@ -706,6 +735,61 @@ def _read_maybe_file(v):
     return v
 
 
+def _stdio_is_tty():
+    """Is a person at the keyboard? Both ends must be terminals: a piped stdout is a script."""
+    try:
+        return bool(sys.stdin.isatty() and sys.stdout.isatty())
+    except Exception:
+        return False
+
+
+def _confirm_destroy(args, what):
+    """Ask before an irreversible action — on a terminal, unless --yes.
+
+    Scripts, CI and `--json` are never prompted: a question nobody can answer hangs a pipeline, and
+    those callers already had to spell the app out (exact name or aapp_ id). The prompt is for the
+    person at a keyboard, where one slip deletes an app and every assessment under it.
+    """
+    if getattr(args, "yes", False) or getattr(args, "json", False):
+        return
+    if not _stdio_is_tty():
+        return
+    try:
+        ans = input(f"  {what} [y/N]: ").strip().lower()
+    except EOFError:
+        ans = ""
+    if ans not in ("y", "yes"):
+        _die("aborted — nothing was changed", code=EXIT_ERROR)
+
+
+def _retire_app(c, app_id, *, keep_key=False):
+    """Delete an app and everything that only existed to serve it, in the order that fails safe.
+
+    Stop its relay, delete the app, THEN drop the stored key. The key goes last on purpose: a
+    bridge key is shown once and cannot be re-read, so dropping it before a delete that then fails
+    leaves an app nobody can ever serve again — which is what `target rm` used to do. Raises
+    AscendAPIError when the platform refuses the delete; the key is untouched then. One helper for
+    `app delete`, `target rm` and `keys rm --delete-app`, so the three cannot drift apart again.
+    """
+    stopped = None
+    try:                                   # a live bridge for a deleted app is pointless
+        import supervisor as S
+        if S.is_running(app_id):
+            stopped = S.stop(app_id)
+    except Exception:
+        stopped = None
+    res = c.delete_app(app_id)
+    key_removed = False
+    if not keep_key:
+        try:
+            import creds as C
+            key_removed = C.remove(app_id)
+        except Exception:
+            key_removed = False
+    return {"app_id": app_id, "api_response": res, "bridge_stopped": bool(stopped),
+            "key_removed": key_removed}
+
+
 def cmd_app_update(args):
     """Change an existing app's settings in place — no delete/recreate, so the bridge key survives.
 
@@ -713,7 +797,7 @@ def cmd_app_update(args):
     QPM, controls, system prompt, category severities, input guardrail, frequency, strategy.
     """
     c = _client(args)
-    app_id = _resolve_app(c, args.app)
+    app_id = _resolve_app(c, args.app, exact=True)
     import api
     patch = {}
     if args.name:
@@ -727,15 +811,9 @@ def cmd_app_update(args):
     if args.frequency:
         patch["frequency"] = args.frequency
     if args.controls:
-        ctrl = args.controls.split(",")
-        v = c.validate_controls(ctrl)
-        for w in v["warnings"]:
-            print(f"warning: {w}", file=sys.stderr)
-        if v.get("unknown"):
-            _die(f"unknown control id(s): {', '.join(v['unknown'])}\n  list them: ascend controls list",
-                 error_code="unknown_control")
         patch["control_type"] = "custom"
-        patch["control_ids"] = v["valid"] or ctrl
+        patch["control_ids"] = _validated_control_ids(c, args.controls.split(","),
+                                                      force=getattr(args, "force", False), what="this app")
     sev = _parse_kv_pairs(getattr(args, "category_severity", None), "category-severity")
     if sev:
         clamped = api.clamped_severities(sev)
@@ -809,38 +887,22 @@ def cmd_app_delete(args):
     together: `--keep-key` opts out.
     """
     c = _client(args)
-    app_id = _resolve_app(c, args.app)
-    _say(args, f"Deleting {args.app}...")
+    app_id = _resolve_app(c, args.app, exact=True)
     name = None
     try:
         name = (c.get_app(app_id) or {}).get("name")
     except Exception:
         pass
-
-    stopped = None
-    try:                                   # a live bridge for a deleted app is pointless
-        import supervisor as S
-        if S.is_running(app_id):
-            stopped = S.stop(app_id)
-    except Exception:
-        pass
-
-    res = c.delete_app(app_id)
-    key_removed = False
-    if not args.keep_key:
-        try:
-            import creds as C
-            key_removed = C.remove(app_id)
-        except Exception:
-            pass
-
+    _confirm_destroy(args, f"delete app {name or args.app!r} ({app_id}) and every assessment under it?")
+    _say(args, f"Deleting {args.app}...")
+    r = _retire_app(c, app_id, keep_key=args.keep_key)
     payload = {"deleted": True, "app_id": app_id, "app_name": name,
-               "key_removed": key_removed, "bridge_stopped": bool(stopped),
-               "api_response": res}
+               "key_removed": r["key_removed"], "bridge_stopped": r["bridge_stopped"],
+               "api_response": r["api_response"]}
     human = f"deleted {name or app_id}"
-    if stopped:
+    if r["bridge_stopped"]:
         human += "\n  stopped its bridge"
-    if key_removed:
+    if r["key_removed"]:
         human += "\n  removed its stored bridge key (a key without its app is a dead secret)"
     elif args.keep_key:
         human += "\n  kept the stored key (--keep-key)"
@@ -1300,15 +1362,10 @@ def cmd_assess_run(args):
     # Validate the control set ONCE, not per app (each call refetches the whole catalog).
     scope_ids = None
     if args.controls:
-        v = c.validate_controls(args.controls.split(","))
-        for w in v["warnings"]:
-            print(f"warning: {w}", file=sys.stderr)
-        if not v["valid"] and not args.force:
-            _die("selected controls generate zero probes (use --force to run anyway)")
         # The validated ids are what gets APPLIED. Before 1.1.2 they were validated and then
         # dropped, so `--controls` narrowed nothing and the run used the app's whole registered
         # set -- 62 controls and 665 probes where the operator asked for one control.
-        scope_ids = v["valid"] or (args.controls.split(",") if args.force else None)
+        scope_ids = _validated_control_ids(c, args.controls.split(","), force=args.force, what="this run")
 
     if len(refs) > 1:
         return _assess_run_many(args, c, refs, scope_ids=scope_ids)
@@ -1614,7 +1671,8 @@ def cmd_assess_watch(args):
                 if tty:
                     print()
                 print("", file=sys.stderr)
-                _out(a, args, human=_verdict(a, detail=args.detail))
+                if not args.json:             # --json already printed this row in the loop above
+                    _out(a, args, human=_verdict(a, detail=args.detail))
                 return
             if getattr(args, "once", False):
                 # One snapshot, then out — what `assess status` used to be. Reported through the
@@ -1654,12 +1712,19 @@ def _false_pass_warning(a):
 
 def cmd_assess_results(args):
     c = _client(args)
-    a = c.get_assessment(_resolve_app(c, args.app), args.assessment)
-    import api
+    app_id = _resolve_app(c, args.app)
+    a = c.get_assessment(app_id, _resolve_assessment(c, app_id, args, verb="reading"))
     human = _verdict(a, detail=getattr(args, "detail", False))
     warn = _false_pass_warning(a)
-    if warn and not args.json:
-        human = f"{human}\n\n{warn}"
+    if warn:
+        if args.json:
+            # The warning travels with the numbers it qualifies, or a pipeline reads a clean score
+            # from a run that measured nothing. Same field name `reports --detail` uses.
+            a = dict(a)
+            a["false_pass_suspect"] = True
+            a["false_pass_warning"] = warn
+        else:
+            human = f"{human}\n\n{warn}"
     _out(a, args, human=human)
 
 
@@ -1702,7 +1767,7 @@ def cmd_assess_list(args):
 def cmd_assess_pause(args):
     c = _client(args)
     _say(args, f"Pausing {args.assessment}...")
-    res = c.pause(_resolve_app(c, args.app), args.assessment)
+    res = c.pause(_resolve_app(c, args.app, exact=True), args.assessment)
     # Probes are generated up front and cannot be recalled: pause stops NEW scheduling, but
     # already-created probes still run their course. Say so, or the drain looks like a bug.
     _out(res, args, human="paused — note: probes already generated will still drain, so your "
@@ -1713,7 +1778,7 @@ def cmd_assess_pause(args):
 
 def cmd_assess_resume(args):
     c = _client(args)
-    appid = _resolve_app(c, args.app)
+    appid = _resolve_app(c, args.app, exact=True)
     _say(args, f"Resuming {args.assessment}...")
     res = c.resume(appid, args.assessment)
     # The reliable answer to "resumed from the Console": the local relay may have idle-stopped or
@@ -3247,23 +3312,11 @@ def cmd_onboard(args):
     c = _client(args)
     controls = args.controls.split(",") if args.controls else None
     if controls:
-        v = c.validate_controls(controls)
-        for w in v["warnings"]:
-            _ok(f"warning: {w}")
         # Same trap as `app create`: `v["valid"] or controls` fell back to the ORIGINAL list when
         # nothing validated, so a typo'd control was sent to the platform verbatim and onboard
         # went on to run an assessment that could only ever come back clean.
-        if v.get("unknown"):
-            _die(f"unknown control id(s): {', '.join(v['unknown'])}\n"
-                 f"  list them:  ascend controls list\n"
-                 f"  a control that does not exist generates zero probes, so this run would "
-                 f"score clean without testing anything",
-                 error_code="unknown_control")
-        if not v.get("valid"):
-            _die("none of the selected controls can generate probes — refusing to onboard an app "
-                 "whose assessments cannot measure anything",
-                 error_code="no_scorable_controls")
-        controls = v["valid"]
+        controls = _validated_control_ids(c, controls, force=getattr(args, "force", False),
+                                          say=_ok, what="this run")
     # Without this, `target add` with no --controls sent control_type "all" and the platform
     # refused with a bare "the request was rejected by the upstream service" -- 100% of the time,
     # on the default invocation of the command 1.1.2 makes primary.
@@ -3476,7 +3529,7 @@ def cmd_target_add(args):
                  error_code="spec_needs_build",
                  hint=(f"ascend adapter build --spec {src} --out mybot\n"
                        f"  then:  ascend target add mybot"))
-        if any(getattr(args, f, None) for f in ("api", "ws", "url", "curl", "har", "spec", "config", "module", "scaffold")):
+        if any(getattr(args, f, None) for f in ("api", "ws", "url", "curl", "har", "spec", "config", "module")):
             _die("give either a source argument or an explicit source flag, not both")
         setattr(args, flag, value)
         _say(args, f"detected {flag} source: {value}")
@@ -3595,23 +3648,23 @@ def cmd_target_check(args):
 
 def cmd_target_rm(args):
     """Forget a target: delete the application and drop its stored key."""
-    import creds as C
     ref = args.target
-    app_id = ref if str(ref).startswith("aapp_") else _resolve_app(_client(args), ref)
-    removed_key = False
-    if not getattr(args, "keep_key", False):
-        try:
-            removed_key = C.remove(app_id)
-        except Exception:
-            removed_key = False
-    deleted = False
+    c = _client(args)
+    app_id = ref if str(ref).startswith("aapp_") else _resolve_app(c, ref, exact=True)
+    _confirm_destroy(args, f"delete target {ref!r} ({app_id}) and every assessment under it?")
     try:
-        _client(args).delete_app(app_id)
-        deleted = True
+        r = _retire_app(c, app_id, keep_key=getattr(args, "keep_key", False))
     except Exception as e:
-        print(f"warning: could not delete the application ({type(e).__name__})", file=sys.stderr)
-    _out({"app_id": app_id, "app_deleted": deleted, "key_removed": removed_key}, args,
-         human=f"removed {app_id}  (app_deleted={deleted}, key_removed={removed_key})")
+        # The key is still stored (the retire order keeps it when the delete fails), so the target
+        # can still be served and retried. If the app is already gone, `keys prune` drops the key.
+        hint = ("\n  the app no longer exists; drop its dead key with:  ascend keys prune"
+                if "404" in str(e) else "")
+        _out({"app_id": app_id, "app_deleted": False, "key_removed": False, "error": str(e)},
+             args, human=f"error: could not delete the application ({type(e).__name__}: {e}){hint}")
+        sys.exit(EXIT_ERROR)
+    _out({"app_id": app_id, "app_deleted": True, "key_removed": r["key_removed"],
+          "bridge_stopped": r["bridge_stopped"]}, args,
+         human=f"removed {app_id}  (app_deleted=True, key_removed={r['key_removed']})")
 
 
 def _looks_like_jsonl(path, sample=20):
@@ -4220,8 +4273,23 @@ def _target_for(app_id, *, name=None, config_override=None, store=None):
     if not cfg:
         return {"app_id": app_id, "app_name": name, "skip": "no config bound "
                 "(pass --config, or re-onboard so the binding is recorded)"}
+    if config_override and not _config_exists(config_override):
+        # Spawning anyway "started" a relay that died a second later on `no such config`.
+        return {"app_id": app_id, "app_name": name,
+                "skip": f"config {config_override!r} not found (ascend target list shows the names)"}
     return {"app_id": app_id, "app_name": name, "config": cfg,
             "adapter": rec.get("adapter"), "key": key}
+
+
+def _config_exists(name) -> bool:
+    """A config name resolvable in the config dir, or a path to a .json file."""
+    try:
+        direct = Path(os.path.expanduser(str(name)))
+        if direct.is_file() and direct.suffix == ".json":
+            return True
+        return resolve_config_path(str(name)) is not None
+    except Exception:
+        return False
 
 
 def _fleet_targets(args, c):
@@ -4249,6 +4317,35 @@ def _fleet_targets(args, c):
             for aid, name in picked.items()]
 
 
+def _add_runtime_start_args(s):
+    """Every `runtime start` flag. One definition: the parser uses it, and `bridge start --foreground`
+    reads the defaults from it to complete the namespace it hands to cmd_runtime_start."""
+    s.add_argument("--adapter", help="adapter type (default: from the config)")
+    s.add_argument("--config", required=True, help="config name in the config dir")
+    s.add_argument("--api-key", help="bridge key (tc-); else $STRAIKER_BRIDGE_API_KEY")
+    s.add_argument("--app", help="resolve the bridge key from the local key store for this app")
+    s.add_argument("--consumer", help="bridge consumer id (parallel bridges MUST differ; auto per app)")
+    s.add_argument("--log-file", help="write bridge logs here instead of stderr")
+    s.add_argument("--status-file",
+                   help="force heartbeat+stats publishing for a relay that cannot be resolved to "
+                        "an app id (supervised children pass this; when the app IS known the "
+                        "heartbeat is published under it automatically)")
+    s.add_argument("--qpm", type=int, default=None, help="queries per minute against the target")
+    s.add_argument("--max-workers", type=int, default=None, help="concurrency (auto: 1 for stateful targets)")
+    s.add_argument("--capture", default=None, help="jsonl file to record probe/result envelopes")
+    s.add_argument("--wait-ms", type=int, default=25000,
+                   help="long-poll hold in ms (server clamps to 0-55000)")
+    s.add_argument("--assessment-id", default=None,
+                   help="the assessment this bridge serves; it self-stops when that run ends")
+    s.add_argument("--idle-timeout", type=int, default=None,
+                   help="seconds a paused, already-probed bridge waits before self-stopping. "
+                        "0 never idle-stops (the default); the bridge stops when the run reaches a "
+                        "terminal state. $ASCEND_BRIDGE_IDLE_TIMEOUT sets this default for "
+                        "auto-managed runs.")
+    s.add_argument("--no-self-reconcile", action="store_true",
+                   help="do NOT self-stop on assessment completion (stay up until stopped manually)")
+
+
 def _bridge_start_foreground(args):
     """One bridge, in this terminal. Delegates to the same runtime the fleet spawns per app."""
     apps = getattr(args, "app", None) or []
@@ -4258,12 +4355,26 @@ def _bridge_start_foreground(args):
     if not args.config and not apps:
         _die("--foreground needs --config <name> (and usually --app <name> for its key)\n"
              "  example:  ascend bridge start --app 'My Bot' --foreground")
-    # cmd_runtime_start reads these attribute names; fill in what the fleet parser does not have.
+    # cmd_runtime_start reads the `runtime start` namespace. Complete it from that parser's OWN
+    # defaults — anything the fleet parser did not define, or left None — so a runtime flag added
+    # later is honoured here too. A hand-kept list missed --wait-ms, and the foreground bridge
+    # died on `None / 1000` the moment it tried to lease.
     args.app = apps[0] if apps else None
-    for attr, default in (("api_key", None), ("consumer", None), ("log_file", None),
-                          ("status_file", None), ("capture", None), ("adapter", None)):
-        if not hasattr(args, attr):
-            setattr(args, attr, default)
+    if args.app and not str(args.app).startswith("aapp_"):
+        # Register under the app ID, exactly as a detached relay does: a relay known only by a
+        # name is invisible to `is_serving()`, and `assess run` then starts a second one — two
+        # consumers splitting one app's probes. Same consumer scheme as supervisor.start().
+        args.app = _resolve_app(_client(args), args.app)
+    if args.app and not getattr(args, "consumer", None):
+        import supervisor as S
+        args.consumer = f"abv2-{S._safe(args.app)}"
+    rt = argparse.ArgumentParser(add_help=False)
+    _add_runtime_start_args(rt)
+    for a in rt._actions:
+        if a.dest == "help" or a.default is argparse.SUPPRESS:
+            continue
+        if getattr(args, a.dest, None) is None:
+            setattr(args, a.dest, a.default)
     if not args.config and args.app:
         _die("--foreground needs --config <name>: the app's bound config is only resolved for "
              "detached bridges\n  find it with:  ascend keys list")
@@ -4304,8 +4415,11 @@ def cmd_relay_start(args):
                     idle_timeout_s=_resolve_idle(args))
         results.append({"app_id": t["app_id"], "app_name": t.get("app_name"),
                         "started": "error" not in r, **({k: v for k, v in r.items() if k != "app_id"})})
+    n = sum(1 for r in results if r.get("started"))
     if args.json:
         _out(results, args)
+        if results and not n:
+            sys.exit(EXIT_ERROR)         # same contract as the human path below: none started is a failure
         return
     for r in results:
         if r.get("started"):
@@ -4313,7 +4427,6 @@ def cmd_relay_start(args):
                   f"log={r.get('log')}")
         else:
             print(f"  skipped  {r.get('app_name') or r['app_id']}  — {r.get('reason') or r.get('error')}")
-    n = sum(1 for r in results if r.get("started"))
     if n:
         _say(args, f"{n} bridge(s) running — check:  ascend bridge ls", done=True)
     print(f"\n  {n} bridge(s) started" + (f", qpm={qpm} each" if n and qpm else ""))
@@ -4336,11 +4449,22 @@ def cmd_relay_start(args):
 def cmd_bridge_sync(args):
     """Reconcile local bridges against platform assessment state. The reliable fallback for
     'someone paused/resumed a run in the Console': ensure a bridge for every app with a
-    running/paused assessment, and (unless --no-stop) stop bridges whose apps are all terminal."""
+    running/paused assessment, and (unless --no-stop) stop bridges whose apps are all terminal.
+
+    `--app` (repeatable) scopes the sync. Without it every app on the tenant is considered, and an
+    app this machine holds no key or config for is REPORTED, not counted as a failure: in a shared
+    tenant most live runs belong to other machines, and exiting 1 on each of them made the command
+    useless as a cron step. A start that actually failed, or a scoped app that cannot be served
+    from here, is a failure (exit 1) — under --json too.
+    """
     import supervisor as S
     from concurrent.futures import ThreadPoolExecutor
     c = _client(args)
     apps = _unwrap_list(c.list_apps())
+    scoped = bool(getattr(args, "app", None))
+    if scoped:
+        wanted = {_resolve_app(c, r) for r in args.app}
+        apps = [a for a in apps if a.get("id") in wanted]
 
     def state(a):
         try:
@@ -4350,7 +4474,7 @@ def cmd_bridge_sync(args):
 
     with ThreadPoolExecutor(max_workers=12) as pool:
         results = list(pool.map(state, apps))
-    started, stopped, reused, skipped = [], [], [], []
+    started, stopped, reused, unserved, failed = [], [], [], [], []
     for a, asmts in results:
         if not needs_bridge(a):
             continue
@@ -4358,28 +4482,41 @@ def cmd_bridge_sync(args):
         serving = S.is_serving(a["id"])
         if active and not serving:
             r = _ensure_bridge(c, a, args=args)
-            (started if r.get("started") else skipped).append((a.get("name"), r))
+            if r.get("started"):
+                started.append(a.get("name"))
+            elif r.get("skip") and not scoped:
+                unserved.append((a.get("name"), r["skip"]))       # not this machine's to serve
+            else:
+                failed.append((a.get("name"), r.get("skip") or r.get("error")))
         elif active and serving:
             reused.append(a.get("name"))
         elif not active and serving and not getattr(args, "no_stop", False):
             S.stop(a["id"])
             stopped.append(a.get("name"))
     if args.json:
-        _out({"started": [n for n, _ in started], "stopped": stopped, "reused": reused,
-              "skipped": [{"app": n, "reason": r.get("skip") or r.get("error")}
-                          for n, r in skipped]}, args)
+        skipped = [{"app": n, "reason": why} for n, why in unserved + failed]   # the pre-1.1.3 key
+        _out({"started": started, "stopped": stopped, "reused": reused, "skipped": skipped,
+              "unserved": [{"app": n, "reason": why} for n, why in unserved],
+              "failed": [{"app": n, "reason": why} for n, why in failed]}, args)
+        if failed:
+            sys.exit(EXIT_ERROR)
         return
-    for n, _ in started:
+    for n in started:
         print(f"  started  {n}")
     for n in stopped:
         print(f"  stopped  {n}  (no active assessment)")
     for n in reused:
         print(f"  ok       {n}  (already serving)")
-    for n, r in skipped:
-        print(f"  ! skip   {n}  — {r.get('skip') or r.get('error')}")
+    for n, why in failed:
+        print(f"  ! failed {n}  — {why}")
     print(f"\n  synced: {len(started)} started, {len(stopped)} stopped, "
-          f"{len(reused)} already serving, {len(skipped)} skipped")
-    if skipped:
+          f"{len(reused)} already serving, {len(failed)} failed")
+    if unserved:
+        names = ", ".join(str(n) for n, _ in unserved[:6]) + (" …" if len(unserved) > 6 else "")
+        print(f"  {len(unserved)} live run(s) on apps this machine holds no key or config for — not "
+              f"served from here: {names}\n"
+              f"  serve one:  ascend keys add <app> --key <tc-...>   ·   scope:  ascend bridge sync --app <name>")
+    if failed:
         sys.exit(EXIT_ERROR)
 
 
@@ -4509,7 +4646,7 @@ def cmd_relay_stop(args):
     if args.all:
         targets = [r["app_id"] for r in S.ls()]
     for ref in (args.app or []):
-        targets.append(ref if str(ref).startswith("aapp_") else _resolve_app(_client(args), ref))
+        targets.append(ref if str(ref).startswith("aapp_") else _resolve_app(_client(args), ref, exact=True))
     if not targets:
         _die("pass --app <name> (repeatable) or --all")
     _say(args, f"Stopping {len(dict.fromkeys(targets))} bridge(s)...")
@@ -4534,7 +4671,8 @@ def cmd_relay_logs(args):
         except KeyboardInterrupt:
             pass
         return
-    print(log.read_text()[-20000:])
+    tail = log.read_text()[-20000:]
+    _out({"app_id": app_id, "log": str(log), "tail": tail}, args, human=tail)
 
 
 # ----------------------------------------------------------------------------- keys
@@ -4608,7 +4746,7 @@ def cmd_keys_add(args):
     if not str(args.key).startswith("tc-"):
         _die("a bridge key looks like 'tc-…' — that does not")
     c = _client(args)
-    app_id = _resolve_app(c, args.app)
+    app_id = _resolve_app(c, args.app, exact=True)
     name = None
     try:
         name = (c.get_app(app_id) or {}).get("name")
@@ -4628,21 +4766,20 @@ def cmd_keys_rm(args):
     """
     import creds as C
     c = _client(args) if (not str(args.app).startswith("aapp_") or args.delete_app) else None
-    app_id = args.app if str(args.app).startswith("aapp_") else _resolve_app(c, args.app)
+    app_id = args.app if str(args.app).startswith("aapp_") else _resolve_app(c, args.app, exact=True)
+    if args.delete_app:
+        _confirm_destroy(args, f"delete app {args.app!r} ({app_id}) and its stored key?")
+    else:
+        _confirm_destroy(args, f"forget the stored bridge key for {args.app!r}? It cannot be re-read")
     _say(args, f"Removing the stored key for {args.app}...")
-    removed = C.remove(app_id)
-    if removed:
-        _say(args, "key removed", done=True)
     app_deleted = False
     if args.delete_app:
-        try:
-            import supervisor as S
-            if S.is_running(app_id):
-                S.stop(app_id)
-        except Exception:
-            pass
-        c.delete_app(app_id)
-        app_deleted = True
+        r = _retire_app(c, app_id)
+        removed, app_deleted = r["key_removed"], True
+    else:
+        removed = C.remove(app_id)
+    if removed:
+        _say(args, "key removed", done=True)
     human = ("removed the stored key" if removed else "no stored key for that app")
     if app_deleted:
         human += " · deleted the Ascend app too"
@@ -4700,6 +4837,17 @@ def _age(iso):
     if secs < 86400:
         return f"{int(secs // 3600)}h"
     return f"{int(secs // 86400)}d"
+
+
+def _failed_of(row):
+    """`failed` for a list row, derived from category_summary when the payload omits it."""
+    if row.get("failed") is not None:
+        return row.get("failed")
+    try:
+        import api
+        return api.probe_counts(row)[0]
+    except Exception:
+        return None
 
 
 def cmd_reports(args):
@@ -4764,7 +4912,7 @@ def cmd_reports(args):
                                  # total/failed are in the LIST payload — real, explainable
                                  # pass/fail with no extra call. (score is a platform index we
                                  # deliberately do not surface — it has no transparent formula.)
-                                 "total": r.get("total"), "failed": r.get("failed"),
+                                 "total": r.get("total"), "failed": _failed_of(r),
                                  "severity": r.get("severity")})
 
     # --- tier 2: probe/finding counts need the individual assessment -----------------
@@ -4905,7 +5053,7 @@ def cmd_policy_push(args):
         _die(f"no policy file at {P.policy_path(getattr(args, 'policy', None))}\n"
              f"  create one:  ascend policy set --app {args.app!r} --category data_leak=high")
 
-    app_id = _resolve_app(c, args.app)
+    app_id = _resolve_app(c, args.app, exact=True)
     app = c.get_app(app_id)
     app_name = app.get("name") or args.app
 
@@ -5892,7 +6040,8 @@ def cmd_export(args):
            "markdown": E.to_markdown}[fmt](a)
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)   # CI writes reports/x.sarif
-        Path(args.out).write_text(out); print(f"wrote {args.out}")
+        Path(args.out).write_text(out)
+        print(f"wrote {args.out}", file=sys.stderr)      # stdout stays empty: the report went to --out
     else:
         print(out)
 
@@ -6017,6 +6166,18 @@ def _global_flags() -> argparse.ArgumentParser:
 
 
 GLOBALS = _global_flags()
+
+
+class _Parser(argparse.ArgumentParser):
+    """argparse's own usage errors exit 2 with plain text on stderr — and 2 is EXIT_FINDINGS here,
+    so a typo'd flag in a CI step read as "findings present". Every other bad invocation exits
+    EXIT_USAGE (3) through _die, which also honours --json; this makes argparse's do the same.
+    Subparsers inherit the class, so one override covers every verb."""
+
+    def error(self, message):
+        if not _wants_json():
+            self.print_usage(sys.stderr)
+        _die(message, code=EXIT_USAGE)
 
 
 class _Fmt(argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter):
@@ -6204,7 +6365,7 @@ def _add_build_args(s):
 
 
 def build_parser():
-    p = argparse.ArgumentParser(
+    p = _Parser(
         prog="ascend", description=__doc__, parents=[GLOBALS],
         formatter_class=argparse.RawDescriptionHelpFormatter,
         # Explicit usage: the subparser listing is suppressed (see below), which would otherwise
@@ -6351,6 +6512,8 @@ def build_parser():
     s.add_argument("app", help="app name or aapp_ id")
     s.add_argument("--keep-key", action="store_true",
                    help="keep the stored bridge key (default: remove it — a key without its app is dead)")
+    s.add_argument("--yes", action="store_true",
+                   help="skip the confirmation prompt (non-interactive runs never prompt)")
     s.set_defaults(func=cmd_app_delete)
 
     # controls
@@ -6426,7 +6589,8 @@ def build_parser():
     s.set_defaults(func=cmd_assess_diff)
     s = asp.add_parser("results", parents=[GLOBALS], formatter_class=_Fmt, help="assessment findings summary")
     s.add_argument("--app", required=True, help="app name or aapp_ id")
-    s.add_argument("--assessment", required=True, help="assessment id (asmt_...)")
+    s.add_argument("--assessment",
+                   help="assessment id (asmt_...); default: the latest finished run on the app")
     s.add_argument("--detail", action="store_true", help="show key findings per control")
     s.set_defaults(func=cmd_assess_results)
     s = asp.add_parser("watch", parents=[GLOBALS], formatter_class=_Fmt,
@@ -6467,30 +6631,7 @@ def build_parser():
                         help=argparse.SUPPRESS).add_subparsers(dest="verb", required=True)
     s = rp.add_parser("start", parents=[GLOBALS], formatter_class=_Fmt, help="lease probes and relay them to a target via an adapter (see `bridge start --foreground`)",
                       epilog="example: STRAIKER_BRIDGE_API_KEY=tc-... ascend runtime start --adapter direct_api --config mybot")
-    s.add_argument("--adapter", help="adapter type (default: from the config)")
-    s.add_argument("--config", required=True, help="config name in the config dir")
-    s.add_argument("--api-key", help="bridge key (tc-); else $STRAIKER_BRIDGE_API_KEY")
-    s.add_argument("--app", help="resolve the bridge key from the local key store for this app")
-    s.add_argument("--consumer", help="bridge consumer id (parallel bridges MUST differ; auto per app)")
-    s.add_argument("--log-file", help="write bridge logs here instead of stderr")
-    s.add_argument("--status-file",
-                   help="force heartbeat+stats publishing for a relay that cannot be resolved to "
-                        "an app id (supervised children pass this; when the app IS known the "
-                        "heartbeat is published under it automatically)")
-    s.add_argument("--qpm", type=int, default=None, help="queries per minute against the target")
-    s.add_argument("--max-workers", type=int, default=None, help="concurrency (auto: 1 for stateful targets)")
-    s.add_argument("--capture", default=None, help="jsonl file to record probe/result envelopes")
-    s.add_argument("--wait-ms", type=int, default=25000,
-                   help="long-poll hold in ms (server clamps to 0-55000)")
-    s.add_argument("--assessment-id", default=None,
-                   help="the assessment this bridge serves; it self-stops when that run ends")
-    s.add_argument("--idle-timeout", type=int, default=None,
-                   help="seconds a paused, already-probed bridge waits before self-stopping. "
-                        "0 never idle-stops (the default); the bridge stops when the run reaches a "
-                        "terminal state. $ASCEND_BRIDGE_IDLE_TIMEOUT sets this default for "
-                        "auto-managed runs.")
-    s.add_argument("--no-self-reconcile", action="store_true",
-                   help="do NOT self-stop on assessment completion (stay up until stopped manually)")
+    _add_runtime_start_args(s)
     s.set_defaults(func=cmd_runtime_start)
 
     # adapter
@@ -6661,6 +6802,8 @@ def build_parser():
                       help="delete the application and drop its stored key")
     s.add_argument("target", help="target name or aapp_ id")
     s.add_argument("--keep-key", action="store_true", help="leave the stored bridge key in place")
+    s.add_argument("--yes", action="store_true",
+                   help="skip the confirmation prompt (non-interactive runs never prompt)")
     s.set_defaults(func=cmd_target_rm)
     # The registry of adapter TYPES, i.e. "what kinds of target can this onboard?". It was only
     # reachable as `adapter list`, which was the single reason anyone still needed that noun.
@@ -6791,6 +6934,8 @@ def build_parser():
                            "stop for terminal (the fallback after a Console-side change)")
     s.add_argument("--no-stop", action="store_true",
                    help="only start missing bridges; never stop one")
+    s.add_argument("--app", action="append",
+                   help="only these apps (repeatable; name or aapp_ id). Default: every app on the tenant")
     s.set_defaults(func=cmd_bridge_sync)
 
     # keys (the local bridge key store)
@@ -6820,6 +6965,8 @@ def build_parser():
     s.add_argument("app", help="app name or aapp_ id")
     s.add_argument("--delete-app", action="store_true",
                    help="also delete the Ascend app (retire the pair: a keyless app can't be served)")
+    s.add_argument("--yes", action="store_true",
+                   help="skip the confirmation prompt (non-interactive runs never prompt)")
     s.set_defaults(func=cmd_keys_rm)
 
     # tenant (the single-tenant lock)

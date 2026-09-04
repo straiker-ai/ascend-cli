@@ -1488,6 +1488,169 @@ def _supervise_bridge(c, app, *, assessment_id=None, args=None, owned=None):
     return None
 
 
+# ----------------------------------------------------------------------------- recon
+RECON_TERMINAL = {"complete", "completed", "done", "finished", "failed", "error", "cancelled", "canceled"}
+RECON_UNAVAILABLE = (
+    "reconnaissance is not exposed by the Ascend API on this tenant yet. The Console's Reconnaissance "
+    "tab runs it today. This command lights up when the platform ships "
+    "`/ascend/applications/{id}/recon`; nothing else about it changes.")
+
+
+def _recon_call(fn, *a, **k):
+    """Call a recon endpoint; a tenant whose API does not serve recon yet gets one clear line."""
+    import api
+    try:
+        return fn(*a, **k)
+    except api.AscendAPIError as e:
+        text = str(e)
+        if any(f"-> {code}" in text for code in (404, 405, 501)):
+            _die(f"recon: {RECON_UNAVAILABLE}", code=EXIT_ERROR, error_code="recon_unavailable")
+        raise
+
+
+def _recon_id(r):
+    if not isinstance(r, dict):
+        return None
+    return (r.get("id") or r.get("recon_request_id") or r.get("recon_id")
+            or ((r.get("recon_request") or {}).get("id") if isinstance(r.get("recon_request"), dict) else None))
+
+
+def _recon_rows(payload):
+    """control_summaries (detail) or controls (results) -> uniform rows."""
+    rows = []
+    for x in (payload.get("control_summaries") or payload.get("controls") or []):
+        rows.append({"category": x.get("category"), "control": x.get("control") or x.get("name") or x.get("id"),
+                     "found": bool(x.get("goal_matched")), "turns": x.get("total_turns"),
+                     "status": x.get("final_status") or x.get("status"),
+                     "summary": (x.get("summarized_recon_structured") or "")})
+    return rows
+
+
+def _recon_summary(payload, label):
+    rows = _recon_rows(payload)
+    found = sum(1 for r in rows if r["found"])
+    lines = [f"recon on {label}: {payload.get('status', '?')} · {found}/{len(rows)} capabilities found"]
+    if rows:
+        lines.append(f"  {'CATEGORY':22} {'CONTROL':34} {'FOUND':6} {'TURNS':>5}")
+        for r in sorted(rows, key=lambda r: (not r["found"], str(r["category"]), str(r["control"]))):
+            lines.append(f"  {str(r['category'] or '-')[:22]:22} {str(r['control'] or '-')[:34]:34} "
+                         f"{'yes' if r['found'] else '-':6} {str(r['turns'] if r['turns'] is not None else '-'):>5}")
+    cats = payload.get("category_summaries") or {}
+    for name, cs in sorted(cats.items()):
+        text = (cs or {}).get("summarized_recon_structured") or ""
+        if text:
+            lines.append(f"\n  {name}: {text.strip()[:400]}")
+    lines.append("\n  a found capability is the surface the attack probes should target; pick controls "
+                 "with:  ascend controls list --category <cat>")
+    return "\n".join(lines)
+
+
+def _recon_wait(c, app_id, rid, args):
+    """Poll one recon request to a terminal state (or --timeout). Prints progress on change."""
+    interval = max(5, int(getattr(args, "interval", 10) or 10))
+    deadline = time.time() + int(getattr(args, "timeout", 3600) or 3600)
+    last = None
+    detail = {}
+    while time.time() < deadline:
+        detail = _recon_call(c.recon_get, app_id, rid) or {}
+        st = str(detail.get("status", "")).lower()
+        line = (f"{st}  {detail.get('completed_tasks', '?')}/{detail.get('total_tasks', '?')} tasks · "
+                f"{detail.get('matched_tasks', '?')} matched")
+        if line != last and not getattr(args, "json", False):
+            print(f"  {line}", file=sys.stderr)
+            last = line
+        if st in RECON_TERMINAL:
+            return detail
+        time.sleep(interval)
+    return detail
+
+
+def cmd_recon_controls(args):
+    c = _client(args)
+    cat = _recon_call(c.recon_controls) or {}
+    cats = cat.get("categories") or []
+    lines = []
+    for g in cats:
+        lines.append(f"  {g.get('name') or g.get('id')}  ({g.get('id')}) — {g.get('description') or ''}".rstrip(" —"))
+        for x in g.get("controls") or []:
+            lines.append(f"      {str(x.get('id')):32} turns<={x.get('max_turn', '?'):<3} {x.get('name') or ''}")
+    n = sum(len(g.get("controls") or []) for g in cats)
+    lines.append(f"\n{n} recon control(s) in {len(cats)} categor{'y' if len(cats) == 1 else 'ies'}")
+    _out(cat, args, human="\n".join(lines))
+
+
+def cmd_recon_run(args):
+    """Enumerate what the target can do — a run of its own, before (or instead of) attack probes."""
+    c = _client(args)
+    ref = args.app[0] if isinstance(args.app, list) else args.app
+    app_id = _resolve_app(c, ref)
+    raw = getattr(args, "recon_controls", None) or getattr(args, "controls", None) or ""
+    ids = [x.strip() for x in str(raw).split(",") if x.strip()] or None
+    r = _recon_call(c.recon_start, app_id, name=getattr(args, "name", None), controls=ids)
+    rid = _recon_id(r)
+    _say(args, f"recon started on {ref}" + (f"  ({rid})" if rid else ""), done=True)
+    if getattr(args, "no_wait", False) or not rid:
+        _out(r, args, human=f"recon {rid or ''} started on {ref}\n  follow it:  ascend recon show --app {ref!r}")
+        return r
+    detail = _recon_wait(c, app_id, rid, args)
+    st = str(detail.get("status", "")).lower()
+    _out(detail, args, human=_recon_summary(detail, ref))
+    if st not in RECON_TERMINAL:
+        print(f"error: recon is still {st or 'in progress'} after --timeout; it continues on the platform:\n"
+              f"  ascend recon show --app {ref!r} --recon {rid}", file=sys.stderr)
+        sys.exit(EXIT_ERROR)
+    if st in ("failed", "error", "cancelled", "canceled"):
+        sys.exit(EXIT_ERROR)
+    return detail
+
+
+def cmd_recon_list(args):
+    c = _client(args)
+    app_id = _resolve_app(c, args.app)
+    data = _recon_call(c.recon_list, app_id) or {}
+    reqs = data.get("recon_requests") if isinstance(data, dict) else data
+    reqs = reqs or []
+    lines = [f"  {'STATUS':11} {'CONTROLS':>8}  {'CREATED':20}  {'ID':28} NAME"]
+    for r in reqs:
+        lines.append(f"  {str(r.get('status', '?'))[:11]:11} {len(r.get('controls') or []) or 'all':>8}  "
+                     f"{str(r.get('created_at', ''))[:19]:20}  {str(r.get('id', '')):28} {r.get('name') or ''}")
+    lines.append(f"\n{len(reqs)} recon run(s)")
+    _out(data, args, human="\n".join(lines))
+
+
+def cmd_recon_show(args):
+    c = _client(args)
+    app_id = _resolve_app(c, args.app)
+    rid = getattr(args, "recon", None)
+    if not rid:
+        data = _recon_call(c.recon_list, app_id) or {}
+        reqs = (data.get("recon_requests") if isinstance(data, dict) else data) or []
+        if not reqs:
+            _die(f"no recon run on {args.app!r} yet:  ascend recon run --app {args.app!r}", code=EXIT_ERROR)
+        rid = reqs[0].get("id")
+        print(f"showing the latest recon run: {rid}", file=sys.stderr)
+    detail = _recon_call(c.recon_get, app_id, rid) or {}
+    _out(detail, args, human=_recon_summary(detail, args.app))
+
+
+def cmd_recon_results(args):
+    c = _client(args)
+    app_id = _resolve_app(c, args.app)
+    res = _recon_call(c.recon_results, app_id, category=getattr(args, "category", None)) or {}
+    _out(res, args, human=_recon_summary(res, args.app))
+
+
+def _run_recon_before_assessment(c, app_id, ref, args):
+    """`assess run --with-recon`: the capability map first, to completion, then the attack probes."""
+    import types as _types
+    sub = _types.SimpleNamespace(**vars(args))
+    sub.app = ref
+    sub.name = f"{args.name} (recon)"
+    sub.no_wait = False
+    print(f"  recon first on {ref} — the attack run starts when it finishes", file=sys.stderr)
+    return cmd_recon_run(sub)
+
+
 def cmd_assess_run(args):
     c = _client(args)
     refs = _app_refs(args)
@@ -1505,10 +1668,19 @@ def cmd_assess_run(args):
         scope_ids = _validated_control_ids(c, args.controls.split(","), force=args.force, what="this run")
 
     if len(refs) > 1:
+        if getattr(args, "recon_only", False) or getattr(args, "with_recon", False):
+            for ref in refs:                       # recon is one app at a time, to completion
+                _run_recon_before_assessment(c, _resolve_app(c, ref), ref, args)
+            if getattr(args, "recon_only", False):
+                return None
         return _assess_run_many(args, c, refs, scope_ids=scope_ids)
 
     appid = _resolve_app(c, refs[0])
     args.app = refs[0]              # downstream messages expect a scalar
+    if getattr(args, "recon_only", False):
+        return cmd_recon_run(args)
+    if getattr(args, "with_recon", False):
+        _run_recon_before_assessment(c, appid, refs[0], args)
     _scoped = _scope_run_controls(c, appid, scope_ids, args)
     if _scoped:
         print(f"  {_scoped}", file=sys.stderr)
@@ -7096,6 +7268,38 @@ def build_parser():
     s.set_defaults(func=cmd_controls_validate)
 
     # assess
+    rcp = sub.add_parser("recon", parents=[GLOBALS], formatter_class=_Fmt,
+                         help="reconnaissance: enumerate what the target can do, before or instead of attack probes",
+                         description=("Reconnaissance is a run of its own, as in the Console's Reconnaissance tab: "
+                                      "Iris asks the target what it can do — tools, data access, guardrails, "
+                                      "rendering, sub-agents — and records which capabilities it confirmed. "
+                                      "A found capability is the surface an assessment should target.\n\n"
+                                      "  ascend recon run --app 'My Bot'                 # recon only\n"
+                                      "  ascend assess run --app 'My Bot' --name r1 --with-recon   # recon, then attack\n"
+                                      "  ascend assess run --app 'My Bot' --name r1      # attack only (default)")
+                         ).add_subparsers(dest="verb", required=True)
+    s = rcp.add_parser("controls", parents=[GLOBALS], formatter_class=_Fmt, help="the recon catalog, by category")
+    s.set_defaults(func=cmd_recon_controls)
+    s = rcp.add_parser("run", parents=[GLOBALS], formatter_class=_Fmt, help="start a recon run and follow it to the end")
+    s.add_argument("--app", required=True, help="app name or aapp_ id")
+    s.add_argument("--name", help="a label for this recon run")
+    s.add_argument("--controls", metavar="IDS", help="recon control ids (default: the whole recon catalog)")
+    s.add_argument("--no-wait", action="store_true", help="return as soon as recon starts")
+    s.add_argument("--interval", type=int, default=10, help="seconds between polls")
+    s.add_argument("--timeout", type=int, default=3600, help="max seconds to wait")
+    s.set_defaults(func=cmd_recon_run)
+    s = rcp.add_parser("list", parents=[GLOBALS], formatter_class=_Fmt, help="recon runs on an app")
+    s.add_argument("--app", required=True, help="app name or aapp_ id")
+    s.set_defaults(func=cmd_recon_list)
+    s = rcp.add_parser("show", parents=[GLOBALS], formatter_class=_Fmt, help="one recon run in detail (default: the latest)")
+    s.add_argument("--app", required=True, help="app name or aapp_ id")
+    s.add_argument("--recon", help="recon run id (default: the latest)")
+    s.set_defaults(func=cmd_recon_show)
+    s = rcp.add_parser("results", parents=[GLOBALS], formatter_class=_Fmt, help="the app's confirmed capabilities, across runs")
+    s.add_argument("--app", required=True, help="app name or aapp_ id")
+    s.add_argument("--category", help="one recon category")
+    s.set_defaults(func=cmd_recon_results)
+
     asp = sub.add_parser("assess", parents=[GLOBALS], formatter_class=_Fmt, help="run and monitor assessments").add_subparsers(dest="verb", required=True)
     s = asp.add_parser("run", parents=[GLOBALS], formatter_class=_Fmt, help="create->pause->resume->poll an assessment",
                        epilog="examples:\n"
@@ -7111,6 +7315,13 @@ def build_parser():
     s.add_argument("--no-wait", action="store_true", help="return as soon as the run starts"); s.add_argument("--interval", type=int, default=20, help="seconds between status polls")
     s.add_argument("--timeout", type=int, default=7200, help="max seconds to wait for completion")
     s.add_argument("--force", action="store_true", help="run even if the selected controls would generate zero probes")
+    s.add_argument("--with-recon", action="store_true",
+                   help="run reconnaissance first (to completion), then the assessment")
+    s.add_argument("--recon-only", action="store_true",
+                   help="run reconnaissance only — no attack probes (same as `ascend recon run`)")
+    s.add_argument("--recon-controls", metavar="IDS",
+                   help="recon control ids for --with-recon/--recon-only (default: the whole recon catalog; "
+                        "see `ascend recon controls`)")
     s.set_defaults(func=cmd_assess_run)
 
     # assess diff — compare two runs (new / resolved / regressed findings)

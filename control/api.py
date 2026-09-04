@@ -425,6 +425,28 @@ class AscendAPI:
     def delete_app(self, app_id: str) -> Any:
         return self._req("DELETE", f"/ascend/applications/{app_id}")
 
+    # ---- reconnaissance -------------------------------------------------------------------
+    # Capability enumeration is a run of its own in the Console (the Reconnaissance tab), separate
+    # from an assessment. These are the v3 paths that run should have; today the platform serves
+    # recon only to the Console, so a tenant without them answers 404 and the CLI says so.
+    def recon_controls(self) -> Any:
+        return self._req("GET", "/ascend/recon/controls")
+
+    def recon_start(self, app_id: str, *, name: Optional[str] = None,
+                    controls: Optional[List[str]] = None) -> Any:
+        body = {k: v for k, v in (("name", name), ("controls", controls)) if v}
+        return self._req("POST", f"/ascend/applications/{app_id}/recon", json_body=body or {})
+
+    def recon_list(self, app_id: str) -> Any:
+        return self._req("GET", f"/ascend/applications/{app_id}/recon")
+
+    def recon_get(self, app_id: str, recon_id: str) -> Any:
+        return self._req("GET", f"/ascend/applications/{app_id}/recon/{recon_id}")
+
+    def recon_results(self, app_id: str, *, category: Optional[str] = None) -> Any:
+        q = f"?category={category}" if category else ""
+        return self._req("GET", f"/ascend/applications/{app_id}/recon/results{q}")
+
     # ---- assessments ---------------------------------------------------------
     def create_assessment(self, app_id: str, name: str) -> Any:
         """Start an assessment, and never report a failure that actually succeeded.

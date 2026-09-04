@@ -100,7 +100,8 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
                          settle_s: int, manual: bool = False, manual_wait_s: int = 180,
                          extra_headers: Optional[Dict[str, str]] = None,
                          proxy: Optional[str] = None, insecure: bool = False,
-                         browser_channel: Optional[str] = None) -> Dict[str, Any]:
+                         browser_channel: Optional[str] = None,
+                         cdp: Optional[str] = None) -> Dict[str, Any]:
     try:
         from playwright.async_api import async_playwright
     except ImportError as e:  # pragma: no cover - env dependent
@@ -128,7 +129,17 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
         # every day. `channel` drives the installed Chrome/Edge instead; we fall back to the
         # bundled build only when neither is present.
         browser, chosen = None, None
-        for channel in _browser_channels(browser_channel):
+        if cdp:
+            # Attach to a browser the operator is ALREADY signed into (started with
+            # `chrome --remote-debugging-port=9222`). This is the only route into an Entra / SAML /
+            # WS-Fed gated target: there is no credential a CLI can be handed, the session lives in
+            # that browser, and a fresh Chromium launched here stops at the login wall and never
+            # sees the widget. The runtime adapter attaches the same way (browser.py `cdp_url`),
+            # so what the capture proves is what the assessment runs.
+            endpoint = cdp if str(cdp).startswith("http") else f"http://127.0.0.1:{cdp}"
+            browser = await pw.chromium.connect_over_cdp(endpoint)
+            chosen = f"attached over CDP at {endpoint}"
+        for channel in ([] if browser else _browser_channels(browser_channel)):
             try:
                 browser = await pw.chromium.launch(channel=channel, **launch_kw) if channel \
                     else await pw.chromium.launch(**launch_kw)
@@ -163,7 +174,12 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
             os.makedirs(_viddir, exist_ok=True)
             ctx_kw["record_video_dir"] = _viddir
             ctx_kw["record_video_size"] = {"width": 1400, "height": 950}
-        ctx = await browser.new_context(**ctx_kw)
+        if cdp and browser.contexts:
+            # The signed-in session is IN the existing context. A new context is a clean profile
+            # with no cookies, which would defeat the reason for attaching at all.
+            ctx = browser.contexts[0]
+        else:
+            ctx = await browser.new_context(**ctx_kw)
         page = await ctx.new_page()
 
         async def on_response(resp):
@@ -255,7 +271,8 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
                     await asyncio.wait(pending_tasks, timeout=10)
                 except Exception:
                     pass
-            await browser.close()
+            if not cdp:                       # never close the operator's own browser
+                await browser.close()
 
             def _in_traffic_m(needle):
                 if not needle: return False
@@ -398,7 +415,8 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
                 await asyncio.wait(pending_tasks, timeout=10)
             except Exception:
                 pass
-        await browser.close()
+        if not cdp:                       # never close the operator's own browser
+            await browser.close()
 
     # HARD VERIFICATION: typing into a box proves nothing — the prompt must appear in
     # real traffic. Two silent failure modes this catches: (a) we typed into a site
@@ -564,7 +582,8 @@ def capture_url(url: str, *, prompt: str = BENIGN_DEFAULT, headless: bool = Fals
                 timeout_s: int = 60, settle_s: int = 6, manual: bool = False,
                 manual_wait_s: int = 180, extra_headers: Optional[Dict[str, str]] = None,
                 proxy: Optional[str] = None, insecure: bool = False,
-                browser_channel: Optional[str] = None) -> Dict[str, Any]:
+                browser_channel: Optional[str] = None,
+                cdp: Optional[str] = None) -> Dict[str, Any]:
     """Capture live evidence from a chat page. Returns classifier-ready evidence.
 
     manual=True opens the page and waits for YOU to drive the widget (type the prompt
@@ -578,6 +597,7 @@ def capture_url(url: str, *, prompt: str = BENIGN_DEFAULT, headless: bool = Fals
         return asyncio.run(_capture_async(url, prompt=prompt, headless=headless,
                                           timeout_s=timeout_s, settle_s=settle_s,
                                           manual=manual, manual_wait_s=manual_wait_s,
+                                          cdp=cdp,
                                           extra_headers=extra_headers, proxy=proxy,
                                           insecure=insecure,
                                           browser_channel=browser_channel))

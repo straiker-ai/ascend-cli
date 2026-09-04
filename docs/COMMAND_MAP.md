@@ -60,6 +60,7 @@ Build an adapter config for a target and PROVE it against the live target before
 | `--client-cert` | `PATH` | — | client certificate (PEM) for mTLS |
 | `--client-key` | `PATH` | — | client private key (PEM) for mTLS |
 | `--proxy` | `URL` | — | HTTP(S) proxy for the probe/validate calls |
+| `--cdp` | `ENDPOINT` | — | with --url: attach to a browser you are ALREADY signed into (start it with `chrome --remote-debugging-port=9222`) instead of launching one. The only route into an Entra / SAML / SSO-gated target. Default endpoint http://127.0.0.1:9222; the written adapter attaches the same way, and your browser is never closed. |
 | `--prompt-hint` | `PROMPT_HINT` | — | with --curl: the literal prompt text used in that command |
 | `--allow-internal` | — | — | allow link-local/cloud-metadata hosts (169.254/fd00::) — off by default |
 | `--timeout` | `TIMEOUT` | `20.0` | per-request timeout in seconds |
@@ -630,6 +631,7 @@ remove a stored key (optionally the Ascend app with it)
 | `--client-cert` | `PATH` | — | client certificate (PEM) for mTLS |
 | `--client-key` | `PATH` | — | client private key (PEM) for mTLS |
 | `--proxy` | `URL` | — | HTTP(S) proxy for the probe/validate calls |
+| `--cdp` | `ENDPOINT` | — | with --url: attach to a browser you are ALREADY signed into (start it with `chrome --remote-debugging-port=9222`) instead of launching one. The only route into an Entra / SAML / SSO-gated target. Default endpoint http://127.0.0.1:9222; the written adapter attaches the same way, and your browser is never closed. |
 | `--prompt-hint` | `PROMPT_HINT` | — | with --curl: the literal prompt text used in that command |
 | `--allow-internal` | — | — | allow link-local/cloud-metadata hosts (169.254/fd00::) — off by default |
 | `--timeout` | `TIMEOUT` | `20.0` | per-request timeout in seconds |
@@ -682,6 +684,7 @@ zero to a running assessment in one command (build -> validate -> register -> br
 | `--client-cert` | `PATH` | — | client certificate (PEM) for mTLS |
 | `--client-key` | `PATH` | — | client private key (PEM) for mTLS |
 | `--proxy` | `URL` | — | HTTP(S) proxy for the probe/validate calls |
+| `--cdp` | `ENDPOINT` | — | with --url: attach to a browser you are ALREADY signed into (start it with `chrome --remote-debugging-port=9222`) instead of launching one. The only route into an Entra / SAML / SSO-gated target. Default endpoint http://127.0.0.1:9222; the written adapter attaches the same way, and your browser is never closed. |
 | `--prompt-hint` | `PROMPT_HINT` | — | with --curl: the literal prompt text used in that command |
 | `--size` | `small|medium|large` | `small` | assessment size |
 | `--qpm` | `QPM` | `20` | queries per minute against the target |
@@ -912,6 +915,7 @@ onboard a target from a URL, a cURL/HAR file, or a saved config
 | `--client-cert` | `PATH` | — | client certificate (PEM) for mTLS |
 | `--client-key` | `PATH` | — | client private key (PEM) for mTLS |
 | `--proxy` | `URL` | — | HTTP(S) proxy for the probe/validate calls |
+| `--cdp` | `ENDPOINT` | — | with --url: attach to a browser you are ALREADY signed into (start it with `chrome --remote-debugging-port=9222`) instead of launching one. The only route into an Entra / SAML / SSO-gated target. Default endpoint http://127.0.0.1:9222; the written adapter attaches the same way, and your browser is never closed. |
 | `--prompt-hint` | `PROMPT_HINT` | — | with --curl: the literal prompt text used in that command |
 | `--size` | `small|medium|large` | `small` | assessment size |
 | `--qpm` | `QPM` | `20` | queries per minute against the target |

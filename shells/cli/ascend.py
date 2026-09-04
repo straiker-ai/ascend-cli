@@ -429,6 +429,11 @@ def _spec_from_config(args, api):
                                    field: "{{PROMPT}}"}
     if cfg.get("response_path"):
         out["response_template"] = {cfg["response_path"]: "{{RESPONSE}}"}
+    # Carried out so cmd_app_create can refuse an app type that cannot honour it. This function
+    # borrowed url/headers/body/response_path and silently dropped `auth`, so an OAuth2 or CSRF
+    # target registered with `--type api` got an app carrying only static headers -- the platform
+    # then called the target directly and 401'd on every probe, with nothing having warned.
+    out["_auth_type"] = (cfg.get("auth") or {}).get("type")
     return out
 
 
@@ -598,11 +603,32 @@ def cmd_app_create(args):
     it, instead of a 422 from the API.
     """
     import api
-    c = _client(args)
+    # Decide the app type and refuse an impossible one BEFORE touching the platform: this is
+    # a local check on a local file, and it must not require a credential to run. It used
+    # to sit after _client(), so without a PAT the operator saw "no token" instead of the
+    # actual problem with their config.
     at_cli = (getattr(args, "type", None) or "bridge").lower()
     # The CLI-facing type is `bridge`; the platform wire value for it is still `thin`. Map here so
     # everything downstream (build_app_spec, creds, needs_bridge) sees the wire truth.
     at = "thin" if at_cli == "bridge" else at_cli
+    borrowed = _spec_from_config(args, api) if at in ("api", "thin") else {}
+    _auth_kind = borrowed.pop("_auth_type", None)
+    if at == "api" and _auth_kind in ("oauth2", "csrf", "derived_multihop"):
+        # An `api` app is called by the PLATFORM directly. Its wire schema carries static headers
+        # and one api_key and nothing else (control/api.py REQUIRED_BY_TYPE) -- no token endpoint,
+        # no bootstrap, no login chain. The dynamic auth kinds are resolved by the local bridge in
+        # runtime/layers/auth.py, which an api-type app never goes through. Registering one anyway
+        # produced an app that 401'd on every probe and reported a clean run.
+        _die(f"config {args.config!r} authenticates with a {_auth_kind!r} handshake, which an "
+             f"'api'-type app cannot carry: the platform calls the target directly and can only "
+             f"send static headers.\n"
+             f"  register it as a bridge app instead, which runs the handshake locally:\n"
+             f"    ascend target add {args.config}   (or: app create --type bridge --config "
+             f"{args.config})\n"
+             f"  or, if the target ALSO accepts a long-lived static token, pass it with "
+             f"--target-api-key and a config without the auth block.",
+             error_code="auth_kind_unsupported_by_app_type")
+    c = _client(args)
 
     ctrl = args.controls.split(",") if args.controls else None
     if ctrl:
@@ -628,7 +654,6 @@ def cmd_app_create(args):
                  "http_status_code=403  or  response_pattern='I can't help'")
         guard = {"type": gt.strip(), "value": [x for x in gv.split("|") if x]}
 
-    borrowed = _spec_from_config(args, api) if at in ("api", "thin") else {}
     if at == "api" and borrowed.get("url"):
         print(f"using target from config {args.config!r}: {borrowed['url']}", file=sys.stderr)
 
@@ -2571,6 +2596,16 @@ def _parse_login_body(raw):
          error_code="bad_login_body")
 
 
+def _stamp_cdp(cfg, args):
+    """Carry `--cdp` into a written BROWSER config as `cdp_url`, so the assessment attaches to the
+    same signed-in browser the capture just proved. Three places write a browser config; this is
+    the one rule they share, and `tests/test_cdp_and_app_type_guard.py` asserts each calls it."""
+    cdp = getattr(args, "cdp", None)
+    if cdp and isinstance(cfg, dict) and cfg.get("adapter") == "browser":
+        cfg["cdp_url"] = cdp
+    return cfg
+
+
 def _prepare_target_auth(args):
     """Run the login/access-code exchange ONCE, up front, whichever command is onboarding.
 
@@ -2725,6 +2760,7 @@ def _finish_discovery(cfg, args, *, source, browser_recipe=None, response_sample
     Confidence is a hint; this is the answer. Nothing is written unless the target replied.
     """
     from runtime.discovery import validate as V
+    cfg = _stamp_cdp(cfg, args)
     auth_headers, auth_query = _target_auth(args)
     _bake_auth(cfg, auth_headers, auth_query)
     _bake_body_fields(cfg, _body_fields(args))   # body-carried key/tenant must persist too
@@ -2916,7 +2952,7 @@ def _finish_browser_adapter(recipe, args, source, V):
     """
     from runtime.discovery import codegen
     url = recipe.get("url") or args.url
-    cfg = codegen.browser_config_from_recipe(url, recipe)
+    cfg = _stamp_cdp(codegen.browser_config_from_recipe(url, recipe), args)
     print("[validate] driving a real browser through the generated adapter ...", file=sys.stderr)
     vres = V.validate_config("browser", cfg, args.prompt, None,
                              timeout_s=max(args.timeout, 150.0), verify_tls=not args.insecure)
@@ -3261,7 +3297,7 @@ def _free_config_name(base, cfg=None):
     return f"{base}-{int(time.time())}"
 
 
-def _write_named_config(cfg, cfg_name, *, exact=False):
+def _write_named_config(cfg, cfg_name, *, exact=False, quiet=False):
     """Write a discovered config and return (path, name) — the name may differ from the one asked
     for, so callers MUST use what comes back.
 
@@ -3326,7 +3362,8 @@ def _write_named_config(cfg, cfg_name, *, exact=False):
             if prior.get(k) and not cfg.get(k):
                 cfg = {**cfg, k: prior[k]}
     _write_private(path, json.dumps(cfg, indent=2))
-    _ok(f"wrote {path}")
+    if not quiet:
+        _ok(f"wrote {path}")
     return path, cfg_name
 
 
@@ -3535,7 +3572,8 @@ def cmd_onboard(args):
         if args.url:
             from runtime.discovery.capture import capture_url
             ev = capture_url(args.url, prompt=args.prompt, headless=args.headless,
-                             settle_s=args.settle, manual=args.manual)
+                             settle_s=args.settle, manual=args.manual,
+                             cdp=getattr(args, "cdp", None))
             for n in ev.get("notes", []):
                 _ok(n)
             if not ev.get("send_verified"):
@@ -3546,7 +3584,7 @@ def cmd_onboard(args):
         else:
             ev = C.load_har(args.har, prompt_sent=args.prompt)
         res = C.classify_evidence(ev)
-        cfg = res.get("config") or {}
+        cfg = _stamp_cdp(res.get("config") or {}, args)
         t = (res.get("layers") or {}).get("transport") or {}
         _ok(f"transport {t.get('value')} (confidence {t.get('confidence')})")
         if res.get("unresolved"):
@@ -3576,7 +3614,7 @@ def cmd_onboard(args):
         #
         # Re-written only when something actually changed, so the no-login path stays byte-identical
         # and `--config <existing>` is not rewritten for nothing.
-        cfg_path, cfg_name = _write_named_config(cfg, cfg_name, exact=True)
+        cfg_path, cfg_name = _write_named_config(cfg, cfg_name, exact=True, quiet=True)
     adapter = args.adapter or cfg.get("adapter")
     if not adapter:
         _die("could not determine the adapter type; set 'adapter' in the config or pass --adapter")
@@ -6116,7 +6154,8 @@ def cmd_discover(args):
                                headless=args.headless, settle_s=args.settle,
                                manual=args.manual, extra_headers=auth_headers or None,
                                proxy=getattr(args, "proxy", None),
-                               insecure=getattr(args, "insecure", False))
+                               insecure=getattr(args, "insecure", False),
+                               cdp=getattr(args, "cdp", None))
         for n in evidence.get("notes", []):
             print(f"[build] {n}", file=sys.stderr)
 
@@ -6621,6 +6660,13 @@ def _add_target_auth_args(s):
     s.add_argument("--client-cert", metavar="PATH", help="client certificate (PEM) for mTLS")
     s.add_argument("--client-key", metavar="PATH", help="client private key (PEM) for mTLS")
     s.add_argument("--proxy", metavar="URL", help="HTTP(S) proxy for the probe/validate calls")
+    # --- a browser you are already signed into --------------------------------------------------
+    s.add_argument("--cdp", nargs="?", const="http://127.0.0.1:9222", metavar="ENDPOINT",
+                   help="with --url: attach to a browser you are ALREADY signed into "
+                        "(start it with `chrome --remote-debugging-port=9222`) instead of "
+                        "launching one. The only route into an Entra / SAML / SSO-gated target. "
+                        "Default endpoint http://127.0.0.1:9222; the written adapter attaches the "
+                        "same way, and your browser is never closed.")
 
 
 def _add_onboard_args(s, *, require_source):

@@ -1708,7 +1708,14 @@ def cmd_assess_run(args):
     human = (_verdict(res)
              if isinstance(res, dict) and res.get("category_summary") is not None else None)
     if isinstance(res, dict) and res.get("recovered"):
-        print(f"note: {res.get('recovery_note')} — not re-created.", file=sys.stderr)
+        # Loud only when the operator has to do something. A run the CLI recovered and confirmed
+        # RUNNING is a transport hiccup it already absorbed; reporting that as
+        # "the connection dropped (ConnectionError)" made a healthy start look like a failure.
+        if res.get("recovery_needs_action", True):
+            print(f"note: {res.get('recovery_note')} — not re-created.", file=sys.stderr)
+        else:
+            print("  (create response dropped; the assessment exists and is running, "
+                  "not re-created)", file=sys.stderr)
     if human is None and isinstance(res, dict) and res.get("assessment_id"):
         human = (f"assessment {res['assessment_id']} started\n"
                  f"  watch:    ascend assess watch --app {args.app} --assessment {res['assessment_id']}\n"

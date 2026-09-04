@@ -609,7 +609,8 @@ class AscendAPI:
             if not wait:
                 out = {"app_id": app_id, "assessment_id": aid, "status": "running"}
                 if recovered:
-                    out.update({"recovered": True, "recovery_note": recovery_note})
+                    out.update({"recovered": True, "recovery_note": recovery_note,
+                                "recovery_needs_action": False})
                 return out
             res = self.poll_assessment(app_id, aid, interval=interval, timeout=timeout,
                                        on_tick=on_tick)
@@ -623,18 +624,25 @@ class AscendAPI:
             status = str(state.get("status", "")).lower()
             note = (f"the connection dropped ({type(exc).__name__}) after the assessment was "
                     f"created; it is on the platform with status '{status or 'unknown'}'")
+            # Two very different outcomes were reported in the same alarming sentence. Recovered
+            # AND running is a transport hiccup the CLI already absorbed — nothing for the
+            # operator to do. Recovered but `created`/`paused` needs them to resume it. The flag
+            # lets the CLI say which; the full note stays in --json either way.
+            needs_action = status in ("created", "paused")
             if not wait:
-                if status in ("created", "paused"):
+                if needs_action:
                     note += ". It is NOT running — resume it with `ascend assess resume`."
                 return {**state, "app_id": app_id, "assessment_id": aid,
-                        "recovered": True, "recovery_note": note}
+                        "recovered": True, "recovery_note": note,
+                        "recovery_needs_action": needs_action}
             # The caller asked to WAIT. Returning a non-terminal row here is how `assess run`
             # exited 0 in two seconds with the assessment still running -- a pipeline read that as
             # a passing security gate before a single probe had been answered. Recover the state,
             # get it running if the drop left it paused, and go back to polling.
             if status in terminal_now():
                 return {**state, "app_id": app_id, "assessment_id": aid,
-                        "recovered": True, "recovery_note": note}
+                        "recovered": True, "recovery_note": note,
+                        "recovery_needs_action": False}
             if status in ("created", "paused"):
                 self._safe_transition(self.resume, app_id, aid, want="running")
             remaining = max(30, int(timeout - (time.time() - t0)))

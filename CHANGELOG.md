@@ -28,6 +28,15 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ### Fixed
 
+- **A recovered assessment that is running no longer reads like a failure.** `assess run`
+  absorbs a transport error after the assessment is created — it asks the platform what state the
+  run is really in, rather than reporting a failure the operator would retry into a duplicate run.
+  That path fires routinely, and it reported two very different outcomes in the same alarming
+  sentence: `note: the connection dropped (ConnectionError) ... status 'running'`. Nothing is
+  wrong in that case and there is nothing to do. It now says so in one quiet line, while a run
+  recovered as `created`/`paused` — which does need the operator to resume it — stays loud.
+  `--json` carries the full note either way, plus a new `recovery_needs_action` boolean.
+
 - **A name that is ambiguous on the tenant is resolved by the target this machine registered.**
   A shared tenant accumulates same-named apps — a demo app re-registered over months, two
   engineers onboarding the same bot, a teardown that failed. The demo tenant carries four such

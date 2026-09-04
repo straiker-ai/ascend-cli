@@ -1509,8 +1509,11 @@ def cmd_assess_run(args):
         # existing relay.
         owned = dict(ensure)
 
+        # `local` = this machine is responsible for the relay: it started one, reused one, or TRIED
+        # to start one and failed. Only a `skip` (no key or config stored here) means the bridge may
+        # legitimately live elsewhere, where is_serving() cannot see it.
         guard = _PauseGuard(c, appid, bridged=needs_bridge(_sup_app),
-                            local=bool(ensure.get("started") or ensure.get("reused")))
+                            local=bool(ensure.get("started") or ensure.get("reused") or ensure.get("error")))
 
         def _supervised_tick(status, prog, a):
             # Bind the relay to THIS run as soon as the platform names it, so the bridge scopes its

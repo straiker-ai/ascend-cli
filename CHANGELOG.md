@@ -52,6 +52,20 @@ All notable changes to the Ascend CLI. Newest first. Format follows
   by the same `_resolve_assessment` that `ci` and `export` use — it now truly has the three callers
   its docstring names. Under `--json` a false-pass-suspect run carries `false_pass_suspect: true`
   and `false_pass_warning` alongside the numbers they qualify.
+- **Several targets on one machine behave.** Audited live with four differently-authenticated
+  targets side by side. `target add --name X` when an app named X already existed **created a
+  second app with the same name** and reported success — after which every command naming X
+  (`assess run`, `results`, `ci`, `export`, `target rm`) was refused as ambiguous. Registration
+  now refuses a duplicate name and spells out the two ways forward (`--app X` adopts the existing
+  app; a new `--name` registers another). `target list` flags same-named targets with their ids.
+  `chat` accepts a target's name (it took only config names, so the name just read in `target
+  list` was refused). The fleet form `assess run --app A --app B` **waits** like the single form —
+  per-run bridge watchdog and pause guard, one summary table, one JSON document, non-zero on
+  anything unfinished (`--no-wait` keeps the fire-and-forget form; it read as success to a
+  pipeline that went straight on to `ci`). `assess results` on a run still going says so and
+  points at `watch` instead of printing `?` fields. Deleting a target names the runs it cancels
+  and forgets the relay's state files, so `bridge ls` stops listing a dead relay for an app that
+  no longer exists. `target add` ends with `talk to it: ascend chat '<name>'`.
 
 ### Fixed
 

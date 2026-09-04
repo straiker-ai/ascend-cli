@@ -40,3 +40,18 @@ def test_usage_doc_matches_the_landed_behaviour():
     t = (REPO / "docs" / "USAGE.md").read_text()
     assert "latest finished run" in t and "--yes skips" in t and "bridge sync --app" in t
     assert "chat <target|config>" in t
+
+
+def test_target_list_survives_an_args_namespace_without_the_global_flags():
+    """A caller that builds the namespace itself (a skill, a test, an embedding host) has no
+    `token` attribute. Reading `args.token` directly crashed there — and only in combination with
+    another PR's test, which is why the merge gate caught it and neither PR's own suite did."""
+    import sys as _sys, types as _types
+    from pathlib import Path as _Path
+    REPO = _Path(__file__).resolve().parents[1]
+    for p in ("shells/cli", "runtime", "control"):
+        if str(REPO / p) not in _sys.path:
+            _sys.path.insert(0, str(REPO / p))
+    import ascend
+    assert ascend._has_token(_types.SimpleNamespace()) in (True, False)   # no AttributeError
+    assert ascend._has_token(_types.SimpleNamespace(token="s6r_pat_x")) is True

@@ -9,8 +9,8 @@ auto-starts a bridge per app (see
 ascend tenant show                 # which tenant am I locked to?
 ascend target list                 # every target: adapter, config, registered, serving
 ascend keys list                   # one bridge key per app, masked
-ascend assess run --app A --app B --app C --name 'wave 1'   # auto-starts a bridge per app
-ascend assess watch --all          # one table, every live run
+ascend assess run --app A --app B --app C --name 'wave 1'   # bridge per app, waits, one summary table
+ascend assess watch --all          # one table, every live run (started with --no-wait, or elsewhere)
 ascend bridge ls                    # who is serving what (and who ISN'T)
 ascend bridge sync                  # reconcile bridges to assessment state (manual fallback)
 ```
@@ -148,9 +148,9 @@ endpoint before you go looking at the relay.
 `--app` is repeatable across these commands:
 
 ```
-ascend assess run --app A --app B --app C --name 'wave 1'   # control set validated ONCE, bridge per app
+ascend assess run --app A --app B --app C --name 'wave 1'   # control set validated ONCE, bridge per app, waits
 ascend assess run --all-bound --name 'wave 1'               # every app with a stored key
-ascend assess watch --all                                   # one in-place table, all live runs
+ascend assess watch --all                                   # all live runs (yours with --no-wait, or anyone's)
 ascend app list --with-runs                                 # per-app: state, runs, progress, score
 ascend app list --running                                    # only apps actively consuming probes
 ```
@@ -169,8 +169,8 @@ for t in bot-a bot-b bot-c; do                        # 1. onboard each target
     --bearer "$TOK" --controls sys_prompt_leak
 done
 ascend target list                                     # 2. all three registered, none serving yet
-ascend assess run --app bot-a --app bot-b --app bot-c --name 'wave 1'   # 3. run (bridge per app, auto)
-ascend assess watch --all                                               # 4. watch
+ascend assess run --app bot-a --app bot-b --app bot-c --name 'wave 1'   # 3. run: bridge per app, waits, summary table
+ascend assess watch --all                                               # 4. (only with --no-wait) follow them
 ascend bridge ls                                       # 5. confirm nothing is unserved
 # bridges self-stop as each run goes terminal
 ascend keys prune                                      # 6. tidy keys for deleted apps

@@ -174,6 +174,21 @@ def _unwrap_list(payload, *keys):
     return []
 
 
+def _locally_bound_app_ids(name):
+    """App ids THIS machine registered under `name` — the key store, not the tenant listing.
+
+    `target add` records the app it registered, so a name that is ambiguous across a shared
+    tenant is usually unambiguous on the machine that owns the target.
+    """
+    try:
+        import creds as _CR
+        recs = _CR.load_all() or {}
+    except Exception:
+        return []
+    return sorted({aid for aid, rec in recs.items()
+                   if (rec.get("app_name") or "") == name})
+
+
 def _resolve_app(client, ref, *, exact=False):
     """Accept an aapp_ id or a name; return the app id.
 
@@ -212,8 +227,24 @@ def _resolve_app(client, ref, *, exact=False):
             hint = f"\n  {len(names)} apps exist — list them with:  ascend app list"
         _die(f"no app named {ref!r} (and not an aapp_ id){hint}")
     if len(matches) > 1:
+        # A name ambiguous on a shared TENANT is usually unambiguous on THIS MACHINE: whatever
+        # registered the target wrote down which app it is. Dying here made
+        # `assess run --app 'Demo Bot'` fail while `target check 'Demo Bot'` — same name, same
+        # machine, same second — succeeded, because check reads that binding and this did not.
+        # Shared tenants accumulate same-named apps (demo apps, re-registrations, two engineers
+        # onboarding the same bot), so this is the common case, not the corner case.
+        ids = {a.get("id") for a in matches}
+        bound = [i for i in _locally_bound_app_ids(ref) if i in ids]
         listing = "\n  ".join(f"{a.get('id')}  {a.get('name','')}" for a in matches[:10])
-        _die(f"{ref!r} matches {len(matches)} apps — be more specific:\n  {listing}")
+        if len(bound) == 1:
+            print(f"  note: {len(matches)} apps on this tenant are named {ref!r}; using the one "
+                  f"this machine registered, {bound[0]}."
+                  f"\n        Pass --app <aapp_id> to choose a different one.", file=sys.stderr)
+            return bound[0]
+        why = ("this machine has no target bound to that name"
+               if not bound else
+               f"this machine has {len(bound)} targets bound to that name")
+        _die(f"{ref!r} matches {len(matches)} apps and {why} — pass the aapp_ id:\n  {listing}")
     return matches[0]["id"]
 
 

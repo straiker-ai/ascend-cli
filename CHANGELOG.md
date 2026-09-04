@@ -28,6 +28,17 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ### Fixed
 
+- **A name that is ambiguous on the tenant is resolved by the target this machine registered.**
+  A shared tenant accumulates same-named apps — a demo app re-registered over months, two
+  engineers onboarding the same bot, a teardown that failed. The demo tenant carries four such
+  clusters, one five apps deep. Resolution searched the tenant by name and gave up, which split
+  the CLI in half: `ascend target check 'Demo Bot'` worked (it reads the local binding) while
+  `ascend assess run --app 'Demo Bot'` failed with "matches 5 apps" — same name, same machine,
+  same second. `target add` writes down which app it registered, so the answer was already on
+  disk. Resolution now uses it and prints which app it picked, on stderr so `--json` stays clean.
+  With no local binding, more than one, or a binding to an app the tenant no longer lists, it
+  still refuses and names the ids — the machine genuinely does not know which app is meant.
+
 - **The codename check now catches the spaced and hyphenated spellings.** It matched the
   underscore form only, so a hyphenated hostname default survived in `transport/openapi.yaml` — a
   file a customer downloads to write their own bridge client; the default is now

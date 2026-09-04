@@ -3709,15 +3709,28 @@ def cmd_target_add(args):
     return cmd_onboard(args)
 
 
+def _has_token(args) -> bool:
+    """Is a PAT available at all? `getattr`, not `args.token`: a caller can build the namespace
+    without the global flags (every skill and several tests do), and a command that only WANTS a
+    token must not crash on the absence of the attribute."""
+    return bool(getattr(args, "token", None) or os.environ.get("STRAIKER_PAT")
+                or os.environ.get("STRAIKER_TOKEN"))
+
+
 def cmd_target_list(args):
     """Every target this machine can run: its app, its proven adapter, and whether it is serving."""
     import creds as C
     recs = C.load_all() or {}
     live = None
-    try:
-        live = {a.get("id"): a for a in _unwrap_list(_client(args).list_apps())}
-    except Exception:
-        live = None
+    # The list is LOCAL (the key store); asking the platform whether each app still exists is a
+    # bonus. With no PAT this used to die on the token check before printing anything.
+    if _has_token(args):
+        try:
+            live = {a.get("id"): a for a in _unwrap_list(_client(args).list_apps())}
+        except Exception:
+            live = None
+    else:
+        print("  (no PAT in this shell: REGISTERED not checked against the platform)", file=sys.stderr)
     try:
         import supervisor as S
         serving = {r["app_id"] for r in S.ls() if r.get("state") == "serving"}
@@ -5616,17 +5629,20 @@ def cmd_doctor(args):
     if getattr(args, "update", False):
         return _doctor_update(args)
     import shutil, urllib.request
-    checks = []
+    checks = []       # (label, ok) or (label, ok, fix) — a failed check should say what to do
     tok = args.token or os.environ.get("STRAIKER_PAT") or os.environ.get("STRAIKER_TOKEN")
-    checks.append(("PAT present", bool(tok)))
+    checks.append(("PAT present", bool(tok),
+                   "export STRAIKER_PAT=s6r_pat_...   (Console -> Settings -> API keys), or pass --token"))
     if tok:
         try:
             c = _client(args)
             cat = c.list_controls()
             n = len(_unwrap_list(cat, "controls"))   # tolerate a bare-list response
-            checks.append((f"PAT exchange + /ascend/controls ({n} controls)", n > 0))
+            checks.append((f"PAT exchange + /ascend/controls ({n} controls)", n > 0,
+                           "the token authenticated but the control catalog came back empty; try again, then ask Straiker"))
         except Exception as e:
-            checks.append((f"PAT exchange FAILED: {str(e)[:80]}", False))
+            checks.append((f"PAT exchange FAILED: {str(e)[:80]}", False,
+                           "the token is expired, revoked, or issued for another tenant: ascend tenant show"))
     # Any HTTP status proves reachability (a 404/401 from the bridge means we got there).
     # Use requests so corporate proxy env vars are honoured — urllib ignored them and
     # reported a false negative behind a proxy, then told the user the tool was broken.
@@ -5651,7 +5667,8 @@ def cmd_doctor(args):
             bad_cfgs.append(f.name)
     checks.append(("all configs parse as JSON" if not bad_cfgs
                    else f"INVALID config JSON: {', '.join(bad_cfgs[:3])}", not bad_cfgs))
-    ok = all(v for _, v in checks)
+    checks = [(c + (None,))[:3] for c in checks]          # normalise to (label, ok, fix)
+    ok = all(v for _, v, _fix in checks)
 
     # Optional extras: each unlocks one capability. Missing = warn, never fail.
     def _has(mod):
@@ -5674,15 +5691,18 @@ def cmd_doctor(args):
     ver, kind, upd_cmd = _version_state()
     behind = ver["state"] in ("update_available", "update_recommended")
     if args.json:
-        _out({"ok": ok, "checks": {k: v for k, v in checks}, "optional": {k: v for k, v in soft},
+        _out({"ok": ok, "checks": {k: v for k, v, _ in checks}, "optional": {k: v for k, v in soft},
+              "fixes": {k: fix for k, v, fix in checks if not v and fix},
               "version": {"current": ver["current"], "latest": ver["latest"],
                           "state": ver["state"], "severity": ver["severity"],
                           "min_supported": ver.get("min_supported"), "install_method": kind,
                           "update_command": upd_cmd if behind else None,
                           "reason": ver.get("reason")}}, args)
     else:
-        for k, v in checks:
+        for k, v, fix in checks:
             print(f"  [{'ok' if v else 'XX'}] {k}")
+            if not v and fix:
+                print(f"       fix: {fix}")
         for k, v in soft:
             print(f"  [{'ok' if v else '..'}] {k} (optional)")
         cur, lat, st = ver["current"], ver["latest"], ver["state"]

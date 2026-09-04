@@ -20,7 +20,7 @@
 | `0` | success / clean |
 | `1` | tool or target error — including *could not read results*, never a pass |
 | `2` | findings gate failed (`ascend ci`) |
-| `3` | bad invocation (unknown control id, missing per-type field, malformed flag) |
+| `3` | bad invocation (unknown control id, missing per-type field, malformed or unknown flag or command) |
 
 ## Also available
 

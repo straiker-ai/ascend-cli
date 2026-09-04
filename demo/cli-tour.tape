@@ -51,54 +51,58 @@ Show
 # 1. The home screen: three columns naming where things run, and the CLI in the middle with
 #    bridge facing Straiker and adapter facing your target.
 Type "ascend"                                                                Enter
-Sleep 11s
+Sleep 6s
 
 Type "clear"                                                                 Enter
-Sleep 500ms
+Sleep 300ms
 
 # 2. Onboard a target from whatever evidence you have.
 Type "# a url, a request copied from devtools, or a .har - it detects which"  Enter
-Sleep 1s
+Sleep 500ms
 Type "ascend target add http://127.0.0.1:8600/chat --save-as demo-bot --name 'Demo Bot'" Enter
-Sleep 30s
+Wait+Screen@120s /is ready/
+Sleep 5s
 
 Type "clear"                                                                 Enter
 Type "# what do I have? adapter, registered, serving - one line each"        Enter
-Sleep 800ms
+Sleep 400ms
 Type "ascend target list"                                                    Enter
-Sleep 8s
+Wait+Screen@45s /target\(s\)/
+Sleep 4s
 
 Type "clear"                                                                 Enter
 Type "# the kinds of target it can speak to"                                 Enter
-Sleep 800ms
+Sleep 400ms
 Type "ascend target types"                                                   Enter
-Sleep 5s
+Sleep 4s
 
 Type "clear"                                                                 Enter
 Type "# re-prove before spending an assessment: a drifted target still produces" Enter
 Type "# a clean-LOOKING run that measured nothing"            Enter
-Sleep 1s
+Sleep 500ms
 Type "ascend target check 'Demo Bot'"                                        Enter
-Sleep 12s
+Wait+Screen@60s /ok=/
+Sleep 4s
 
 Type "clear"                                                                 Enter
 Type "# run it. --controls scopes the run: one control is 4 probes, not 250."  Enter
 Type "# the bridge starts and stops itself."                                  Enter
-Sleep 800ms
+Sleep 400ms
 Type "ascend assess run --app 'Demo Bot' --name 'tour' --controls sys_prompt_leak --no-wait" Enter
-Sleep 16s
+Wait+Screen@120s /watch:/
+Sleep 6s
 
 Type "clear"                                                                 Enter
 Type "# every command also takes --json, for an agent or a pipeline"         Enter
-Sleep 800ms
+Sleep 400ms
 Type "ascend target list --json"                                             Enter
-Sleep 8s
+Sleep 5s
 
 # --- hidden teardown: leave the tenant as we found it ---------------------------------------
 # Deleting the application also stops its bridge and drops its stored key.
 Hide
 Type "ascend bridge stop --all >/dev/null 2>&1" Enter
-Sleep 3s
+Sleep 2s
 Type "ascend target rm 'Demo Bot' --json >/dev/null 2>&1" Enter
 Sleep 6s
 Show

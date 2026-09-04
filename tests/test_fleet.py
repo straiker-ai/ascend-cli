@@ -200,3 +200,12 @@ def test_stale_pidfile_is_reaped(home):
     S.paths_for("aapp_z")["pid"].write_text("999999")
     assert S.is_running("aapp_z") is False
     assert S.read_pid("aapp_z") is None
+
+
+@pytest.fixture(autouse=True)
+def _no_startup_grace(monkeypatch):
+    """These tests are about pid/status bookkeeping and argv hygiene; their children are stand-ins
+    (or die at once on a bogus config). supervisor.start() now watches a fresh child for its first
+    heartbeat or its death, which would turn every start() here into a 3 s wait or a reported
+    death. The real-child startup-death behaviour has its own test in test_p1_consistency.py."""
+    monkeypatch.setenv("ASCEND_STARTUP_GRACE_S", "0")

@@ -97,6 +97,19 @@ follow:
    line, `relay: N answered, M failed`, is authoritative: `N` near zero on a run you expected to be
    busy means the assessment ran without a relay.
 
+**A relay that is alive but silent is replaced.** Liveness is the heartbeat, not the pid. A relay
+whose process is up but has not beaten in three minutes is answering nobody, and `assess run` (and
+the watchdog under it) stops it and starts a fresh one, saying which pid it replaced. The one
+exception is a relay that reported a fatal error — a bridge key the lease service rejected, say. A
+replacement would hit the same wall, so the error is printed instead.
+
+**A pause that follows an outage is lifted; a pause nothing can lift ends the wait.** The platform
+pauses a run whose probes go unanswered. When `assess run` saw the relay go down and brought it
+back, it resumes the run (a few times at most, and never a pause it did not see happen — your own
+`assess pause` is left alone and mentioned once). When the run is paused and no relay could be
+started for three polls in a row, `assess run` exits 1 at once with the reason and the two commands
+that continue the run, instead of polling to its timeout.
+
 ## 3. Console and CLI sync cannot start a local process
 
 Pause/resume from the Console changes the assessment state, but the Console **cannot start the

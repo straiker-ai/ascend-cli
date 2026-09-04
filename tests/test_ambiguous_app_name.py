@@ -92,3 +92,15 @@ def test_an_unreadable_store_degrades_to_the_old_refusal(monkeypatch):
     monkeypatch.setitem(sys.modules, "creds", types.SimpleNamespace(load_all=_boom))
     with pytest.raises(SystemExit):
         ascend._resolve_app(_C(), "Demo Bot")
+
+
+def test_the_note_fits_a_narrow_terminal(monkeypatch, capsys):
+    """An aapp_ id is 27 characters. As one sentence the note wrapped MID-ID, so the id could not
+    be copied by eye or by double-click — in a terminal, and in the docs tour video."""
+    long_id = "aapp_dupe2"
+    _bind(monkeypatch, {long_id: {"app_name": "Demo Bot"}})
+    ascend._resolve_app(_C(), "Demo Bot")
+    lines = capsys.readouterr().err.rstrip("\n").split("\n")
+    assert len(lines) == 3, "three short lines, not one long one"
+    for line in lines:
+        assert len(line) <= 80, f"{len(line)} columns: {line!r}"

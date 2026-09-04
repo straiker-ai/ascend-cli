@@ -9,6 +9,88 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ### Added
 
+- **`docs/AUTH.md`** — the one page for target authentication: what your target uses → what you
+  pass → what the written config carries → which app types can run it (static credentials with
+  `env:` references, login and OAuth2 recipes that re-authenticate, HMAC/nonce → `--scaffold`, SSO
+  via `--cdp`, TLS/mTLS/proxy, the egress guard, what gets printed).
+- **`scripts/live_auth_matrix.py`** — a release step, like `live_matrix.py`: onboards a real target
+  behind each of ten authentication gates and asserts what `target add` derives (auth block, no
+  secret in the config, refusal with the scaffold hint for signed requests). 10/10 on 2026-09-03.
+
+### Fixed
+
+- **A credential given on the command line can be an `env:` reference, and then never lands in a
+  file.** `--bearer env:TOK`, `--api-key 'X-API-Key:env:KEY'` (header or `:in=query`),
+  `--basic 'user:env:PW'`, `--cookie 'session=env:S'` and `--header 'Name: env:V'` resolve from the
+  environment for the probe and the hard gate, and the written config carries the typed `auth`
+  block with the reference instead of the literal — the runtime resolves it per run, exactly as
+  HAR-derived auth already did. Literals keep working; a credential-shaped header stored in
+  plaintext is now warned about with the `env:` form to use (`probe.build_config` had recorded
+  that list since 1.1.1 and nothing printed it). One referenced credential per target; two are
+  refused rather than one silently dropped.
+
+- **`target add` has the SSRF/metadata guard `adapter build` had**, before the first request
+  leaves the machine, for every source (`--api`, `--ws`, `--url`, `--curl`, `--har`, and the
+  validation step). Loopback and private ranges stay allowed; link-local and cloud-metadata hosts
+  are refused unless `--allow-internal`, which `target add` now takes.
+
+- **Printed configs are redacted.** `adapter build` (human and `--json`) and the browser-adapter
+  `--json` print showed the config with its credentials; the file on disk (0600) is the store,
+  stdout is not. `adapter show --reveal` remains the explicit way to see values.
+
+- **The withheld-credential warning crashed.** `_warn(msg)` takes one argument; the path that
+  reports headers withheld from a config as credential-shaped called it with two.
+
+- **`--cdp`: onboard a target behind Entra / SAML / SSO by attaching to a browser you are already
+  signed into.** `runtime/adapters/browser.py` has supported `cdp_url` all along, but the capture
+  (`--url`) launched its own Chromium, which stopped at the login wall and never saw the widget, so
+  no config could be derived. `target add --url … --cdp` (default `http://127.0.0.1:9222`, from
+  `chrome --remote-debugging-port=9222`) attaches instead, reuses the signed-in context, never closes
+  your browser, and stamps `cdp_url` on the written config so the assessment attaches the same way
+  the capture proved. On all five onboarding commands.
+- **`app create --type api` refuses a config whose auth is a handshake.** `_spec_from_config`
+  borrowed url/headers/body and silently dropped `auth`; an `api`-type app is called by the platform
+  directly and can carry only static headers, so an OAuth2/CSRF target registered that way 401'd on
+  every probe unwarned. Now refused with the fix named — and refused *before* the platform client is
+  built, because a local check on a local file must not need a credential (it used to print "no
+  token" instead of the real problem).
+- `target add --login-url` no longer prints `wrote <config>` twice.
+
+- **`target add` can now onboard a target that is behind a login.** Driven against a matrix of
+  auth-gated agents, 4 of 8 schemes could not be onboarded through the primary command at all, and
+  the cause was three seams that were built and never joined — not missing capability.
+  `runtime/layers/auth.py` has implemented `static`/`oauth2`/`csrf`/`derived_multihop` plus four
+  refresh lifecycles all along, and the bridge re-authenticates before every probe; nothing on
+  `target add` could describe a handshake to it. Measured after: **8 of 8** gated schemes onboard
+  with a real answer (api-key header/query, basic, access-code, token-ttl, OAuth2 client
+  credentials, cookie session, CSRF); HMAC and per-request nonce are refused and routed to
+  `--scaffold`, which is correct — a per-request signature is not static config.
+
+  - **The login flow was orphaned.** `_login_for_token` computed a proper `derived_multihop` block
+    with a `reauth_on_401` lifecycle, and `_apply_login_auth` wrote one onto a config — but each
+    had exactly one caller, on different commands, and neither path ran both. So `adapter build
+    --login-url` shipped a *frozen* `Authorization: Bearer <token>` and no auth block, precisely the
+    failure its own comment says the mechanism exists to prevent; a 60-second token was dead 70
+    seconds later. One `_prepare_target_auth` now runs the exchange for both commands and both
+    write paths attach the recipe. The one-shot token is stripped from the written config: it
+    pinned an expiring credential, shadowed the re-minted one, and put a live secret in a file.
+  - **`target add` lacked the flags its own error recommends.** The 401 hint named `--basic`,
+    `--cookie` and `--login-url`; the parser registered none of them, so following the CLI's
+    printed advice returned `unrecognized arguments`. One shared `_add_target_auth_args` block now
+    feeds `target add`, `onboard`, `adapter build`, `map` and `discover` — the primary command had
+    been strictly *less* capable for auth than the one 1.1.2 demoted. No flag was removed anywhere.
+  - **`--login-body` was JSON-only**, so RFC 6749 `client_credentials` — form-encoded, and the most
+    common enterprise flow — could not be expressed on any command. Shape now decides: a JSON
+    object is JSON, `a=b&c=d` is form-encoded, and the recipe replays with whichever encoding the
+    live exchange actually succeeded with.
+  - **New: `--login-method GET`, `--token-regex`, `--token-header`.** A GET bootstrap that sets a
+    session cookie, or embeds a CSRF token in HTML to be echoed in its own header, is a different
+    shape from a POST login and just as common. Neither could be expressed before.
+  - The auth error now names only flags the printing command accepts, and says plainly that a
+    signed request needs a custom adapter.
+
+### Added
+
 - **CI (workflow pending a token scope — see `docs/CHANGE_CONTROL.md`).** `.github/` contained only `dependabot.yml`. The test suite, the back-compat corpus, the
   golden-output corpus and the command-map check all existed and all ran only when somebody
   remembered. Every bug that shipped this release shipped green, because green meant green on the

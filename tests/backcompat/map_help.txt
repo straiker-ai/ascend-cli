@@ -6,11 +6,12 @@ usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] m
        [--api URL] [--curl FILE] [--spec BASE_URL] [--har HAR] [--header 'Name: value']
        [--bearer TOKEN] [--api-key NAME:VALUE[:in=header|query]] [--basic USER:PASS]
        [--cookie 'k=v; k2=v2'] [--token-file PATH] [--body-field key=value] [--login-url URL]
-       [--login-body JSON] [--token-path DOTPATH] [--prompt-hint PROMPT_HINT] [--insecure]
-       [--ca-bundle PATH] [--client-cert PATH] [--client-key PATH] [--proxy URL]
-       [--allow-internal] [--timeout TIMEOUT] [--prompt PROMPT] [--headless] [--no-headless]
-       [--manual] [--settle SETTLE] [--response-path DOTPATH] [--save-evidence SAVE_EVIDENCE]
-       [--code] [--out OUT]
+       [--login-body JSON|FORM] [--token-path DOTPATH] [--login-method {POST,GET}]
+       [--token-regex RE] [--token-header NAME] [--insecure] [--ca-bundle PATH]
+       [--client-cert PATH] [--client-key PATH] [--proxy URL] [--cdp [ENDPOINT]]
+       [--prompt-hint PROMPT_HINT] [--allow-internal] [--timeout TIMEOUT] [--prompt PROMPT]
+       [--headless] [--no-headless] [--manual] [--settle SETTLE] [--response-path DOTPATH]
+       [--save-evidence SAVE_EVIDENCE] [--code] [--out OUT]
        [evidence]
 
 positional arguments:
@@ -33,30 +34,51 @@ options:
                         (default: None)
   --har HAR             HAR file to classify (default: None)
   --header 'Name: value'
-                        raw header (repeatable), honored by all sources, e.g. 'X-Api-Key: …'
+                        raw header (repeatable), honored by all sources, e.g. 'X-Api-Key: …'. A
+                        value written env:NAME is read from the environment and never stored in
+                        the config (default: None)
+  --bearer TOKEN        Authorization: Bearer <token>; env:NAME keeps the token out of the config
                         (default: None)
-  --bearer TOKEN        Authorization: Bearer <token> (default: None)
   --api-key NAME:VALUE[:in=header|query]
-                        API key, e.g. 'x-api-key:abc' or 'key:abc:in=query' (default: None)
-  --basic USER:PASS     HTTP Basic auth (default: None)
+                        API key, e.g. 'x-api-key:abc', 'key:abc:in=query', or 'x-api-
+                        key:env:MY_KEY' to reference the environment instead of storing the value
+                        (default: None)
+  --basic USER:PASS     HTTP Basic auth; 'user:env:MY_PW' references the password (default: None)
   --cookie 'k=v; k2=v2'
-                        Cookie header for a session-gated target (default: None)
+                        Cookie header for a session-gated target; 'session=env:MY_SESSION'
+                        references the value (default: None)
   --token-file PATH     read a bearer token from this file (default: None)
   --body-field key=value
                         extra JSON body field, repeatable — for agents whose key/tenant lives in
                         the BODY, e.g. --body-field apiKey=abc --body-field workspace=support. Use
                         key:=raw for a non-string literal (true/1/{...}). (default: None)
   --login-url URL       POST here first to exchange creds/code for a token (default: None)
-  --login-body JSON     JSON body for --login-url, e.g. '{"code":"1234"}' (default: None)
+  --login-body JSON|FORM
+                        body for --login-url. JSON ('{"code":"1234"}') or form-encoded
+                        ('grant_type=client_credentials&client_id=…') — OAuth2 is form-encoded.
+                        (default: None)
   --token-path DOTPATH  dot-path to the token in the login response (default: token) (default:
                         token)
-  --prompt-hint PROMPT_HINT
-                        with --curl: the literal prompt text used in that command (default: None)
+  --login-method {POST,GET}
+                        verb for --login-url (default: POST). GET for a bootstrap page that sets a
+                        session cookie or embeds a CSRF token. (default: POST)
+  --token-regex RE      extract the token with a regex (first capture group) instead of --token-
+                        path — for a token embedded in HTML, e.g. 'csrf-token" content="([^"]+)'
+                        (default: None)
+  --token-header NAME   send the extracted token in this header verbatim (e.g. X-CSRF-Token)
+                        instead of as 'Authorization: Bearer <token>' (default: None)
   --insecure            skip TLS verification (self-signed internal targets) (default: False)
   --ca-bundle PATH      custom CA bundle for TLS verification (default: None)
   --client-cert PATH    client certificate (PEM) for mTLS (default: None)
   --client-key PATH     client private key (PEM) for mTLS (default: None)
   --proxy URL           HTTP(S) proxy for the probe/validate calls (default: None)
+  --cdp [ENDPOINT]      with --url: attach to a browser you are ALREADY signed into (start it with
+                        `chrome --remote-debugging-port=9222`) instead of launching one. The only
+                        route into an Entra / SAML / SSO-gated target. Default endpoint
+                        http://127.0.0.1:9222; the written adapter attaches the same way, and your
+                        browser is never closed. (default: None)
+  --prompt-hint PROMPT_HINT
+                        with --curl: the literal prompt text used in that command (default: None)
   --allow-internal      allow link-local/cloud-metadata hosts (169.254/fd00::) — off by default
                         (default: False)
   --timeout TIMEOUT     per-request timeout in seconds (default: 20.0)

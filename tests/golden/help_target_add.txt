@@ -5,12 +5,17 @@ usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] t
        [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE]
        [--api URL | --ws URL | --url URL | --curl FILE | --har HAR | --config NAME|PATH | --module FILE.py]
        [--scaffold FILE.py] [--name NAME] [--app NAME|aapp_id] [--save-as NAME]
-       [--system-prompt SYSTEM_PROMPT] [--controls CONTROLS] [--adapter ADAPTER] [--bearer TOKEN]
-       [--api-key NAME:VALUE[:in=header|query]] [--header 'Name: value'] [--body-field key=value]
-       [--prompt-hint PROMPT_HINT] [--insecure] [--size {small,medium,large}] [--qpm QPM]
-       [--prompt PROMPT] [--settle SETTLE] [--headless] [--manual] [--timeout TIMEOUT] [--dry-run]
-       [--force] [--wait] [--detail] [--interval INTERVAL] [--timeout-assess TIMEOUT_ASSESS]
-       [--assessment-name ASSESSMENT_NAME] [-v] [--run]
+       [--system-prompt SYSTEM_PROMPT] [--controls CONTROLS] [--adapter ADAPTER]
+       [--header 'Name: value'] [--bearer TOKEN] [--api-key NAME:VALUE[:in=header|query]]
+       [--basic USER:PASS] [--cookie 'k=v; k2=v2'] [--token-file PATH] [--body-field key=value]
+       [--login-url URL] [--login-body JSON|FORM] [--token-path DOTPATH]
+       [--login-method {POST,GET}] [--token-regex RE] [--token-header NAME] [--insecure]
+       [--ca-bundle PATH] [--client-cert PATH] [--client-key PATH] [--proxy URL]
+       [--cdp [ENDPOINT]] [--allow-internal] [--prompt-hint PROMPT_HINT]
+       [--size {small,medium,large}] [--qpm QPM] [--prompt PROMPT] [--settle SETTLE] [--headless]
+       [--manual] [--timeout TIMEOUT] [--dry-run] [--force] [--wait] [--detail]
+       [--interval INTERVAL] [--timeout-assess TIMEOUT_ASSESS] [--assessment-name ASSESSMENT_NAME]
+       [-v] [--run]
        [source]
 
 positional arguments:
@@ -54,17 +59,54 @@ options:
                         what the target is, for the assessment context (default: None)
   --controls CONTROLS   comma-separated control ids (validated before the run) (default: None)
   --adapter ADAPTER     override the adapter type (default: from the config) (default: None)
-  --bearer TOKEN        Authorization: Bearer <token> (with --api/--curl) (default: None)
-  --api-key NAME:VALUE[:in=header|query]
-                        API key (with --api) (default: None)
   --header 'Name: value'
-                        raw header (repeatable) (default: None)
+                        raw header (repeatable), honored by all sources, e.g. 'X-Api-Key: …'. A
+                        value written env:NAME is read from the environment and never stored in
+                        the config (default: None)
+  --bearer TOKEN        Authorization: Bearer <token>; env:NAME keeps the token out of the config
+                        (default: None)
+  --api-key NAME:VALUE[:in=header|query]
+                        API key, e.g. 'x-api-key:abc', 'key:abc:in=query', or 'x-api-
+                        key:env:MY_KEY' to reference the environment instead of storing the value
+                        (default: None)
+  --basic USER:PASS     HTTP Basic auth; 'user:env:MY_PW' references the password (default: None)
+  --cookie 'k=v; k2=v2'
+                        Cookie header for a session-gated target; 'session=env:MY_SESSION'
+                        references the value (default: None)
+  --token-file PATH     read a bearer token from this file (default: None)
   --body-field key=value
-                        extra JSON body field (repeatable) — for a key/tenant that lives in the
-                        body (default: None)
+                        extra JSON body field, repeatable — for agents whose key/tenant lives in
+                        the BODY, e.g. --body-field apiKey=abc --body-field workspace=support. Use
+                        key:=raw for a non-string literal (true/1/{...}). (default: None)
+  --login-url URL       POST here first to exchange creds/code for a token (default: None)
+  --login-body JSON|FORM
+                        body for --login-url. JSON ('{"code":"1234"}') or form-encoded
+                        ('grant_type=client_credentials&client_id=…') — OAuth2 is form-encoded.
+                        (default: None)
+  --token-path DOTPATH  dot-path to the token in the login response (default: token) (default:
+                        token)
+  --login-method {POST,GET}
+                        verb for --login-url (default: POST). GET for a bootstrap page that sets a
+                        session cookie or embeds a CSRF token. (default: POST)
+  --token-regex RE      extract the token with a regex (first capture group) instead of --token-
+                        path — for a token embedded in HTML, e.g. 'csrf-token" content="([^"]+)'
+                        (default: None)
+  --token-header NAME   send the extracted token in this header verbatim (e.g. X-CSRF-Token)
+                        instead of as 'Authorization: Bearer <token>' (default: None)
+  --insecure            skip TLS verification (self-signed internal targets) (default: False)
+  --ca-bundle PATH      custom CA bundle for TLS verification (default: None)
+  --client-cert PATH    client certificate (PEM) for mTLS (default: None)
+  --client-key PATH     client private key (PEM) for mTLS (default: None)
+  --proxy URL           HTTP(S) proxy for the probe/validate calls (default: None)
+  --cdp [ENDPOINT]      with --url: attach to a browser you are ALREADY signed into (start it with
+                        `chrome --remote-debugging-port=9222`) instead of launching one. The only
+                        route into an Entra / SAML / SSO-gated target. Default endpoint
+                        http://127.0.0.1:9222; the written adapter attaches the same way, and your
+                        browser is never closed. (default: None)
+  --allow-internal      allow link-local/cloud-metadata hosts (169.254/fd00::) — off by default
+                        (default: False)
   --prompt-hint PROMPT_HINT
                         with --curl: the literal prompt text used in that command (default: None)
-  --insecure            skip TLS verification (self-signed internal) (default: False)
   --size {small,medium,large}
                         assessment size (default: small)
   --qpm QPM             queries per minute against the target (default: 20)

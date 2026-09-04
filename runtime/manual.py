@@ -37,11 +37,17 @@ SENSITIVE_FIELDS = {
 }
 
 
+# Compared after the same normalisation the key gets: `X-API-Key` -> `x_api_key`. The header set is
+# written with dashes, so comparing the normalised key against it matched only the two names with
+# no dash (authorization, cookie) — x-api-key, x-auth-token, set-cookie and x-csrf-token were
+# printed in clear by every command that promised masking.
+_SENSITIVE_NORMALISED = {s.lower().replace("-", "_") for s in SENSITIVE} | set(SENSITIVE_FIELDS)
+
+
 def _is_sensitive_key(key: Any) -> bool:
     if not isinstance(key, str):
         return False
-    k = key.lower().replace("-", "_")
-    return k in SENSITIVE or k in SENSITIVE_FIELDS
+    return key.lower().replace("-", "_") in _SENSITIVE_NORMALISED
 
 
 def redact_url(value: Any) -> Any:

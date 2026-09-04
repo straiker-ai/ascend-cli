@@ -55,7 +55,11 @@ class TargetCaller:
         # and a 401 challenge, so it is wired in here — at the one seam every adapter goes
         # through — rather than each adapter growing its own copy of the same logic.
         self._lifecycle = self._build_lifecycle()
-        self._lifecycle.mark_refreshed()          # merge_auth() above just materialized
+        # `token=` was never passed here, so AuthLifecycle._token stayed None for the whole run
+        # and the JWT-`exp` branch of refresh_on_ttl -- the accurate one -- was dead code in
+        # production. Every short-lived JWT fell back to the wall-clock ttl_s guess and refreshed
+        # late. The provider has always recorded the token; it just never reached the lifecycle.
+        self._lifecycle.mark_refreshed(token=self.config.get("_auth_token"))
 
     def _build_lifecycle(self):
         from layers.auth import AuthLifecycle
@@ -76,7 +80,7 @@ class TargetCaller:
 
     def _reauth(self, why: str) -> None:
         self.config = merge_auth(copy.deepcopy(self._raw))
-        self._lifecycle.mark_refreshed()
+        self._lifecycle.mark_refreshed(token=self.config.get("_auth_token"))
         logger.info("auth: re-acquired credentials (%s)", why)
 
     def _maybe_refresh_auth(self) -> None:
@@ -115,6 +119,15 @@ class TargetCaller:
 
     def handler(self, message: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
         self._maybe_refresh_auth()
+        # `merge_auth` never raises: an auth failure -- a token endpoint down, an env ref unset, a
+        # re-mint that 401'd -- is recorded as `_auth_error` on the merged config, and the config
+        # is otherwise returned UNAUTHENTICATED. Only `adapter validate` ever read that field. The
+        # live relay did not, so a credential that died mid-run sent every remaining probe with no
+        # credential at all; the target refused them, and refusals are not findings, so the run
+        # finished looking clean having measured nothing. Refuse the probe with the reason instead.
+        err = self.config.get("_auth_error") if isinstance(self.config, dict) else None
+        if err:
+            return 401, {"response": "", "_error": f"auth: {err}"}
         payload = message.get("payload", {})
         body = payload.get("body")
         try:
@@ -128,6 +141,9 @@ class TargetCaller:
         # clean while measuring nothing. Re-acquire and retry the probe exactly once.
         if self._lifecycle.should_reauth(status):
             self._reauth(f"HTTP {status}")
+            err = self.config.get("_auth_error") if isinstance(self.config, dict) else None
+            if err:                     # the re-mint itself failed: say so, do not retry naked
+                return 401, {"response": "", "_error": f"auth (re-acquire failed): {err}"}
             status, out = self._send_once(prompt, conv)
         return status, out
 

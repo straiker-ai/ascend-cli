@@ -30,16 +30,31 @@ TENANT_FILE = ASCEND_HOME / "tenant.json"
 class TenantMismatch(Exception):
     """Raised when the supplied PAT belongs to a different tenant than the pinned one."""
 
-    def __init__(self, pinned_label: str, incoming_label: str):
+    def __init__(self, pinned_label: str, incoming_label: str,
+                 pinned_fp: str = "", incoming_fp: str = ""):
         self.pinned_label = pinned_label
         self.incoming_label = incoming_label
-        super().__init__(
-            f"this CLI is locked to tenant {pinned_label!r}, but the supplied credential belongs to "
-            f"{incoming_label!r}.\n"
-            f"  Working two tenants from one CLI is how customer data gets crossed, so it is refused.\n"
-            f"  To move:  ascend tenant switch --confirm   "
-            f"(clears stored keys; requires no relays running)\n"
-            f"  To check: ascend tenant show")
+        self.pinned_fp = pinned_fp
+        self.incoming_fp = incoming_fp
+        # The label is derived from the PAT's email domain and role, so two different tenants
+        # administered from the same domain get the SAME label -- and this message then read
+        # "locked to 'straiker.ai (admin)', but the credential belongs to 'straiker.ai (admin)'":
+        # self-contradictory, and it told the operator nothing. Seen live between the demo tenant
+        # and the Discover tenant. The fingerprint is what the check actually compares, so it is
+        # what the message must show.
+        def tag(label, fp):
+            return f"{label!r} (id {fp[:12]}...)" if fp else repr(label)
+        msg = (f"this CLI is locked to tenant {tag(pinned_label, pinned_fp)}, but the supplied "
+               f"credential belongs to {tag(incoming_label, incoming_fp)}.\n")
+        if pinned_label == incoming_label:
+            msg += ("  The names match but the tenant ids do not: this is a different tenant that "
+                    "happens to share a name.\n")
+        msg += ("  Working two tenants from one CLI is how customer data gets crossed, so it is "
+                "refused.\n"
+                "  To move:  ascend tenant switch --confirm   "
+                "(clears stored keys; requires no relays running)\n"
+                "  To check: ascend tenant show")
+        super().__init__(msg)
 
 
 def _b64url_json(segment: str) -> Dict[str, Any]:
@@ -117,7 +132,7 @@ def check(jwt: str) -> Dict[str, Any]:
         pin(fp, label)
         return {"status": "pinned", "fingerprint": fp, "label": label}
     if cur["fingerprint"] != fp:
-        raise TenantMismatch(cur.get("label", "unknown"), label)
+        raise TenantMismatch(cur.get("label", "unknown"), label, cur["fingerprint"], fp)
     return {"status": "ok", "fingerprint": fp, "label": cur.get("label", label)}
 
 

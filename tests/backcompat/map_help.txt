@@ -34,14 +34,19 @@ options:
                         (default: None)
   --har HAR             HAR file to classify (default: None)
   --header 'Name: value'
-                        raw header (repeatable), honored by all sources, e.g. 'X-Api-Key: …'
+                        raw header (repeatable), honored by all sources, e.g. 'X-Api-Key: …'. A
+                        value written env:NAME is read from the environment and never stored in
+                        the config (default: None)
+  --bearer TOKEN        Authorization: Bearer <token>; env:NAME keeps the token out of the config
                         (default: None)
-  --bearer TOKEN        Authorization: Bearer <token> (default: None)
   --api-key NAME:VALUE[:in=header|query]
-                        API key, e.g. 'x-api-key:abc' or 'key:abc:in=query' (default: None)
-  --basic USER:PASS     HTTP Basic auth (default: None)
+                        API key, e.g. 'x-api-key:abc', 'key:abc:in=query', or 'x-api-
+                        key:env:MY_KEY' to reference the environment instead of storing the value
+                        (default: None)
+  --basic USER:PASS     HTTP Basic auth; 'user:env:MY_PW' references the password (default: None)
   --cookie 'k=v; k2=v2'
-                        Cookie header for a session-gated target (default: None)
+                        Cookie header for a session-gated target; 'session=env:MY_SESSION'
+                        references the value (default: None)
   --token-file PATH     read a bearer token from this file (default: None)
   --body-field key=value
                         extra JSON body field, repeatable — for agents whose key/tenant lives in

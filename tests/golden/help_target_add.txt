@@ -11,10 +11,11 @@ usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] t
        [--login-url URL] [--login-body JSON|FORM] [--token-path DOTPATH]
        [--login-method {POST,GET}] [--token-regex RE] [--token-header NAME] [--insecure]
        [--ca-bundle PATH] [--client-cert PATH] [--client-key PATH] [--proxy URL]
-       [--cdp [ENDPOINT]] [--prompt-hint PROMPT_HINT] [--size {small,medium,large}] [--qpm QPM]
-       [--prompt PROMPT] [--settle SETTLE] [--headless] [--manual] [--timeout TIMEOUT] [--dry-run]
-       [--force] [--wait] [--detail] [--interval INTERVAL] [--timeout-assess TIMEOUT_ASSESS]
-       [--assessment-name ASSESSMENT_NAME] [-v] [--run]
+       [--cdp [ENDPOINT]] [--allow-internal] [--prompt-hint PROMPT_HINT]
+       [--size {small,medium,large}] [--qpm QPM] [--prompt PROMPT] [--settle SETTLE] [--headless]
+       [--manual] [--timeout TIMEOUT] [--dry-run] [--force] [--wait] [--detail]
+       [--interval INTERVAL] [--timeout-assess TIMEOUT_ASSESS] [--assessment-name ASSESSMENT_NAME]
+       [-v] [--run]
        [source]
 
 positional arguments:
@@ -59,14 +60,19 @@ options:
   --controls CONTROLS   comma-separated control ids (validated before the run) (default: None)
   --adapter ADAPTER     override the adapter type (default: from the config) (default: None)
   --header 'Name: value'
-                        raw header (repeatable), honored by all sources, e.g. 'X-Api-Key: …'
+                        raw header (repeatable), honored by all sources, e.g. 'X-Api-Key: …'. A
+                        value written env:NAME is read from the environment and never stored in
+                        the config (default: None)
+  --bearer TOKEN        Authorization: Bearer <token>; env:NAME keeps the token out of the config
                         (default: None)
-  --bearer TOKEN        Authorization: Bearer <token> (default: None)
   --api-key NAME:VALUE[:in=header|query]
-                        API key, e.g. 'x-api-key:abc' or 'key:abc:in=query' (default: None)
-  --basic USER:PASS     HTTP Basic auth (default: None)
+                        API key, e.g. 'x-api-key:abc', 'key:abc:in=query', or 'x-api-
+                        key:env:MY_KEY' to reference the environment instead of storing the value
+                        (default: None)
+  --basic USER:PASS     HTTP Basic auth; 'user:env:MY_PW' references the password (default: None)
   --cookie 'k=v; k2=v2'
-                        Cookie header for a session-gated target (default: None)
+                        Cookie header for a session-gated target; 'session=env:MY_SESSION'
+                        references the value (default: None)
   --token-file PATH     read a bearer token from this file (default: None)
   --body-field key=value
                         extra JSON body field, repeatable — for agents whose key/tenant lives in
@@ -97,6 +103,8 @@ options:
                         route into an Entra / SAML / SSO-gated target. Default endpoint
                         http://127.0.0.1:9222; the written adapter attaches the same way, and your
                         browser is never closed. (default: None)
+  --allow-internal      allow link-local/cloud-metadata hosts (169.254/fd00::) — off by default
+                        (default: False)
   --prompt-hint PROMPT_HINT
                         with --curl: the literal prompt text used in that command (default: None)
   --size {small,medium,large}

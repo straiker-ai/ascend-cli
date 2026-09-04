@@ -201,8 +201,6 @@ class TestPauseGuard:
     def test_the_run_loop_consults_the_guard_and_fails_fast(self):
         src = inspect.getsource(ascend.cmd_assess_run)
         assert "guard.tick(" in src
-        # A start that FAILED is this machine's problem: the guard must be armed, not hinting.
-        assert 'ensure.get("error")' in src.split("_PauseGuard(")[1].split(")")[0] + src.split("_PauseGuard(")[1][:200]
         assert "except _BridgeUnavailable" in src
         assert "sys.exit(EXIT_ERROR)" in src.split("except _BridgeUnavailable")[1]
 

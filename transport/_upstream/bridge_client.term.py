@@ -279,7 +279,7 @@ RESULT_URL = f"{BASE_URL}/v2/result"
 
 # Leased one at a time, not in batches: the tmux session behind TmuxAgentSession can only work
 # one turn at a time (see its docstring), so anything leased beyond what's actively being
-# processed just sits queued - and each queued probe's clock (probe_shadow's
+# processed just sits queued - and each queued probe's clock (the lease service's
 # BRIDGE_RESPONSE_TIMEOUT, 120s by default) keeps running the whole time it waits. Leasing 1
 # at a time means a probe is never claimed before there's an actual turn in flight for it.
 MAX_PROBES_PER_LEASE = 1

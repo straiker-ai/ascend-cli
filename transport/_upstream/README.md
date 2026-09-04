@@ -1,6 +1,6 @@
 # Bridge pull-mode protocol — build-your-own-client guide
 
-For customers who can't run Straiker-provided binaries/containers (`iris-bridge`, its Docker
+For customers who can't run Straiker-provided binaries/containers (the Ascend bridge, its Docker
 image) but can write and run their own code inside their private network. This document
 describes the wire protocol directly, independent of any Straiker-provided client
 implementation. A companion machine-readable spec is at `openapi.yaml` in this same folder.
@@ -9,8 +9,8 @@ Ready-to-adapt reference implementations are included:
 - `bridge_client.py` — stdlib-only Python, run as a standalone process.
 - `bridge_client.browser.js` — paste directly into a browser DevTools console on any page in
   your private network (e.g. your own target app's page); no install at all. Requires
-  `probe_shadow`'s `/v2/lease`/`/v2/result` to allow cross-origin browser requests (see
-  `bridge_v2_cors` in `iris/probe_shadow/app.py`) — already live, nothing extra to set up.
+  the lease service's `/v2/lease`/`/v2/result` to allow cross-origin browser requests (see
+  server-side) — already live, nothing extra to set up.
 - `bridge_client.term.py` — for a target that's only reachable as an interactive CLI program
   (e.g. a terminal-based coding agent) rather than over HTTP. Stdlib-only Python; requires the
   `tmux` binary. You start your agent yourself inside a named tmux session (so any one-time
@@ -43,7 +43,7 @@ implement from scratch, and it's what we recommend for a self-written client.
 ## Authentication
 
 Every call carries `Authorization: Bearer <thin_api_key>` — the same per-app token used by
-every bridge client today (including `iris-bridge` itself). Your `app_id` is derived from this
+every bridge client today (including the Straiker bridge itself). Your `app_id` is derived from this
 token server-side; it is never read from the request body, so there's no way to
 accidentally (or maliciously) lease/answer probes for a different app. Straiker provisions
 this token per application — request it for whichever app you're onboarding.

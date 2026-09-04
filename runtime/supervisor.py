@@ -267,21 +267,6 @@ def stop(app_id: str, *, grace_s: float = 8.0) -> Dict[str, Any]:
     return {"app_id": app_id, "stopped": True, "pid": pid, "how": "SIGKILL (was draining a lease)"}
 
 
-def forget(app_id: str) -> bool:
-    """Drop every state file for one app's relay — after the app itself was deleted. Refuses while
-    the relay is alive: forgetting a running relay would orphan it. Returns whether anything went."""
-    if is_running(app_id):
-        return False
-    gone = False
-    for k, path in paths_for(app_id).items():
-        try:
-            path.unlink()
-            gone = True
-        except FileNotFoundError:
-            pass
-    return gone
-
-
 def prune(max_age_s: float = STALE_REAP_S) -> List[str]:
     """Drop state for relays that are dead AND long past their last heartbeat.
 

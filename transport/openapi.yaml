@@ -4,7 +4,7 @@ info:
   version: "2.0"
   description: >
     Machine-readable companion to README.md in this same folder. For customers
-    implementing their own bridge client (rather than running the iris-bridge binary/container)
+    implementing their own bridge client (rather than running the Ascend bridge binary/container)
     to relay assessment probes to a private-network target application. Long-poll /v2/lease
     for work, call your own target application, submit the result via /v2/result, repeat.
 servers:

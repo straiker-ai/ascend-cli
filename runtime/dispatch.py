@@ -6,9 +6,9 @@ Why this layer exists
 ---------------------
 The v2 bridge protocol hands us `payload.body` (the already-rendered request the
 assessment wants sent to the target) and expects us to return the target's real
-response. Iris puts ONLY the prompt on the wire — there is no conversation id
-(see iris `common/models/probe.py`: Probe has `prompt`, not `conversation_id`).
-Per-target session/conversation logic that Iris runs server-side via plugins
+response. The platform puts ONLY the prompt on the wire — a probe carries the
+rendered prompt and no conversation id.
+Per-target session/conversation logic that the platform runs server-side
 (`prober/plugins/*_chat.py`) for direct apps therefore has to live HERE for a
 bridge/thin app.
 
@@ -16,7 +16,7 @@ Multi-turn correctness model
 ----------------------------
 Each adapter instance can hold target-side session state (e.g. SessionAPIAdapter
 mints a conversation id on the first call and reuses it). We keep ONE persistent
-adapter instance per conversation and route successive turns to it. Because Iris
+adapter instance per conversation and route successive turns to it. Because the platform
 gives us no correlation id, the default conversation policy is "sequential": the
 app runs at concurrency 1 so only one conversation is ever in flight, and the
 persistent instance threads the turns — this is exactly why the legacy Go bridge
@@ -93,15 +93,8 @@ def merge_auth(config: Dict[str, Any], *, timeout_s: float = 20.0,
         return config
     try:
         from layers.auth import AuthProvider  # lazy: only when a config actually needs auth
-        provider = AuthProvider(auth_block)
-        material = provider.materialize(timeout_s=timeout_s, verify_tls=verify_tls)
-        merged = material.merge_into_config(config)
-        # The token the provider just obtained, for the lifecycle's JWT-`exp` check. This merged
-        # dict lives only inside TargetCaller for the run and is never written to disk; the
-        # underscore marks it as runtime state, like `_auth_error` below.
-        if provider.token:
-            merged["_auth_token"] = provider.token
-        return merged
+        material = AuthProvider(auth_block).materialize(timeout_s=timeout_s, verify_tls=verify_tls)
+        return material.merge_into_config(config)
     except Exception as exc:  # noqa: BLE001
         merged = dict(config)
         merged["_auth_error"] = str(exc)

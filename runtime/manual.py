@@ -8,7 +8,7 @@ validate` answers "does it work at all" (a gate); this answers "what does it say
 Evidence format — deliberately the SAME file format the relay writes with --capture:
 newline-delimited JSON envelopes, 0600, sensitive headers redacted. A manual turn is
 `kind: "turn"` rather than the relay's `probe`/`result` pair, so anything that reads a
-transcript keeps working and you can analyse human-driven and Iris-driven traffic with
+transcript keeps working and you can analyse human-driven and platform-driven traffic with
 one set of tools. Nothing here invents a second evidence schema.
 """
 from __future__ import annotations

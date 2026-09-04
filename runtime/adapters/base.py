@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
 
 # ONE number governs how long a probe may take, because there is only one real fact here: the
-# platform gives a bridge a bounded window to return each probe result (iris probe_shadow's
+# platform gives a bridge a bounded window to return each probe result (the lease service's
 # BRIDGE_RESPONSE_TIMEOUT). Two things make it sharper than it looks:
 #   * the clock starts when the probe is QUEUED, not when the bridge starts calling the target, so a
 #     probe can spend much of its budget waiting to be leased;

@@ -61,13 +61,13 @@ MAX_PROBES_PER_LEASE = 10
 WAIT_MS = 25000  # server-side long-poll hold; clamped server-side to [0, 55000]
 HTTP_TIMEOUT_SECONDS = (WAIT_MS / 1000) + 10  # comfortably above the long-poll hold
 
-# iris dispatches up to probe_dispatch_concurrency (20 by default, a pod-wide multi-tenancy
+# the platform dispatches up to probe_dispatch_concurrency (20 by default, a multi-tenancy
 # fairness knob, nothing to do with bridge specifically) probes at once. Processing a leased
 # batch one at a time here means the 15th-or-so queued probe can sit waiting long enough to
-# exceed probe_shadow's BRIDGE_RESPONSE_TIMEOUT (120s) purely from queueing delay - which
+# exceed the lease service's BRIDGE_RESPONSE_TIMEOUT (120s) purely from queueing delay - which
 # surfaces as a synthetic 504 indistinguishable from a real target failure, and can trip
 # escalate_target_health's consecutive-failure streak even though the target is fine. This
-# cap matches iris-bridge's own Go client's default maxWorkers.
+# cap matches the Straiker bridge's own Go client default maxWorkers.
 MAX_WORKERS = 10
 
 

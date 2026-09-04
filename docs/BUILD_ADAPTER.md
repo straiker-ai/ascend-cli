@@ -1,6 +1,6 @@
 # Building an adapter for a real target
 
-**Iris → Bridge → Adapter → App.** The bridge is generic. The **adapter** knows how to talk to one
+**Ascend → bridge → adapter → target.** The bridge is generic. The **adapter** knows how to talk to one
 specific app, and **every app gets its own**. The CLI ships built-in adapters for the common request
 patterns. An adapter can also *be code*: a small Python module, generated for exactly one app, that
 the bridge runs. A code adapter handles bespoke complexity that no fixed set of built-ins covers.

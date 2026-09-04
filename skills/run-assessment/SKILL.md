@@ -20,10 +20,11 @@ monitor, and read results.
 ## Preconditions
 - The target's adapter config is **validated** (see build-adapter) and a thin app
   exists (`ascend app list` shows it; resolve a name with `ascend app resolve`).
-- Nothing to start by hand. `assess run` starts the bridge for a bridge-type app before the
-  first probe is scheduled, watches it for the whole run, and stops it when the run ends.
-  `ascend bridge ls` shows it serving. Hand-start one only to debug an adapter
-  (`ascend bridge start --app <app> --foreground`).
+- The bridge is running for this app so leased probes get serviced:
+  ```
+  STRAIKER_BRIDGE_API_KEY=tc-... ascend runtime start --adapter <type> --config <config> --qpm <cap>
+  ```
+  Leave it running in its own shell for the whole assessment.
 
 ## Workflow
 
@@ -54,19 +55,9 @@ ascend --json assess run --app <app_or_name> --name "<run label>" \
   --controls <validated,ids> --interval 20 --timeout 7200
 ```
 `assess run` performs the whole lifecycle correctly (create → pause → resume →
-poll) and blocks until terminal, printing tick progress to stderr; it exits non-zero
-if the run could not be followed to the end, so a green exit means a finished run.
-While it waits it also keeps the bridge honest: a relay that stops answering is
-replaced, a run the platform paused during that outage is resumed once the relay is
-back, and a run left paused with no relay startable ends the wait with exit 1 and the
-two commands that continue it. `--app` is repeatable — a fleet waits the same way and
-ends with one summary table. For a long run you want to monitor separately, add
-`--no-wait` — it returns after resume with the assessment id, and you drive steps 4–5
-yourself.
-
-A control id that does not exist is refused (exit 3) rather than dropped: a run
-narrowed silently scores clean on less than you asked for. `--force` applies the ids
-as given.
+poll) and blocks until terminal, printing tick progress to stderr. For a long run
+you want to monitor separately, add `--no-wait` — it returns after resume with the
+assessment id, and you drive steps 4–5 yourself.
 
 ### 4. Monitor
 If you launched with `--no-wait` (or want a second view), poll status:
@@ -108,12 +99,8 @@ the platform reacted to. Diagnose in this order:
 2. If `ANS = 0`, fix the adapter (timeout / auth). Do **not** restart the bridge.
 3. Then `ascend assess resume --app <app> --assessment <id>`.
 
-When `assess run` is the one following the run it does this for you: it resumes a run
-the platform paused during a relay outage it repaired, and it exits 1 naming the cause
-when nothing could be repaired. The steps above are for a run you follow by hand.
-
 A relay is bound to the assessment it was started for and stays up for that whole run,
-including while it is paused. A relay started by hand (`ascend bridge start`) stays up until stopped.
+including while it is paused. A standalone `ascend runtime start` stays up until stopped.
 Never run two relays for one app — they split that app's probes between them.
 
 Keep the host awake for long runs; a sleeping Mac drops the connection.

@@ -1578,7 +1578,79 @@ def _guess_response_path(resp_json: Any, reply_text: Optional[str] = None) -> st
     `return` — the first attempt patched only the last branch and the onboarding flow, which
     reaches an earlier one, still derived `content.1.text` against a live target.
     """
-    return _generalize_block_index(resp_json, _guess_response_path_raw(resp_json, reply_text))
+    return _generalize_block_index(
+        resp_json, _prefer_last_turn(resp_json, _guess_response_path_raw(resp_json, reply_text)))
+
+
+_ASSISTANT_ROLES = {"assistant", "bot", "ai", "model", "agent", "system_response"}
+
+
+def _role_of(item):
+    """The role on a list item, or on its single nested message object.
+
+    Both spellings are everywhere: `{"role": …, "content": …}` (a transcript) and
+    `{"message": {"role": …, "content": …}}` (OpenAI-style choices). Reading only the top level
+    made a list of alternative COMPLETIONS look like blocks of one message, and the block rule
+    then concatenated two answers to the same question — which its own docstring says it must not
+    do to `choices.0.message.content`.
+    """
+    if not isinstance(item, dict):
+        return None
+    r = item.get("role")
+    if isinstance(r, str):
+        return r.lower()
+    nested = [v for v in item.values() if isinstance(v, dict) and isinstance(v.get("role"), str)]
+    return nested[0]["role"].lower() if len(nested) == 1 else None
+
+
+def _is_turn_list(parent):
+    """True when every element is a role-tagged turn or alternative — never blocks of one message."""
+    return (isinstance(parent, list) and len(parent) > 1
+            and all(_role_of(x) is not None for x in parent))
+
+
+def _is_transcript(parent):
+    """A turn list with MIXED roles: a real conversation, so the answer is the last agent turn.
+    All-assistant means alternative completions, where the FIRST is the answer and the index the
+    deriver already chose is right."""
+    roles = {_role_of(x) for x in parent} if _is_turn_list(parent) else set()
+    return bool(roles - _ASSISTANT_ROLES) and bool(roles & _ASSISTANT_ROLES)
+
+
+def _prefer_last_turn(resp_json, path):
+    """Point a transcript path at the LAST assistant turn instead of whichever one was longest.
+
+    A target that returns the whole conversation — a gateway envelope, a GraphQL mutation that
+    replies with `messages` — carries the probe's own prompt as turn 0 and the answer last. Every
+    rule above selects one string by length or by key name, so on such a body the deriver could
+    land on the ECHO of the prompt: the run then scores the attacker's own text as the agent's
+    reply, which is a finding-shaped result from nothing at all. The probe's echo check catches
+    that for the whole body, not for one path inside it.
+
+    Only a list of ROLE-TAGGED dicts is touched, and only to move the index within it, so a
+    `choices.0.message.content` (alternative completions, not a transcript) is left alone.
+    """
+    if not isinstance(path, str) or "." not in path:
+        return path
+    parts = path.split(".")
+    for i, seg in enumerate(parts):
+        if not (seg.isdigit() or (seg.startswith("-") and seg[1:].isdigit())):
+            continue
+        parent = _dot(resp_json, ".".join(parts[:i])) if i else resp_json
+        if not _is_transcript(parent):
+            continue
+        leaf = ".".join(parts[i + 1:])
+        last = None
+        for j, item in enumerate(parent):
+            if _role_of(item) not in _ASSISTANT_ROLES:
+                continue
+            val = _dot(item, leaf) if leaf else item
+            if isinstance(val, str) and val.strip():
+                last = j
+        if last is None or str(last) == seg:
+            return path
+        return ".".join(parts[:i] + [str(last)] + parts[i + 1:])
+    return path
 
 
 def _guess_response_path_raw(resp_json: Any, reply_text: Optional[str] = None) -> str:
@@ -1645,6 +1717,14 @@ def _generalize_block_index(resp_json: Any, path: str) -> str:
             continue
         parent = _dot(resp_json, ".".join(parts[:i])) if i else resp_json
         if not isinstance(parent, list) or len(parent) < 2:
+            continue
+        # A ROLE-TAGGED list is a transcript or a set of alternatives, not blocks of one message.
+        # Concatenating it glues the probe's own echoed prompt onto the agent's reply, so every
+        # probe is scored against its own text plus the answer. Measured against a GraphQL target
+        # that returns the whole conversation: the wildcard produced
+        # "{'message': 'Say pong.'}Pong! How can I help…". `_prefer_last_turn` has already pointed
+        # the index at the last assistant turn; leave that index alone.
+        if _is_turn_list(parent):
             continue
         suffix = ".".join(parts[i + 1:])
         vals = [(_dot(item, suffix) if suffix else item) for item in parent]

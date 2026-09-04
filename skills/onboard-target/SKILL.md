@@ -101,19 +101,19 @@ ascend --json controls validate <id1,id2,...>
 Heed warnings: a selection that generates **zero probes** is a no-op. Drop
 deprecated ids unless you have a reason.
 
-### 3. Register the app
-Registration is part of `target add`: the validated config, the application record and the
-stored bridge key are written together, under one name.
+### 3. Register a thin app (get the tc key)
 ```
-ascend target add <url|curl|har> --save-as mybot --name "<display name>" \
-  --controls <validated,ids> --qpm <roe_cap>
-ascend target show "<display name>"        # app id, adapter, endpoint, masked key
+ascend app create --type bridge --name "<display name>" \
+  --system-prompt "<optional description>" \
+  --controls <validated,ids> --size small --qpm <roe_cap>
 ```
-The bridge key (`tc-...`) is stored for you (`ascend keys list`); `assess run` resolves it
-from the store, so you never handle it by hand. A name that already exists in the Console
-is **refused** — add `--app "<display name>"` to re-onboard that app (it keeps its key and
-history) or pick another `--name`. To register an app that already exists in the Console
-against a new config: `ascend target add <source> --app '<app name or aapp_id>'`.
+This prints the `tc_key` (`thin_api_key`). The CLI stores it for you (`ascend keys list`),
+and `ascend runtime start --app <id>` resolves it from that store, so you rarely need to
+handle it by hand. To use it directly:
+```
+export STRAIKER_BRIDGE_API_KEY=tc-...
+```
+Note the returned `app_id` (`aapp_...`).
 
 > The key is **not** write-once, despite older guidance saying so: the platform returns
 > `thin_api_key` on `GET /ascend/applications/{id}` and in the app list. So losing the
@@ -131,17 +131,21 @@ Two things that bite here:
 - **The response is routinely dropped *after* the app is created** ("Response ended
   prematurely"). The CLI re-reads the app by name, reports it as recovered rather than
   failing, and reads the bridge key back off the app — so nothing is lost. Do **not** retry
-  blindly on a create error: check `ascend target list` first. A retry that would create a
-  second app with the same name is refused by the CLI, because every later name-based
-  command would become ambiguous.
+  blindly on a create error: check `ascend app list` first, or you will accumulate duplicate
+  apps and every later name-based command becomes ambiguous.
 
 ### 4. Live probe gate — prove one round-trip
-`target add` already proved the config against the live endpoint before it registered
-anything. Re-prove it right before you spend an assessment, and keep the evidence:
+Start the pull-mode bridge against the validated config at a **trivial rate** and
+confirm exactly one probe relays to the target and returns its real answer:
 ```
-ascend target check "<display name>"                              # the hard gate, timed
-ascend chat "<display name>" --prompt "hello" --out ./captures/onboard_probe.jsonl
-tail -n 2 ./captures/onboard_probe.jsonl                          # redacted, 0600
+STRAIKER_BRIDGE_API_KEY=tc-... \
+  ascend runtime start --adapter <type> --config <config> \
+  --qpm 2 --max-workers 1 --capture ./captures/onboard_probe.jsonl
+```
+Watch the log for a leased probe → target call → result. Stop it (Ctrl-C) after
+one clean round-trip. Inspect the capture (it is redacted + 0600):
+```
+tail -n 2 ./captures/onboard_probe.jsonl
 ```
 The relayed result must be the target's genuine answer — not an auth error, not an
 empty body, not a transport parse failure. If it is wrong, go back to

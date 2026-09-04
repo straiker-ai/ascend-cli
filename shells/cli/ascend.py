@@ -799,6 +799,7 @@ def _retire_app(c, app_id, *, keep_key=False):
     AscendAPIError when the platform refuses the delete; the key is untouched then. One helper for
     `app delete`, `target rm` and `keys rm --delete-app`, so the three cannot drift apart again.
     """
+    live = _live_runs(c, app_id)
     stopped = None
     try:                                   # a live bridge for a deleted app is pointless
         import supervisor as S
@@ -807,6 +808,11 @@ def _retire_app(c, app_id, *, keep_key=False):
     except Exception:
         stopped = None
     res = c.delete_app(app_id)
+    try:                                   # a dead relay row for an app that no longer exists is noise
+        import supervisor as S
+        S.forget(app_id)
+    except Exception:
+        pass
     key_removed = False
     if not keep_key:
         try:
@@ -815,7 +821,20 @@ def _retire_app(c, app_id, *, keep_key=False):
         except Exception:
             key_removed = False
     return {"app_id": app_id, "api_response": res, "bridge_stopped": bool(stopped),
-            "key_removed": key_removed}
+            "key_removed": key_removed, "live_runs_cancelled": live}
+
+
+def _live_runs(c, app_id):
+    """How many of this app's assessments are running or paused right now (0 when unknowable)."""
+    try:
+        return sum(1 for x in _assessments_for(c, app_id)
+                   if str(x.get("status", "")).lower() in RUNNING_STATES)
+    except Exception:
+        return 0
+
+
+def _cancel_note(n):
+    return f" {n} assessment(s) still running will be cancelled." if n else ""
 
 
 def cmd_app_update(args):
@@ -921,13 +940,16 @@ def cmd_app_delete(args):
         name = (c.get_app(app_id) or {}).get("name")
     except Exception:
         pass
-    _confirm_destroy(args, f"delete app {name or args.app!r} ({app_id}) and every assessment under it?")
+    _confirm_destroy(args, f"delete app {name or args.app!r} ({app_id}) and every assessment under it?"
+                     + _cancel_note(_live_runs(c, app_id)))
     _say(args, f"Deleting {args.app}...")
     r = _retire_app(c, app_id, keep_key=args.keep_key)
     payload = {"deleted": True, "app_id": app_id, "app_name": name,
                "key_removed": r["key_removed"], "bridge_stopped": r["bridge_stopped"],
                "api_response": r["api_response"]}
     human = f"deleted {name or app_id}"
+    if r.get("live_runs_cancelled"):
+        human += f"\n  cancelled {r['live_runs_cancelled']} assessment(s) that were still running"
     if r["bridge_stopped"]:
         human += "\n  stopped its bridge"
     if r["key_removed"]:
@@ -1084,9 +1106,10 @@ def _assess_run_many(args, c, refs, scope_ids=None):
     started = [r for r in out if r.get("assessment_id")]
     unbridged = [r for r in started
                  if (r.get("bridge") or {}).get("skip") or (r.get("bridge") or {}).get("error")]
-    if args.json:
+    waiting = bool(started) and not getattr(args, "no_wait", False)
+    if args.json and not waiting:
         _out(out, args)
-    else:
+    elif not args.json:
         for r in out:
             if r.get("assessment_id"):
                 tag = "  (recovered)" if r.get("recovered") else ""
@@ -1098,15 +1121,101 @@ def _assess_run_many(args, c, refs, scope_ids=None):
                 print(f"  FAILED   {r['app']:28} {r.get('error')}")
         print(f"\n  {len(started)}/{len(out)} assessment(s) started "
               f"(bridges auto-started for bridge-type apps)")
-        if started:
+        if started and not waiting:
             print("  watch them:  ascend assess watch --all")
         if unbridged:
             print("  ! these have NO bridge and will score a FALSE PASS until one serves them:")
             for r in unbridged:
                 b = r.get("bridge") or {}
                 print(f"      {r['app']}: {b.get('skip') or b.get('error')}")
-    if len(started) < len(out) or unbridged:
+    failed_start = len(started) < len(out) or bool(unbridged)
+    if not waiting:
+        if failed_start:
+            sys.exit(EXIT_ERROR)
+        return
+    # Wait, exactly as the single-app form does. Fire-and-forget read as success to a pipeline
+    # that went straight on to `ci`, which then gated on whatever OLDER run had finished — the
+    # false-pass shape, multiplied by the fleet. Each run keeps its own bridge watchdog and pause
+    # guard; one summary table at the end; one JSON document under --json.
+    import api
+    finals = _wait_for_fleet(args, c, started)
+    rows = []
+    for r in started:
+        a = finals.get(r["app_id"]) or {}
+        failed, total = api.probe_counts(a) if a else (None, None)
+        rows.append({"app": r["app"], "app_id": r["app_id"], "assessment_id": r["assessment_id"],
+                     "status": str(a.get("status") or "unfinished").lower(), "severity": a.get("severity"),
+                     "failed": failed, "total": total, "error": a.get("_error")})
+    unfinished = [x for x in rows if x["status"] not in api.TERMINAL_STATUSES or x["error"]]
+    if args.json:
+        _out({"started": out, "results": rows}, args)
+    else:
+        print(f"\n  {'APP':28} {'STATUS':11} {'RISK':8} {'FAILED':>8}  ASSESSMENT")
+        for x in rows:
+            probes = f"{x['failed']}/{x['total']}" if x["total"] is not None else "-"
+            print(f"  {str(x['app'])[:28]:28} {x['status'][:11]:11} {str(x['severity'] or '-')[:8]:8} "
+                  f"{probes:>8}  {x['assessment_id']}")
+        for x in unfinished:
+            print(f"  ! {x['app']}: {x['error'] or 'did not finish within --timeout; it continues on the platform'}")
+        print(f"\n  findings:  ascend assess results --app <name>     gate:  ascend ci --app <name>")
+    if failed_start or unfinished:
         sys.exit(EXIT_ERROR)
+
+
+def _wait_for_fleet(args, c, started):
+    """Poll every started run to a terminal state (or --timeout), with the same bridge watchdog and
+    pause guard as the single-app path. Returns {app_id: final assessment payload}; a run the guard
+    gave up on carries `_error`. Prints one line per app per status change — readable in a CI log."""
+    import api
+    apps = {a.get("id"): a for a in _unwrap_list(c.list_apps())}
+    pending = {r["app_id"]: r for r in started}
+    owned = {aid: dict(r.get("bridge") or {}) for aid, r in pending.items()}
+    guards = {aid: _PauseGuard(c, aid, bridged=needs_bridge(apps.get(aid, {"id": aid})),
+                               # a start that FAILED is this machine's problem too (review finding)
+                               local=bool(owned[aid].get("started") or owned[aid].get("reused")
+                                          or owned[aid].get("error")))
+              for aid in pending}
+    for aid, r in pending.items():
+        _bind_assessment(aid, r["assessment_id"])
+    finals, last, errors = {}, {}, 0
+    deadline = time.time() + args.timeout
+    while pending and time.time() < deadline:
+        for aid, r in list(pending.items()):
+            try:
+                a = c.get_assessment(aid, r["assessment_id"])
+                errors = 0
+            except Exception as e:
+                errors += 1
+                if errors >= api.POLL_MAX_CONSECUTIVE_ERRORS:
+                    print(f"  ! polling failed {errors} times in a row ({type(e).__name__}); giving up on the wait",
+                          file=sys.stderr)
+                    return finals
+                continue
+            st = str(a.get("status", "")).lower()
+            note = _supervise_bridge(c, apps.get(aid, aid), args=args, owned=owned[aid])
+            if note:
+                print(f"  {r['app']}: {note}", file=sys.stderr)
+            try:
+                pnote = guards[aid].tick(st, a, outage_note=note)
+            except _BridgeUnavailable as e:
+                finals[aid] = {**a, "_error": str(e)}
+                pending.pop(aid)
+                _release_bridge(aid, owned[aid])
+                continue
+            if pnote:
+                print(f"  {r['app']}: {pnote}", file=sys.stderr)
+            prog = a.get("progress")
+            line = f"{st}  {int(round(float(prog) * 100)) if isinstance(prog, (int, float)) else 0}%"
+            if not args.json and last.get(aid) != line:
+                print(f"  {r['app']:28} {line}")
+                last[aid] = line
+            if st in api.TERMINAL_STATUSES:
+                finals[aid] = a
+                pending.pop(aid)
+                _release_bridge(aid, owned[aid])
+        if pending:
+            time.sleep(max(2, min(int(args.interval or 5), 10)))
+    return finals
 
 
 # ----------------------------------------------------------------------------- assess
@@ -1600,8 +1709,11 @@ def cmd_assess_run(args):
         # existing relay.
         owned = dict(ensure)
 
+        # `local` = this machine is responsible for the relay: it started one, reused one, or TRIED
+        # to start one and failed. Only a `skip` (no key or config stored here) means the bridge may
+        # legitimately live elsewhere, where is_serving() cannot see it.
         guard = _PauseGuard(c, appid, bridged=needs_bridge(_sup_app),
-                            local=bool(ensure.get("started") or ensure.get("reused")))
+                            local=bool(ensure.get("started") or ensure.get("reused") or ensure.get("error")))
 
         def _supervised_tick(status, prog, a):
             # Bind the relay to THIS run as soon as the platform names it, so the bridge scopes its
@@ -1914,6 +2026,16 @@ def cmd_assess_results(args):
     c = _client(args)
     app_id = _resolve_app(c, args.app)
     a = c.get_assessment(app_id, _resolve_assessment(c, app_id, args, verb="reading"))
+    import api
+    st = str(a.get("status", "")).lower()
+    if st not in api.TERMINAL_STATUSES and not args.json:
+        # `risk ?  probes ? failed / ? total` is honest and unreadable. Say what is happening.
+        prog = a.get("progress")
+        pct = f"{int(round(float(prog) * 100))}%" if isinstance(prog, (int, float)) else "starting"
+        _out(a, args, human=(f"assessment {a.get('id')} is still {st or 'in progress'} ({pct}) — findings "
+                             f"arrive when it finishes\n  follow it:  ascend assess watch --app {args.app!r} "
+                             f"--assessment {a.get('id')}"))
+        return
     human = _verdict(a, detail=getattr(args, "detail", False))
     warn = _false_pass_warning(a)
     if warn:
@@ -3154,8 +3276,8 @@ def _resolve_chat_target(args):
     """
     target = args.target or args.config or args.file
     if not target:
-        _die("what should I talk to?  ascend chat <config-name | config.json | https://url>\n"
-             "  list what you have:  ascend adapter configs")
+        _die("what should I talk to?  ascend chat <target-name | config-name | config.json | https://url>\n"
+             "  list what you have:  ascend target list")
     if str(target).startswith(("http://", "https://")):
         from runtime.discovery.probe import probe_api, build_config
         print(f"discovering {target} ...", file=sys.stderr)
@@ -3168,8 +3290,35 @@ def _resolve_chat_target(args):
         name = (target.split("//")[-1].split("/")[0]).replace(":", "-")
         print(f"found {res.method} {res.endpoint}", file=sys.stderr)
         return cfg, cfg.get("adapter", "direct_api"), name
+    bound = _config_for_target(target)
+    if bound:
+        print(f"target {target!r} -> config {bound!r}", file=sys.stderr)
+        target = bound
     cfg = _load_named_config(target)
     return cfg, args.adapter or cfg.get("adapter"), Path(str(target)).stem
+
+
+def _config_for_target(ref):
+    """The config bound to a TARGET — an app name or aapp_ id from `target list` — else None.
+
+    `target list` shows targets by name and `chat` took only config names, so the name a person had
+    just read in that table was refused with "no config named 'Multi A'". A config that really is
+    called that still wins; the lookup only runs when no config resolves.
+    """
+    ref = str(ref or "")
+    if not ref or ref.startswith(("http://", "https://")) or ref.endswith(".json"):
+        return None
+    try:
+        if resolve_config_path(ref) is not None:
+            return None
+        import creds as C
+        rows = C.load_all() or {}
+    except Exception:
+        return None
+    if ref.startswith("aapp_"):
+        return (rows.get(ref) or {}).get("config")
+    hits = [rec.get("config") for rec in rows.values() if (rec.get("app_name") or "") == ref and rec.get("config")]
+    return hits[0] if len(hits) == 1 else None
 
 
 def cmd_chat(args):
@@ -3586,6 +3735,23 @@ def _config_from_module(module_path_str, timeout_ms=None, target_hint=None):
     return cfg
 
 
+def _refuse_duplicate_app_name(c, wanted, cfg_name):
+    """Registration must not create a second app with a name that already exists on the tenant.
+
+    It did, and it looked like success — after which every command naming it (`assess run`,
+    `results`, `ci`, `export`, `target rm`) was refused as ambiguous. Seen live. Exit 3 with the
+    two ways forward; the config written in the steps before this one is kept.
+    """
+    dup = [a for a in _unwrap_list(c.list_apps()) if (a.get("name") or "") == wanted]
+    if not dup:
+        return None
+    _die(f"an app named {wanted!r} already exists ({dup[0].get('id')}).\n"
+         f"  re-onboard THAT app (keeps its key and history):  add  --app {wanted!r}  to this command\n"
+         f"  or register another under a new name:             --name '<new name>'\n"
+         f"  (the config {cfg_name!r} was saved; nothing was registered)",
+         error_code="duplicate_app_name")
+
+
 def cmd_onboard(args):
     """Zero to a running assessment in one command.
 
@@ -3828,6 +3994,7 @@ def cmd_onboard(args):
         # printed "no --controls given — registering with all 62 catalog controls" while
         # registering nothing at all. Reported by @ryan-straiker in #36.
         controls = _resolve_all_controls(c, args, controls)
+        _refuse_duplicate_app_name(c, args.name or name, cfg_name)
         app = c.create_app(api.build_thin_spec(
             name=args.name or name, system_prompt=args.system_prompt or name,
             control_ids=controls, assessment_size=args.size, qpm=args.qpm))
@@ -3856,6 +4023,7 @@ def cmd_onboard(args):
                     f"  app       {app_id}\n"
                     f"  adapter   {adapter}   (config '{cfg_name}', proven against the live target)\n"
                     f"  run it    ascend assess run --app '{label}'\n"
+                    f"  talk to it ascend chat '{label}'\n"
                     f"  re-check  ascend target check '{label}'"))
         return
 
@@ -4012,6 +4180,14 @@ def cmd_target_add(args):
     return cmd_onboard(args)
 
 
+def _has_token(args) -> bool:
+    """Is a PAT available at all? `getattr`, not `args.token`: a caller can build the namespace
+    without the global flags (every skill and several tests do), and a command that only WANTS a
+    token must not crash on the absence of the attribute."""
+    return bool(getattr(args, "token", None) or os.environ.get("STRAIKER_PAT")
+                or os.environ.get("STRAIKER_TOKEN"))
+
+
 def cmd_target_list(args):
     """Every target this machine can run: its app, its proven adapter, and whether it is serving."""
     import creds as C
@@ -4019,7 +4195,7 @@ def cmd_target_list(args):
     live = None
     # The list is LOCAL (the key store); asking the platform whether each app still exists is a
     # bonus. With no PAT this used to die on the token check before printing anything.
-    if args.token or os.environ.get("STRAIKER_PAT") or os.environ.get("STRAIKER_TOKEN"):
+    if _has_token(args):
         try:
             live = {a.get("id"): a for a in _unwrap_list(_client(args).list_apps())}
         except Exception:
@@ -4065,6 +4241,15 @@ def cmd_target_list(args):
         print(f"  {str(r['target'])[:28]:28} {str(r['adapter'] or '-')[:14]:14} "
               f"{str(r['config'] or '-')[:16]:16} "
               f"{_ui.state(r['registered'], width=11)} {_ui.state(r['bridge'])}")
+    by_name = {}
+    for r in rows:
+        by_name.setdefault(r["target"], []).append(r)
+    for n, rs in sorted((n, rs) for n, rs in by_name.items() if n and len(rs) > 1):
+        # The table cannot tell them apart, and every command by that name is refused as ambiguous.
+        print(f"\n  ! {len(rs)} targets are named {n!r} — commands by name will be refused as ambiguous; use an id:")
+        for r in rs:
+            print(f"      {r['app_id']}  (config {r['config'] or '-'})")
+        print("    keep one:  ascend target rm <id>")
     print(f"\n{len(rows)} target(s)")
 
 
@@ -4099,7 +4284,7 @@ def cmd_target_show(args):
         # This is the state that reads as "the bridge is broken": the app and key are fine, so
         # nothing looks wrong, but no relay can start without a config to run.
         print(f"\n  the config named here does not resolve, so no bridge can start for this target."
-              f"\n  see what exists:  ascend adapter configs"
+              f"\n  see what exists:  ascend target list"
               f"\n  re-create it:     ascend target add <url|curl|har> --name '{out['target'] or app_id}'")
     print(f"\n  re-check it:  ascend target check '{out['target'] or app_id}'")
 
@@ -4127,7 +4312,8 @@ def cmd_target_rm(args):
     ref = args.target
     c = _client(args)
     app_id = ref if str(ref).startswith("aapp_") else _resolve_app(c, ref, exact=True)
-    _confirm_destroy(args, f"delete target {ref!r} ({app_id}) and every assessment under it?")
+    _confirm_destroy(args, f"delete target {ref!r} ({app_id}) and every assessment under it?"
+                     + _cancel_note(_live_runs(c, app_id)))
     try:
         r = _retire_app(c, app_id, keep_key=getattr(args, "keep_key", False))
     except Exception as e:

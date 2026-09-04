@@ -104,6 +104,26 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ### Fixed
 
+- **The tenant-lock refusal named the same tenant twice.** The label is derived from the PAT's
+  email domain and role, so two tenants administered from one domain share a label, and the
+  message read *"locked to 'straiker.ai (admin)', but the credential belongs to 'straiker.ai
+  (admin)'"* — a correct refusal (demo tenant vs Discover tenant) that told the operator nothing.
+  The check compares fingerprints; the message now prints them, and says outright when only the
+  names collide.
+
+- **Three auth-runtime defects that were wired but wrong.** Found while mapping the auth
+  architecture for the `target add` work; none had a test. (1) **The JWT-`exp` refresh branch was
+  dead in production**: `AuthProvider` has always recorded the token it obtained and
+  `AuthLifecycle.needs_refresh()` has always preferred a real `exp` over the wall-clock `ttl_s`
+  guess, but `call_target.py` called `mark_refreshed()` without `token=` at both refresh points, so
+  the accurate branch never ran and short-lived JWTs refreshed late. `merge_auth` now stamps the
+  token on the merged config and both sites pass it through. (2) **`oauth2.extra` bypassed
+  `resolve_secret_ref`** — the one place a secret could be written inline and reach the wire;
+  `env:`/`literal:` refs are now resolved, bare strings still pass through for non-secret
+  parameters. (3) **A non-JSON 2xx from a token endpoint raised a bare decode error** instead of
+  the one-line `AuthError` every other auth failure produces. `_materialize_oauth2`,
+  `_materialize_csrf` and `_materialize_multihop` — the only three methods in the file that do
+  real HTTP — now have error-path coverage.
 - **First-five-minutes polish.** `ascend doctor` says what to do about a failed check (`fix: export
   STRAIKER_PAT=…`, and `fixes` under `--json`); `ascend target list` works with no PAT in the shell
   (the list is local — the platform check is a bonus, and used to be a fatal one); `docs/USAGE.md`

@@ -22,6 +22,13 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ### Fixed
 
+- **The tenant-lock refusal named the same tenant twice.** The label is derived from the PAT's
+  email domain and role, so two tenants administered from one domain share a label, and the
+  message read *"locked to 'straiker.ai (admin)', but the credential belongs to 'straiker.ai
+  (admin)'"* — a correct refusal (demo tenant vs Discover tenant) that told the operator nothing.
+  The check compares fingerprints; the message now prints them, and says outright when only the
+  names collide.
+
 - **Three auth-runtime defects that were wired but wrong.** Found while mapping the auth
   architecture for the `target add` work; none had a test. (1) **The JWT-`exp` refresh branch was
   dead in production**: `AuthProvider` has always recorded the token it obtained and

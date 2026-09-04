@@ -23,12 +23,21 @@ for p in ("shells/cli", "runtime", "control"):
         sys.path.insert(0, str(REPO / p))
 import ascend  # noqa: E402
 
-#: Internal service / project names. The customer-facing word for each is in the comment.
+#: Internal service / project names, with the customer-facing word for each.
+#:
+#: This list is not a matter of taste. Straiker's own SE/FDE enablement material states the
+#: audience for each name explicitly: **Ascend** is "the customer-facing product … Customers,
+#: SE/FDE"; the execution engine is "**Engineering only**"; the runtime guardrail service is
+#: "Engineering / Defend customers". So a name below appearing in this repo — which is public — is
+#: a leak by the company's own definition, not by this test's opinion.
 INTERNAL = {
     "iris": "Ascend AI (the assessment engine in the Straiker cloud)",
     "argus": "Defend AI (the runtime detection service)",
     "probe_shadow": "the lease service",
     "pallas": "an internal project name",
+    # Straiker's own SE/FDE enablement deck classifies these "Engineering only" in its
+    # "who sees it" column: the customer-facing name for the whole thing is Ascend.
+    "mjolnir": "the browser bridge client",
 }
 
 #: Files that may legitimately carry one: none. Historical changelog entries were rewritten too,
@@ -50,7 +59,10 @@ def shipped_files():
 
 @pytest.mark.parametrize("word", sorted(INTERNAL))
 def test_no_shipped_file_names_an_internal_service(word):
-    pat = re.compile(rf"\b{re.escape(word)}\b", re.I)
+    # `probe_shadow` also ships as "Probe Shadow" and "probe-shadow"; the underscore-only pattern
+    # let the spaced form through in transport/openapi.yaml, which a customer downloads.
+    loose = re.escape(word).replace("_", "[ _-]?")
+    pat = re.compile(rf"\b{loose}\b", re.I)
     hits = []
     for p in shipped_files():
         try:

@@ -55,3 +55,20 @@ demo/*.mov
 
 # live-matrix scratch: recorded HARs from a local forge run
 .matrix/
+
+# Internal engineering material dropped into the tree by hand — backend architecture decks,
+# deep-dive slides, exported diagrams. The repo is PUBLIC and git history is public with it, so
+# one `git add -A` would publish an internal architecture permanently. `internal/` above is the
+# intended home for anything like this; these patterns are the safety net for the root and for
+# docs/, where a deck is most likely to be dropped next to the page it explains.
+*.pptx
+*.ppt
+*.key
+*.numbers
+*.pages
+/architecture*.pdf
+/docs/**/*.pptx
+/docs/**/*.pdf
+*deep-dive*
+*Deep-Dive*
+*ARCHITECTURE_DEEP*

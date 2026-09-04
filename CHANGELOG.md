@@ -28,6 +28,14 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ### Fixed
 
+- **The codename check now catches the spaced and hyphenated spellings.** It matched the
+  underscore form only, so a hyphenated hostname default survived in `transport/openapi.yaml` — a
+  file a customer downloads to write their own bridge client; the default is now
+  `bridge.example.com`. `docs/ASSESSMENT_LIFECYCLE.md` gains
+  "Reading the relay's log": the three log prefixes (`ascendbridge.lease`, `ascendbridge`,
+  `adapters.<type>`) mapped to the three nouns in the diagram, so a customer or an agent can tell
+  a target problem from a Straiker-edge problem without needing to learn any internal name.
+
 - **No internal service name reaches a customer.** The launch-screen diagram named the assessment
   engine by its internal service name. In the customer's world that is **Ascend AI**, running in
   the Straiker cloud, and that is what the diagram, the recon help, the generated adapter

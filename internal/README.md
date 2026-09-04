@@ -17,3 +17,7 @@ Contents (local only):
 If you need something from here in the public repo, genericize it first: platform/vendor
 names (Salesforce, Slack, Intercom) are fine as **integration types**; customer names,
 engagement details, tokens, and per-customer endpoints are not.
+
+Drop internal engineering material here — backend architecture decks, deep-dive slides,
+exported diagrams. Everything in this directory except this README is gitignored, so it stays
+local to your machine and can never reach the public repo or its history.

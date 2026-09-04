@@ -9,6 +9,28 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ### Fixed
 
+- **A credential given on the command line can be an `env:` reference, and then never lands in a
+  file.** `--bearer env:TOK`, `--api-key 'X-API-Key:env:KEY'` (header or `:in=query`),
+  `--basic 'user:env:PW'`, `--cookie 'session=env:S'` and `--header 'Name: env:V'` resolve from the
+  environment for the probe and the hard gate, and the written config carries the typed `auth`
+  block with the reference instead of the literal — the runtime resolves it per run, exactly as
+  HAR-derived auth already did. Literals keep working; a credential-shaped header stored in
+  plaintext is now warned about with the `env:` form to use (`probe.build_config` had recorded
+  that list since 1.1.1 and nothing printed it). One referenced credential per target; two are
+  refused rather than one silently dropped.
+
+- **`target add` has the SSRF/metadata guard `adapter build` had**, before the first request
+  leaves the machine, for every source (`--api`, `--ws`, `--url`, `--curl`, `--har`, and the
+  validation step). Loopback and private ranges stay allowed; link-local and cloud-metadata hosts
+  are refused unless `--allow-internal`, which `target add` now takes.
+
+- **Printed configs are redacted.** `adapter build` (human and `--json`) and the browser-adapter
+  `--json` print showed the config with its credentials; the file on disk (0600) is the store,
+  stdout is not. `adapter show --reveal` remains the explicit way to see values.
+
+- **The withheld-credential warning crashed.** `_warn(msg)` takes one argument; the path that
+  reports headers withheld from a config as credential-shaped called it with two.
+
 - **`--cdp`: onboard a target behind Entra / SAML / SSO by attaching to a browser you are already
   signed into.** `runtime/adapters/browser.py` has supported `cdp_url` all along, but the capture
   (`--url`) launched its own Chromium, which stopped at the login wall and never saw the widget, so

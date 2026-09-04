@@ -179,7 +179,21 @@ class AuthMaterial:
             merged_params = dict(config.get("params") or {})
             merged_params.update(self.params)
             merged["params"] = merged_params
+            # No adapter reads `params`; every URL-driven one reads `endpoint`/`url`. Folding the
+            # parameters into the query string here is the one seam that reaches all of them —
+            # without it `mode: api_key, in: query` resolved correctly and never left the machine.
+            for key in ("endpoint", "url"):
+                if isinstance(merged.get(key), str) and merged[key]:
+                    merged[key] = _with_query(merged[key], self.params)
         return merged
+
+
+def _with_query(url: str, params: Dict[str, str]) -> str:
+    """`url` with `params` set in its query string (replacing same-named parameters)."""
+    from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+    parts = urlsplit(url)
+    kept = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k not in params]
+    return urlunsplit(parts._replace(query=urlencode(kept + list(params.items()))))
 
 
 # --------------------------------------------------------------------------- #

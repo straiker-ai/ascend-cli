@@ -2319,12 +2319,34 @@ def _kv_headers(pairs):
 
 def _target_auth(args):
     """Fold the target-auth flags (--bearer/--api-key/--basic/--cookie/--token-file/--header)
-    into (headers, query_params). Header-based so it rides the existing config `headers`
-    passthrough all the way into probe/capture/validate/runtime — no special-casing per source.
+    into (headers, query_params) for the probe.
+
+    A value written as ``env:NAME`` is resolved from the environment for the probe and validation,
+    and recorded on ``args._static_auth`` as the typed ``auth`` block the written config carries
+    INSTEAD of the literal — so a secret never lands in a file. ``_finalize_target_auth`` applies
+    it at write time. Literal values keep working exactly as before (and are warned about when
+    they look like credentials). One environment-referenced credential per target: the static auth
+    layer carries one, and guessing which of two to keep would be worse than refusing.
     """
     import base64
-    headers = _kv_headers(getattr(args, "header", None))
-    query = {}
+    from runtime.layers.auth import resolve_secret_ref
+    refs = []                                    # (auth block, (where, name)) to apply at write
+
+    def val(raw, what):
+        if isinstance(raw, str) and raw.startswith("env:"):
+            try:
+                return resolve_secret_ref(raw), raw
+            except Exception as e:
+                _die(f"{what}: {e}")
+        return raw, None
+
+    headers, query = {}, {}
+    for k, v in _kv_headers(getattr(args, "header", None)).items():
+        v2, ref = val(v, f"--header {k!r}")
+        headers[k] = v2
+        if ref:
+            refs.append(({"type": "static", "mode": "custom", "name": k, "value_ref": ref,
+                          "template": "{{VALUE}}"}, ("header", k)))
     tok = getattr(args, "bearer", None)
     tf = getattr(args, "token_file", None)
     if tf:
@@ -2333,7 +2355,10 @@ def _target_auth(args):
             _die(f"--token-file not found: {tf}")
         tok = p.read_text().strip()
     if tok:
-        headers.setdefault("Authorization", f"Bearer {tok}")
+        tok2, ref = val(tok, "--bearer")
+        headers.setdefault("Authorization", f"Bearer {tok2}")
+        if ref:
+            refs.append(({"type": "static", "mode": "bearer", "value_ref": ref}, ("header", "Authorization")))
     ak = getattr(args, "api_key", None)
     if ak:
         loc = "header"
@@ -2342,16 +2367,101 @@ def _target_auth(args):
         if ":" not in ak:
             _die("--api-key must be NAME:VALUE[:in=header|query]")
         name, value = ak.split(":", 1)
-        (query if loc == "query" else headers)[name.strip()] = value
+        name = name.strip()
+        value2, ref = val(value, f"--api-key {name!r}")
+        (query if loc == "query" else headers)[name] = value2
+        if ref:
+            refs.append(({"type": "static", "mode": "api_key", "name": name, "in": loc, "value_ref": ref},
+                         (loc, name)))
     basic = getattr(args, "basic", None)
     if basic:
         if ":" not in basic:
             _die("--basic must be USER:PASS")
-        headers["Authorization"] = "Basic " + base64.b64encode(basic.encode()).decode()
+        user, pw = basic.split(":", 1)
+        pw2, ref = val(pw, "--basic password")
+        headers["Authorization"] = "Basic " + base64.b64encode(f"{user}:{pw2}".encode()).decode()
+        if ref:
+            refs.append(({"type": "static", "mode": "basic", "username_ref": f"literal:{user}",
+                          "password_ref": ref}, ("header", "Authorization")))
     ck = getattr(args, "cookie", None)
     if ck:
-        headers["Cookie"] = ck
+        if "=" in ck and ";" not in ck:
+            cname, cval = ck.split("=", 1)
+            cval2, ref = val(cval, f"--cookie {cname!r}")
+            headers["Cookie"] = f"{cname}={cval2}"
+            if ref:
+                refs.append(({"type": "static", "mode": "cookie", "name": cname.strip(), "value_ref": ref},
+                             ("header", "Cookie")))
+        else:
+            headers["Cookie"] = ck
+    if len(refs) > 1:
+        _die(f"one environment-referenced credential per target ({len(refs)} given: "
+             + ", ".join(b.get("name") or b["mode"] for b, _ in refs)
+             + ").\n  the static auth layer carries one; give the others as literals, or fold them "
+             "into one header")
+    args._static_auth = refs[0] if refs else None
     return headers, query
+
+
+def _strip_query_param(url, name):
+    """`url` without the `name=` parameter — the api key the probe folded into it."""
+    from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+    parts = urlsplit(url)
+    kept = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k != name]
+    return urlunsplit(parts._replace(query=urlencode(kept)))
+
+
+def _finalize_target_auth(cfg, args):
+    """Applied to every config a flag-authenticated onboarding writes.
+
+    Replaces the literal the probe used with the typed ``auth`` block ``_target_auth`` recorded
+    (header removed, or the api key stripped from the URL), so the file carries ``env:NAME`` and
+    the runtime resolves it per run. Then says, loudly, when a credential-shaped header is still
+    stored in plaintext — ``probe.build_config`` has recorded that list since 1.1.1 and nothing
+    ever printed it.
+    """
+    rec = getattr(args, "_static_auth", None)
+    if rec:
+        block, (where, name) = rec
+        if getattr(args, "_login_auth", None):
+            _die("use either an environment-referenced credential or --login-url for this target, "
+                 "not both: a config carries one auth block")
+        if where == "header":
+            hdrs = {k: v for k, v in (cfg.get("headers") or {}).items() if k.lower() != name.lower()}
+            if hdrs:
+                cfg["headers"] = hdrs
+            else:
+                cfg.pop("headers", None)
+        else:
+            for key in ("endpoint", "url"):
+                if cfg.get(key):
+                    cfg[key] = _strip_query_param(cfg[key], name)
+        cfg["auth"] = block
+        ref = block.get("value_ref") or block.get("password_ref")
+        print(f"[auth] {block['mode']} credential referenced as {ref} — the config carries the "
+              f"reference, never the value", file=sys.stderr)
+    inline = (cfg.get("_probe") or {}).get("inline_secret_headers") or []
+    still = [h for h in inline if any(k.lower() == h.lower() for k in (cfg.get("headers") or {}))]
+    if still:
+        _warn(f"credential-shaped header(s) stored in plaintext in the config: {', '.join(still)}\n"
+              f"    keep secrets out of files with an env: reference, e.g.\n"
+              f"      --header '{still[0]}: env:MY_SECRET'   or   --api-key '{still[0]}:env:MY_SECRET'")
+    return cfg
+
+
+def _guard_egress(url, args):
+    """The SSRF/metadata guard, before the first request leaves this machine. Loopback and private
+    ranges are allowed (that is where most targets under development live); link-local and cloud
+    metadata hosts are refused unless --allow-internal. Never raises for an empty url."""
+    if not url:
+        return None
+    from runtime.discovery.egress import check_egress
+    blocked = check_egress(url, allow_internal=getattr(args, "allow_internal", False))
+    if blocked:
+        _die(f"refusing to call {url}: {blocked}\n"
+             f"  this is the SSRF/metadata guard. If you really mean to, pass --allow-internal.",
+             error_code="egress_blocked")
+    return None
 
 
 def _login_for_token(args):
@@ -2764,6 +2874,7 @@ def _finish_discovery(cfg, args, *, source, browser_recipe=None, response_sample
     auth_headers, auth_query = _target_auth(args)
     _bake_auth(cfg, auth_headers, auth_query)
     _bake_body_fields(cfg, _body_fields(args))   # body-carried key/tenant must persist too
+    cfg = _finalize_target_auth(cfg, args)
     # Attach the REPEATABLE login recipe, not just the one token the exchange happened to mint.
     # This call was missing, and its absence is the whole bug: `adapter build --login-url` baked a
     # frozen `Authorization: Bearer <token>` and no `auth` block, so nothing could re-mint when it
@@ -2786,14 +2897,7 @@ def _finish_discovery(cfg, args, *, source, browser_recipe=None, response_sample
             print(f"[build] answer path set to: {chosen}", file=sys.stderr)
     # SSRF guard at the single choke point every source passes through (api/har/curl/spec/url),
     # on the URL we are ABOUT to fetch — the per-source check missed har/curl/evidence entirely.
-    from runtime.discovery.egress import check_egress
-    target = cfg.get("endpoint") or cfg.get("url") or ""
-    if target:
-        blocked = check_egress(target, allow_internal=getattr(args, "allow_internal", False))
-        if blocked:
-            _die(f"refusing to call {target}: {blocked}\n"
-                 f"  this is the SSRF/metadata guard. If you really mean to, pass --allow-internal.",
-                 error_code="egress_blocked")
+    _guard_egress(cfg.get("endpoint") or cfg.get("url"), args)
     adapter = cfg.get("adapter", "direct_api")
     print("[validate] calling the target ...", file=sys.stderr)
     vres = V.validate_config(adapter, cfg, args.prompt, None,
@@ -2852,12 +2956,14 @@ def _finish_discovery(cfg, args, *, source, browser_recipe=None, response_sample
         return _finish_code_adapter(cfg, vres, args, source, V)
 
     out_path = _write_discovered(cfg, args)
+    from manual import redact as _redact
+    # Printed configs are redacted: the file on disk (0600) is the store; stdout is not.
     if args.json:
-        _out({"config": cfg, "source": source, "validated": True,
+        _out({"config": _redact(cfg), "source": source, "validated": True,
               "out": str(out_path) if out_path else None}, args)
     else:
         print()
-        print(json.dumps(cfg, indent=2))
+        print(json.dumps(_redact(cfg), indent=2))
         if out_path:
             print(f"\nwrote {out_path}", file=sys.stderr)
             print(f"next:  ascend chat {out_path.stem}", file=sys.stderr)
@@ -2967,7 +3073,7 @@ def _finish_browser_adapter(recipe, args, source, V):
     print(f"[validate] VALIDATED (browser) — {str(vres.get('response'))[:90]!r}", file=sys.stderr)
     out_path = _write_discovered(cfg, args)
     if args.json:
-        _out({"config": cfg, "source": source, "adapter": "browser", "validated": True,
+        _out({"config": manual_redact(cfg), "source": source, "adapter": "browser", "validated": True,
               "out": str(out_path) if out_path else None,
               "response": str(vres.get("response"))[:200]}, args)
     else:
@@ -3529,6 +3635,7 @@ def cmd_onboard(args):
     elif getattr(args, "api", None):
         # the simple-contract one-liner: one probe, no browser, no adapter to author
         _step(1, total, f"probing {args.api}")
+        _guard_egress(args.api, args)
         from runtime.discovery.probe import probe_api, build_config
         auth_headers, auth_query = _prepare_target_auth(args)
         api_url = args.api
@@ -3542,10 +3649,11 @@ def cmd_onboard(args):
             _die(f"{res.diagnosis}: {res.message}\n  {res.hint}", code=EXIT_ERROR)
         _ok(f"{res.method} {res.endpoint} · transport {res.transport} · answer at "
             f"{res.response_path or '(top-level)'}")
-        cfg = build_config(res)
+        cfg = _finalize_target_auth(build_config(res), args)
         cfg_path, cfg_name = _write_named_config(cfg, cfg_name, exact=named_exactly)
     elif getattr(args, "ws", None):
         _step(1, total, f"probing {args.ws}")
+        _guard_egress(args.ws, args)
         from runtime.discovery.probe import probe_ws, build_ws_config
         auth_headers, _auth_query = _prepare_target_auth(args)
         res = probe_ws(args.ws, prompt=args.prompt or "hello",
@@ -3556,7 +3664,7 @@ def cmd_onboard(args):
                  code=EXIT_ERROR)
         _ok(f"WS {res['ws_url']} · frames {res['frames_seen']} · answer at "
             f"{res.get('response_path') or '(whole frame)'}")
-        cfg = build_ws_config(res)
+        cfg = _finalize_target_auth(build_ws_config(res), args)
         cfg_path, cfg_name = _write_named_config(cfg, cfg_name, exact=named_exactly)
     elif getattr(args, "curl", None):
         _step(1, total, f"reading the request from {args.curl}")
@@ -3566,10 +3674,13 @@ def cmd_onboard(args):
             cfg = from_curl(text, prompt_hint=args.prompt_hint)
         except CurlParseError as e:
             _die(f"could not read that curl command: {e}")
+        _guard_egress(cfg.get("endpoint") or cfg.get("url"), args)
+        cfg = _finalize_target_auth(cfg, args)
         cfg_path, cfg_name = _write_named_config(cfg, cfg_name, exact=named_exactly)
     else:
         _step(1, total, f"capturing the contract from {args.url or args.har}")
         if args.url:
+            _guard_egress(args.url, args)
             from runtime.discovery.capture import capture_url
             ev = capture_url(args.url, prompt=args.prompt, headless=args.headless,
                              settle_s=args.settle, manual=args.manual,
@@ -3584,7 +3695,8 @@ def cmd_onboard(args):
         else:
             ev = C.load_har(args.har, prompt_sent=args.prompt)
         res = C.classify_evidence(ev)
-        cfg = _stamp_cdp(res.get("config") or {}, args)
+        cfg = _finalize_target_auth(_stamp_cdp(res.get("config") or {}, args), args)
+        _guard_egress(cfg.get("endpoint") or cfg.get("url"), args)
         t = (res.get("layers") or {}).get("transport") or {}
         _ok(f"transport {t.get('value')} (confidence {t.get('confidence')})")
         if res.get("unresolved"):
@@ -3597,8 +3709,8 @@ def cmd_onboard(args):
     try:
         _held = cfg.pop("_withheld_headers", None)
         if _held:
-            _warn(args, f"withheld from the config (credential-shaped): {', '.join(_held)}")
-            _warn(args, "  re-supply with --header 'Name: value' or --bearer / --api-key, "
+            _warn(f"withheld from the config (credential-shaped): {', '.join(_held)}")
+            _warn("  re-supply with --header 'Name: value' or --bearer / --api-key, "
                         "or set the value in the config yourself; the names are recorded, "
                         "never the values.")
     except Exception:
@@ -3621,6 +3733,7 @@ def cmd_onboard(args):
 
     # 2. hard gate -------------------------------------------------------------
     _step(2, total, "validating the config against the live target")
+    _guard_egress(cfg.get("endpoint") or cfg.get("url"), args)
     from runtime.discovery import validate as V
     vres = V.validate_config(adapter, cfg, args.prompt, None, timeout_s=args.timeout)
     if not vres.get("ok"):
@@ -6622,12 +6735,16 @@ def _add_target_auth_args(s):
     """
     # --- one request's credentials -----------------------------------------------------------
     s.add_argument("--header", action="append", metavar="'Name: value'",
-                   help="raw header (repeatable), honored by all sources, e.g. 'X-Api-Key: …'")
-    s.add_argument("--bearer", metavar="TOKEN", help="Authorization: Bearer <token>")
+                   help="raw header (repeatable), honored by all sources, e.g. 'X-Api-Key: …'. A value "
+                        "written env:NAME is read from the environment and never stored in the config")
+    s.add_argument("--bearer", metavar="TOKEN",
+                   help="Authorization: Bearer <token>; env:NAME keeps the token out of the config")
     s.add_argument("--api-key", metavar="NAME:VALUE[:in=header|query]",
-                   help="API key, e.g. 'x-api-key:abc' or 'key:abc:in=query'")
-    s.add_argument("--basic", metavar="USER:PASS", help="HTTP Basic auth")
-    s.add_argument("--cookie", metavar="'k=v; k2=v2'", help="Cookie header for a session-gated target")
+                   help="API key, e.g. 'x-api-key:abc', 'key:abc:in=query', or 'x-api-key:env:MY_KEY' "
+                        "to reference the environment instead of storing the value")
+    s.add_argument("--basic", metavar="USER:PASS", help="HTTP Basic auth; 'user:env:MY_PW' references the password")
+    s.add_argument("--cookie", metavar="'k=v; k2=v2'",
+                   help="Cookie header for a session-gated target; 'session=env:MY_SESSION' references the value")
     s.add_argument("--token-file", metavar="PATH", help="read a bearer token from this file")
     s.add_argument("--body-field", action="append", metavar="key=value",
                    help="extra JSON body field, repeatable — for agents whose key/tenant lives in "
@@ -6705,6 +6822,8 @@ def _add_onboard_args(s, *, require_source):
     s.add_argument("--controls", help="comma-separated control ids (validated before the run)")
     s.add_argument("--adapter", help="override the adapter type (default: from the config)")
     _add_target_auth_args(s)
+    s.add_argument("--allow-internal", action="store_true",
+                   help="allow link-local/cloud-metadata hosts (169.254/fd00::) — off by default")
     s.add_argument("--prompt-hint", help="with --curl: the literal prompt text used in that command")
     s.add_argument("--size", default="small", choices=["small", "medium", "large"],
                    help="assessment size")

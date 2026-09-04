@@ -42,11 +42,11 @@ Build an adapter config for a target and PROVE it against the live target before
 | `--curl` | `FILE` | — | a curl command in a file, or '-' for stdin. Zero guessing. |
 | `--spec` | `BASE_URL` | — | find an OpenAPI/Swagger spec under this base URL and build from it |
 | `--har` | `HAR` | — | HAR file to classify |
-| `--header` *(repeatable)* | `'Name: value'` | — | raw header (repeatable), honored by all sources, e.g. 'X-Api-Key: …' |
-| `--bearer` | `TOKEN` | — | Authorization: Bearer <token> |
-| `--api-key` | `NAME:VALUE[:in=header|query]` | — | API key, e.g. 'x-api-key:abc' or 'key:abc:in=query' |
-| `--basic` | `USER:PASS` | — | HTTP Basic auth |
-| `--cookie` | `'k=v; k2=v2'` | — | Cookie header for a session-gated target |
+| `--header` *(repeatable)* | `'Name: value'` | — | raw header (repeatable), honored by all sources, e.g. 'X-Api-Key: …'. A value written env:NAME is read from the environment and never stored in the config |
+| `--bearer` | `TOKEN` | — | Authorization: Bearer <token>; env:NAME keeps the token out of the config |
+| `--api-key` | `NAME:VALUE[:in=header|query]` | — | API key, e.g. 'x-api-key:abc', 'key:abc:in=query', or 'x-api-key:env:MY_KEY' to reference the environment instead of storing the value |
+| `--basic` | `USER:PASS` | — | HTTP Basic auth; 'user:env:MY_PW' references the password |
+| `--cookie` | `'k=v; k2=v2'` | — | Cookie header for a session-gated target; 'session=env:MY_SESSION' references the value |
 | `--token-file` | `PATH` | — | read a bearer token from this file |
 | `--body-field` *(repeatable)* | `key=value` | — | extra JSON body field, repeatable — for agents whose key/tenant lives in the BODY, e.g. --body-field apiKey=abc --body-field workspace=support. Use key:=raw for a non-string literal (true/1/{...}). |
 | `--login-url` | `URL` | — | POST here first to exchange creds/code for a token |
@@ -613,11 +613,11 @@ remove a stored key (optionally the Ascend app with it)
 | `--curl` | `FILE` | — | a curl command in a file, or '-' for stdin. Zero guessing. |
 | `--spec` | `BASE_URL` | — | find an OpenAPI/Swagger spec under this base URL and build from it |
 | `--har` | `HAR` | — | HAR file to classify |
-| `--header` *(repeatable)* | `'Name: value'` | — | raw header (repeatable), honored by all sources, e.g. 'X-Api-Key: …' |
-| `--bearer` | `TOKEN` | — | Authorization: Bearer <token> |
-| `--api-key` | `NAME:VALUE[:in=header|query]` | — | API key, e.g. 'x-api-key:abc' or 'key:abc:in=query' |
-| `--basic` | `USER:PASS` | — | HTTP Basic auth |
-| `--cookie` | `'k=v; k2=v2'` | — | Cookie header for a session-gated target |
+| `--header` *(repeatable)* | `'Name: value'` | — | raw header (repeatable), honored by all sources, e.g. 'X-Api-Key: …'. A value written env:NAME is read from the environment and never stored in the config |
+| `--bearer` | `TOKEN` | — | Authorization: Bearer <token>; env:NAME keeps the token out of the config |
+| `--api-key` | `NAME:VALUE[:in=header|query]` | — | API key, e.g. 'x-api-key:abc', 'key:abc:in=query', or 'x-api-key:env:MY_KEY' to reference the environment instead of storing the value |
+| `--basic` | `USER:PASS` | — | HTTP Basic auth; 'user:env:MY_PW' references the password |
+| `--cookie` | `'k=v; k2=v2'` | — | Cookie header for a session-gated target; 'session=env:MY_SESSION' references the value |
 | `--token-file` | `PATH` | — | read a bearer token from this file |
 | `--body-field` *(repeatable)* | `key=value` | — | extra JSON body field, repeatable — for agents whose key/tenant lives in the BODY, e.g. --body-field apiKey=abc --body-field workspace=support. Use key:=raw for a non-string literal (true/1/{...}). |
 | `--login-url` | `URL` | — | POST here first to exchange creds/code for a token |
@@ -666,11 +666,11 @@ zero to a running assessment in one command (build -> validate -> register -> br
 | `--system-prompt` | `SYSTEM_PROMPT` | — | what the target is, for the assessment context |
 | `--controls` | `CONTROLS` | — | comma-separated control ids (validated before the run) |
 | `--adapter` | `ADAPTER` | — | override the adapter type (default: from the config) |
-| `--header` *(repeatable)* | `'Name: value'` | — | raw header (repeatable), honored by all sources, e.g. 'X-Api-Key: …' |
-| `--bearer` | `TOKEN` | — | Authorization: Bearer <token> |
-| `--api-key` | `NAME:VALUE[:in=header|query]` | — | API key, e.g. 'x-api-key:abc' or 'key:abc:in=query' |
-| `--basic` | `USER:PASS` | — | HTTP Basic auth |
-| `--cookie` | `'k=v; k2=v2'` | — | Cookie header for a session-gated target |
+| `--header` *(repeatable)* | `'Name: value'` | — | raw header (repeatable), honored by all sources, e.g. 'X-Api-Key: …'. A value written env:NAME is read from the environment and never stored in the config |
+| `--bearer` | `TOKEN` | — | Authorization: Bearer <token>; env:NAME keeps the token out of the config |
+| `--api-key` | `NAME:VALUE[:in=header|query]` | — | API key, e.g. 'x-api-key:abc', 'key:abc:in=query', or 'x-api-key:env:MY_KEY' to reference the environment instead of storing the value |
+| `--basic` | `USER:PASS` | — | HTTP Basic auth; 'user:env:MY_PW' references the password |
+| `--cookie` | `'k=v; k2=v2'` | — | Cookie header for a session-gated target; 'session=env:MY_SESSION' references the value |
 | `--token-file` | `PATH` | — | read a bearer token from this file |
 | `--body-field` *(repeatable)* | `key=value` | — | extra JSON body field, repeatable — for agents whose key/tenant lives in the BODY, e.g. --body-field apiKey=abc --body-field workspace=support. Use key:=raw for a non-string literal (true/1/{...}). |
 | `--login-url` | `URL` | — | POST here first to exchange creds/code for a token |
@@ -685,6 +685,7 @@ zero to a running assessment in one command (build -> validate -> register -> br
 | `--client-key` | `PATH` | — | client private key (PEM) for mTLS |
 | `--proxy` | `URL` | — | HTTP(S) proxy for the probe/validate calls |
 | `--cdp` | `ENDPOINT` | — | with --url: attach to a browser you are ALREADY signed into (start it with `chrome --remote-debugging-port=9222`) instead of launching one. The only route into an Entra / SAML / SSO-gated target. Default endpoint http://127.0.0.1:9222; the written adapter attaches the same way, and your browser is never closed. |
+| `--allow-internal` | — | — | allow link-local/cloud-metadata hosts (169.254/fd00::) — off by default |
 | `--prompt-hint` | `PROMPT_HINT` | — | with --curl: the literal prompt text used in that command |
 | `--size` | `small|medium|large` | `small` | assessment size |
 | `--qpm` | `QPM` | `20` | queries per minute against the target |
@@ -897,11 +898,11 @@ onboard a target from a URL, a cURL/HAR file, or a saved config
 | `--system-prompt` | `SYSTEM_PROMPT` | — | what the target is, for the assessment context |
 | `--controls` | `CONTROLS` | — | comma-separated control ids (validated before the run) |
 | `--adapter` | `ADAPTER` | — | override the adapter type (default: from the config) |
-| `--header` *(repeatable)* | `'Name: value'` | — | raw header (repeatable), honored by all sources, e.g. 'X-Api-Key: …' |
-| `--bearer` | `TOKEN` | — | Authorization: Bearer <token> |
-| `--api-key` | `NAME:VALUE[:in=header|query]` | — | API key, e.g. 'x-api-key:abc' or 'key:abc:in=query' |
-| `--basic` | `USER:PASS` | — | HTTP Basic auth |
-| `--cookie` | `'k=v; k2=v2'` | — | Cookie header for a session-gated target |
+| `--header` *(repeatable)* | `'Name: value'` | — | raw header (repeatable), honored by all sources, e.g. 'X-Api-Key: …'. A value written env:NAME is read from the environment and never stored in the config |
+| `--bearer` | `TOKEN` | — | Authorization: Bearer <token>; env:NAME keeps the token out of the config |
+| `--api-key` | `NAME:VALUE[:in=header|query]` | — | API key, e.g. 'x-api-key:abc', 'key:abc:in=query', or 'x-api-key:env:MY_KEY' to reference the environment instead of storing the value |
+| `--basic` | `USER:PASS` | — | HTTP Basic auth; 'user:env:MY_PW' references the password |
+| `--cookie` | `'k=v; k2=v2'` | — | Cookie header for a session-gated target; 'session=env:MY_SESSION' references the value |
 | `--token-file` | `PATH` | — | read a bearer token from this file |
 | `--body-field` *(repeatable)* | `key=value` | — | extra JSON body field, repeatable — for agents whose key/tenant lives in the BODY, e.g. --body-field apiKey=abc --body-field workspace=support. Use key:=raw for a non-string literal (true/1/{...}). |
 | `--login-url` | `URL` | — | POST here first to exchange creds/code for a token |
@@ -916,6 +917,7 @@ onboard a target from a URL, a cURL/HAR file, or a saved config
 | `--client-key` | `PATH` | — | client private key (PEM) for mTLS |
 | `--proxy` | `URL` | — | HTTP(S) proxy for the probe/validate calls |
 | `--cdp` | `ENDPOINT` | — | with --url: attach to a browser you are ALREADY signed into (start it with `chrome --remote-debugging-port=9222`) instead of launching one. The only route into an Entra / SAML / SSO-gated target. Default endpoint http://127.0.0.1:9222; the written adapter attaches the same way, and your browser is never closed. |
+| `--allow-internal` | — | — | allow link-local/cloud-metadata hosts (169.254/fd00::) — off by default |
 | `--prompt-hint` | `PROMPT_HINT` | — | with --curl: the literal prompt text used in that command |
 | `--size` | `small|medium|large` | `small` | assessment size |
 | `--qpm` | `QPM` | `20` | queries per minute against the target |

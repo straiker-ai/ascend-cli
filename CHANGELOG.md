@@ -55,6 +55,12 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ### Fixed
 
+- **First-five-minutes polish.** `ascend doctor` says what to do about a failed check (`fix: export
+  STRAIKER_PAT=…`, and `fixes` under `--json`); `ascend target list` works with no PAT in the shell
+  (the list is local — the platform check is a bonus, and used to be a fatal one); `docs/USAGE.md`
+  matches what landed (`assess results` defaults to the latest finished run, `target rm` asks on a
+  terminal, `bridge sync --app`, `chat` by target name, exact names for mutating commands).
+
 - **A wedged relay blocked its own replacement, and the run waited on it to the timeout.** A
   relay that was alive but had stopped heartbeating was "not serving" to the auto-lifecycle and
   "already running" to `supervisor.start()`, so every watchdog tick printed *a relay is already

@@ -1143,7 +1143,9 @@ def _wait_for_fleet(args, c, started):
     pending = {r["app_id"]: r for r in started}
     owned = {aid: dict(r.get("bridge") or {}) for aid, r in pending.items()}
     guards = {aid: _PauseGuard(c, aid, bridged=needs_bridge(apps.get(aid, {"id": aid})),
-                               local=bool(owned[aid].get("started") or owned[aid].get("reused")))
+                               # a start that FAILED is this machine's problem too (review finding)
+                               local=bool(owned[aid].get("started") or owned[aid].get("reused")
+                                          or owned[aid].get("error")))
               for aid in pending}
     for aid, r in pending.items():
         _bind_assessment(aid, r["assessment_id"])

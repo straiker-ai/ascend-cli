@@ -100,6 +100,17 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
   Found by recording the docs walkthrough: the failure was captured on screen mid-take.
 
+- **A command that changes or deletes an app takes its exact name.** `_resolve_app` falls back
+  from an exact name to a case-insensitive substring match — right for `assess results --app bot`,
+  wrong for `target rm bot`, which deleted "Demo Bot" when that was the one app containing "bot".
+  `app update`/`delete`, `target rm`, `keys add`/`rm`, `bridge stop`, `assess pause`/`resume` and
+  `policy push` now refuse a near miss and list the candidates (exit 3). The three deletes confirm
+  on a terminal — never in a pipeline or under `--json`; `--yes` skips it — and share one retire
+  path that stops the relay, deletes the app, and only then drops the stored bridge key. `target rm`
+  used to drop the key first and exit 0 when the delete then failed, leaving an app nobody could
+  serve; it now keeps the key and exits 1 with the reason. Intended `--help` change: `app delete`
+  and `keys rm` gain `--yes` (both back-compat corpora re-recorded; nothing else moved).
+
 ## [1.1.2] — 2026-09-03
 
 ### Security

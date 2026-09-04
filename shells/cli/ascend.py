@@ -174,8 +174,14 @@ def _unwrap_list(payload, *keys):
     return []
 
 
-def _resolve_app(client, ref):
-    """Accept an aapp_ id or a name; return the app id."""
+def _resolve_app(client, ref, *, exact=False):
+    """Accept an aapp_ id or a name; return the app id.
+
+    A name that matches no app exactly falls back to a case-insensitive substring match, so
+    `assess results --app bot` finds "Demo Bot". `exact=True` refuses that fallback and is what
+    every command that changes or destroys an app passes: `target rm bot` deleting "Demo Bot" is
+    not a convenience. The candidates are still shown, so the fix is one copy-paste away.
+    """
     if not ref:
         _die("no application given: pass --app <name-or-aapp_id>")
     if ref.startswith("aapp_"):
@@ -183,6 +189,14 @@ def _resolve_app(client, ref):
     data = client.list_apps()
     apps = _unwrap_list(data)
     matches = [a for a in apps if (a.get("name") or "") == ref]
+    if not matches and exact:
+        near = [a for a in apps if ref.lower() in (a.get("name") or "").lower()]
+        hint = ""
+        if near:
+            hint = "\n  did you mean:\n  " + "\n  ".join(
+                f"{a.get('id')}  {a.get('name', '')}" for a in near[:10])
+        _die(f"no app named exactly {ref!r}. This command changes or deletes an app, so it takes "
+             f"the exact name or the aapp_ id.{hint}")
     if not matches:
         matches = [a for a in apps if ref.lower() in (a.get("name") or "").lower()]
     if not matches:
@@ -706,6 +720,61 @@ def _read_maybe_file(v):
     return v
 
 
+def _stdio_is_tty():
+    """Is a person at the keyboard? Both ends must be terminals: a piped stdout is a script."""
+    try:
+        return bool(sys.stdin.isatty() and sys.stdout.isatty())
+    except Exception:
+        return False
+
+
+def _confirm_destroy(args, what):
+    """Ask before an irreversible action — on a terminal, unless --yes.
+
+    Scripts, CI and `--json` are never prompted: a question nobody can answer hangs a pipeline, and
+    those callers already had to spell the app out (exact name or aapp_ id). The prompt is for the
+    person at a keyboard, where one slip deletes an app and every assessment under it.
+    """
+    if getattr(args, "yes", False) or getattr(args, "json", False):
+        return
+    if not _stdio_is_tty():
+        return
+    try:
+        ans = input(f"  {what} [y/N]: ").strip().lower()
+    except EOFError:
+        ans = ""
+    if ans not in ("y", "yes"):
+        _die("aborted — nothing was changed", code=EXIT_ERROR)
+
+
+def _retire_app(c, app_id, *, keep_key=False):
+    """Delete an app and everything that only existed to serve it, in the order that fails safe.
+
+    Stop its relay, delete the app, THEN drop the stored key. The key goes last on purpose: a
+    bridge key is shown once and cannot be re-read, so dropping it before a delete that then fails
+    leaves an app nobody can ever serve again — which is what `target rm` used to do. Raises
+    AscendAPIError when the platform refuses the delete; the key is untouched then. One helper for
+    `app delete`, `target rm` and `keys rm --delete-app`, so the three cannot drift apart again.
+    """
+    stopped = None
+    try:                                   # a live bridge for a deleted app is pointless
+        import supervisor as S
+        if S.is_running(app_id):
+            stopped = S.stop(app_id)
+    except Exception:
+        stopped = None
+    res = c.delete_app(app_id)
+    key_removed = False
+    if not keep_key:
+        try:
+            import creds as C
+            key_removed = C.remove(app_id)
+        except Exception:
+            key_removed = False
+    return {"app_id": app_id, "api_response": res, "bridge_stopped": bool(stopped),
+            "key_removed": key_removed}
+
+
 def cmd_app_update(args):
     """Change an existing app's settings in place — no delete/recreate, so the bridge key survives.
 
@@ -713,7 +782,7 @@ def cmd_app_update(args):
     QPM, controls, system prompt, category severities, input guardrail, frequency, strategy.
     """
     c = _client(args)
-    app_id = _resolve_app(c, args.app)
+    app_id = _resolve_app(c, args.app, exact=True)
     import api
     patch = {}
     if args.name:
@@ -809,38 +878,22 @@ def cmd_app_delete(args):
     together: `--keep-key` opts out.
     """
     c = _client(args)
-    app_id = _resolve_app(c, args.app)
-    _say(args, f"Deleting {args.app}...")
+    app_id = _resolve_app(c, args.app, exact=True)
     name = None
     try:
         name = (c.get_app(app_id) or {}).get("name")
     except Exception:
         pass
-
-    stopped = None
-    try:                                   # a live bridge for a deleted app is pointless
-        import supervisor as S
-        if S.is_running(app_id):
-            stopped = S.stop(app_id)
-    except Exception:
-        pass
-
-    res = c.delete_app(app_id)
-    key_removed = False
-    if not args.keep_key:
-        try:
-            import creds as C
-            key_removed = C.remove(app_id)
-        except Exception:
-            pass
-
+    _confirm_destroy(args, f"delete app {name or args.app!r} ({app_id}) and every assessment under it?")
+    _say(args, f"Deleting {args.app}...")
+    r = _retire_app(c, app_id, keep_key=args.keep_key)
     payload = {"deleted": True, "app_id": app_id, "app_name": name,
-               "key_removed": key_removed, "bridge_stopped": bool(stopped),
-               "api_response": res}
+               "key_removed": r["key_removed"], "bridge_stopped": r["bridge_stopped"],
+               "api_response": r["api_response"]}
     human = f"deleted {name or app_id}"
-    if stopped:
+    if r["bridge_stopped"]:
         human += "\n  stopped its bridge"
-    if key_removed:
+    if r["key_removed"]:
         human += "\n  removed its stored bridge key (a key without its app is a dead secret)"
     elif args.keep_key:
         human += "\n  kept the stored key (--keep-key)"
@@ -1517,7 +1570,7 @@ def cmd_assess_list(args):
 def cmd_assess_pause(args):
     c = _client(args)
     _say(args, f"Pausing {args.assessment}...")
-    res = c.pause(_resolve_app(c, args.app), args.assessment)
+    res = c.pause(_resolve_app(c, args.app, exact=True), args.assessment)
     # Probes are generated up front and cannot be recalled: pause stops NEW scheduling, but
     # already-created probes still run their course. Say so, or the drain looks like a bug.
     _out(res, args, human="paused — note: probes already generated will still drain, so your "
@@ -1528,7 +1581,7 @@ def cmd_assess_pause(args):
 
 def cmd_assess_resume(args):
     c = _client(args)
-    appid = _resolve_app(c, args.app)
+    appid = _resolve_app(c, args.app, exact=True)
     _say(args, f"Resuming {args.assessment}...")
     res = c.resume(appid, args.assessment)
     # The reliable answer to "resumed from the Console": the local relay may have idle-stopped or
@@ -3403,23 +3456,23 @@ def cmd_target_check(args):
 
 def cmd_target_rm(args):
     """Forget a target: delete the application and drop its stored key."""
-    import creds as C
     ref = args.target
-    app_id = ref if str(ref).startswith("aapp_") else _resolve_app(_client(args), ref)
-    removed_key = False
-    if not getattr(args, "keep_key", False):
-        try:
-            removed_key = C.remove(app_id)
-        except Exception:
-            removed_key = False
-    deleted = False
+    c = _client(args)
+    app_id = ref if str(ref).startswith("aapp_") else _resolve_app(c, ref, exact=True)
+    _confirm_destroy(args, f"delete target {ref!r} ({app_id}) and every assessment under it?")
     try:
-        _client(args).delete_app(app_id)
-        deleted = True
+        r = _retire_app(c, app_id, keep_key=getattr(args, "keep_key", False))
     except Exception as e:
-        print(f"warning: could not delete the application ({type(e).__name__})", file=sys.stderr)
-    _out({"app_id": app_id, "app_deleted": deleted, "key_removed": removed_key}, args,
-         human=f"removed {app_id}  (app_deleted={deleted}, key_removed={removed_key})")
+        # The key is still stored (the retire order keeps it when the delete fails), so the target
+        # can still be served and retried. If the app is already gone, `keys prune` drops the key.
+        hint = ("\n  the app no longer exists; drop its dead key with:  ascend keys prune"
+                if "404" in str(e) else "")
+        _out({"app_id": app_id, "app_deleted": False, "key_removed": False, "error": str(e)},
+             args, human=f"error: could not delete the application ({type(e).__name__}: {e}){hint}")
+        sys.exit(EXIT_ERROR)
+    _out({"app_id": app_id, "app_deleted": True, "key_removed": r["key_removed"],
+          "bridge_stopped": r["bridge_stopped"]}, args,
+         human=f"removed {app_id}  (app_deleted=True, key_removed={r['key_removed']})")
 
 
 def _looks_like_jsonl(path, sample=20):
@@ -4317,7 +4370,7 @@ def cmd_relay_stop(args):
     if args.all:
         targets = [r["app_id"] for r in S.ls()]
     for ref in (args.app or []):
-        targets.append(ref if str(ref).startswith("aapp_") else _resolve_app(_client(args), ref))
+        targets.append(ref if str(ref).startswith("aapp_") else _resolve_app(_client(args), ref, exact=True))
     if not targets:
         _die("pass --app <name> (repeatable) or --all")
     _say(args, f"Stopping {len(dict.fromkeys(targets))} bridge(s)...")
@@ -4416,7 +4469,7 @@ def cmd_keys_add(args):
     if not str(args.key).startswith("tc-"):
         _die("a bridge key looks like 'tc-…' — that does not")
     c = _client(args)
-    app_id = _resolve_app(c, args.app)
+    app_id = _resolve_app(c, args.app, exact=True)
     name = None
     try:
         name = (c.get_app(app_id) or {}).get("name")
@@ -4436,21 +4489,20 @@ def cmd_keys_rm(args):
     """
     import creds as C
     c = _client(args) if (not str(args.app).startswith("aapp_") or args.delete_app) else None
-    app_id = args.app if str(args.app).startswith("aapp_") else _resolve_app(c, args.app)
+    app_id = args.app if str(args.app).startswith("aapp_") else _resolve_app(c, args.app, exact=True)
+    if args.delete_app:
+        _confirm_destroy(args, f"delete app {args.app!r} ({app_id}) and its stored key?")
+    else:
+        _confirm_destroy(args, f"forget the stored bridge key for {args.app!r}? It cannot be re-read")
     _say(args, f"Removing the stored key for {args.app}...")
-    removed = C.remove(app_id)
-    if removed:
-        _say(args, "key removed", done=True)
     app_deleted = False
     if args.delete_app:
-        try:
-            import supervisor as S
-            if S.is_running(app_id):
-                S.stop(app_id)
-        except Exception:
-            pass
-        c.delete_app(app_id)
-        app_deleted = True
+        r = _retire_app(c, app_id)
+        removed, app_deleted = r["key_removed"], True
+    else:
+        removed = C.remove(app_id)
+    if removed:
+        _say(args, "key removed", done=True)
     human = ("removed the stored key" if removed else "no stored key for that app")
     if app_deleted:
         human += " · deleted the Ascend app too"
@@ -4713,7 +4765,7 @@ def cmd_policy_push(args):
         _die(f"no policy file at {P.policy_path(getattr(args, 'policy', None))}\n"
              f"  create one:  ascend policy set --app {args.app!r} --category data_leak=high")
 
-    app_id = _resolve_app(c, args.app)
+    app_id = _resolve_app(c, args.app, exact=True)
     app = c.get_app(app_id)
     app_name = app.get("name") or args.app
 
@@ -6159,6 +6211,8 @@ def build_parser():
     s.add_argument("app", help="app name or aapp_ id")
     s.add_argument("--keep-key", action="store_true",
                    help="keep the stored bridge key (default: remove it — a key without its app is dead)")
+    s.add_argument("--yes", action="store_true",
+                   help="skip the confirmation prompt (non-interactive runs never prompt)")
     s.set_defaults(func=cmd_app_delete)
 
     # controls
@@ -6469,6 +6523,8 @@ def build_parser():
                       help="delete the application and drop its stored key")
     s.add_argument("target", help="target name or aapp_ id")
     s.add_argument("--keep-key", action="store_true", help="leave the stored bridge key in place")
+    s.add_argument("--yes", action="store_true",
+                   help="skip the confirmation prompt (non-interactive runs never prompt)")
     s.set_defaults(func=cmd_target_rm)
     # The registry of adapter TYPES, i.e. "what kinds of target can this onboard?". It was only
     # reachable as `adapter list`, which was the single reason anyone still needed that noun.
@@ -6628,6 +6684,8 @@ def build_parser():
     s.add_argument("app", help="app name or aapp_ id")
     s.add_argument("--delete-app", action="store_true",
                    help="also delete the Ascend app (retire the pair: a keyless app can't be served)")
+    s.add_argument("--yes", action="store_true",
+                   help="skip the confirmation prompt (non-interactive runs never prompt)")
     s.set_defaults(func=cmd_keys_rm)
 
     # tenant (the single-tenant lock)

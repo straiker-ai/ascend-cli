@@ -28,9 +28,10 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ### Fixed
 
-- **The codename check now catches the spaced and hyphenated spellings.** It looked for
-  `probe_shadow` only, so `probe-shadow.example.com` survived in `transport/openapi.yaml` — a file
-  a customer downloads to write their own bridge client. `docs/ASSESSMENT_LIFECYCLE.md` gains
+- **The codename check now catches the spaced and hyphenated spellings.** It matched the
+  underscore form only, so a hyphenated hostname default survived in `transport/openapi.yaml` — a
+  file a customer downloads to write their own bridge client; the default is now
+  `bridge.example.com`. `docs/ASSESSMENT_LIFECYCLE.md` gains
   "Reading the relay's log": the three log prefixes (`ascendbridge.lease`, `ascendbridge`,
   `adapters.<type>`) mapped to the three nouns in the diagram, so a customer or an agent can tell
   a target problem from a Straiker-edge problem without needing to learn any internal name.

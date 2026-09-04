@@ -753,7 +753,10 @@ class TestManners:
                            "https://bot.example.com/api/chat")
         assert len(rec.calls) > 5
         for call in rec.calls:
-            wire = json.dumps(call["json"]) if call["json"] is not None else (call["data"] or "")
+            data = call["data"]
+            if isinstance(data, dict):                    # a form-encoded candidate (data= mapping)
+                data = json.dumps(data)
+            wire = json.dumps(call["json"]) if call["json"] is not None else (data or "")
             params = call["kwargs"].get("params") or {}
             blob = wire + json.dumps(params)
             assert DEFAULT_PROMPT in blob or blob in ("", "{}")

@@ -19,6 +19,18 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ### Fixed
 
+- **Patterns from the first forge-and-test loop.** Each reproduced against `agent-forge` and fixed at
+  one seam. A WebSocket target with the API key in the query string: `--api-key …:in=query` was
+  folded into an HTTP URL and silently dropped for a `ws://` one, and the runtime never folded auth
+  params into `ws_url` either. A target answering every unauthenticated request with a 302 to an
+  HTML sign-in page was diagnosed as "rejected every body shape"; it is an auth wall, and the hint
+  now offers the login recipes. A form-posting target had no form-encoded candidate at all, and the
+  three-403 politeness abort fired before shape discovery — `application/x-www-form-urlencoded` is
+  now the second candidate and is tried on the caller's own URL before the path sweep; the winning
+  encoding travels into the config. A GraphQL endpoint and a create-then-message contract are named
+  as such in the hint. A target that answers every Nth request with 429 lost those probes as
+  "unanswered"; the relay now waits `Retry-After` (bounded at 10 s) and retries once.
+
 - **A credential given on the command line can be an `env:` reference, and then never lands in a
   file.** `--bearer env:TOK`, `--api-key 'X-API-Key:env:KEY'` (header or `:in=query`),
   `--basic 'user:env:PW'`, `--cookie 'session=env:S'` and `--header 'Name: env:V'` resolve from the

@@ -82,6 +82,11 @@ CANDIDATE_PATHS: Tuple[str, ...] = (
     "ask",
     "invoke",
     "converse",
+    # create-then-message contracts: the create call answers 2xx with an id and no answer, which
+    # the diagnosis names as such instead of "no candidate path behaved like a chat endpoint"
+    "conversations",
+    "sessions",
+    "session",
     "predict",
     "completion",
     "v1/completions",
@@ -138,6 +143,13 @@ _NUMERIC_RE = re.compile(r"^[-+]?\d+(\.\d+)?$")
 _URLISH_RE = re.compile(r"^(https?://\S+|wss?://\S+|/[\w\-./]*)$", re.I)
 _MIME_RE = re.compile(r"^[a-z]+/[a-z0-9.+\-]+$", re.I)
 _MARKUP_RE = re.compile(r"^\s*<(!doctype|html|\?xml|svg)", re.I)
+_SIGNIN_RE = re.compile(r"type=[\"']?password|sign[ -]?in|log[ -]?in|authenticate", re.I)
+
+
+def _looks_like_signin(body: str) -> bool:
+    """An HTML page with a password field or sign-in wording — what a login wall looks like."""
+    head = (body or "")[:8192]
+    return bool(_MARKUP_RE.match(head)) and bool(_SIGNIN_RE.search(head))
 
 #: Values that are protocol chatter, never a bot's answer.
 _NON_ANSWER_TOKENS = {
@@ -413,7 +425,15 @@ def default_shapes(method: Optional[str] = None,
 
     if want in (None, "POST", "PUT", "PATCH"):
         verb = want or "POST"
-        shapes.extend(Shape(label, verb, body=tpl) for label, tpl in BODY_SHAPES)
+        json_shapes = [Shape(label, verb, body=tpl) for label, tpl in BODY_SHAPES]
+        # Second, right after the plainest JSON shape: an intranet bot bolted onto an existing
+        # form-posting app takes `application/x-www-form-urlencoded` and answers every JSON body
+        # with a 4xx — and three of those in a row trip the politeness abort, so a form shape
+        # placed last was never reached. Extra --body-field values merge in like any dict body.
+        shapes.extend(json_shapes[:1])
+        shapes.append(Shape("form_message", verb, body={"message": _P},
+                            content_type="application/x-www-form-urlencoded"))
+        shapes.extend(json_shapes[1:])
     if want in (None, "GET"):
         shapes.extend(Shape(f"query:{name}", "GET", body=None, query_param=name,
                             content_type=None) for name in QUERY_PARAM_NAMES)
@@ -946,7 +966,7 @@ class _State:
         return self.fivexx.get(url, 0) >= _MAX_5XX_PER_ENDPOINT
 
     # -- the single request -------------------------------------------------
-    def try_candidate(self, url: str, shape: Shape) -> Attempt:
+    def try_candidate(self, url: str, shape: Shape, *, retried: bool = False) -> Attempt:
         """Send ONE benign request and record everything we learned from it."""
         import requests  # lazy: keeps this module import-time network-free
 
@@ -958,6 +978,8 @@ class _State:
             params = {shape.query_param: self.prompt}
         elif shape.raw is not None:
             data_body = shape.raw.replace(PROMPT_TOKEN, self.prompt)
+        elif (shape.content_type or "").startswith("application/x-www-form-urlencoded"):
+            data_body = shape.render(self.prompt)          # requests form-encodes a mapping
         else:
             json_body = shape.render(self.prompt)
 
@@ -1001,6 +1023,23 @@ class _State:
                       status=status, elapsed_ms=elapsed)
 
         # --- status triage ----------------------------------------------------
+        # A redirect that landed on an HTML sign-in page is an auth wall, not an answer. requests
+        # followed it (allow_redirects=True), so the status here is the page's 200 — and that read
+        # as "rejected every body shape", which sent the operator to --curl instead of to
+        # credentials. Seen live against a target that answered every unauthenticated POST with
+        # a 302 to /signin.
+        hist = getattr(resp, "history", None) or []
+        if hist and status == 200 and "text/html" in ctype and _looks_like_signin(body):
+            self.consecutive_auth += 1
+            landed = getattr(resp, "url", target)
+            if not getattr(self, "auth_scheme", None):
+                self.auth_scheme = f"a redirect to a sign-in page at {landed}"
+            att.status = int(getattr(hist[0], "status_code", 302) or 302)
+            att.outcome, att.detail = "auth", f"redirected to {landed} — an HTML sign-in page"
+            if self.consecutive_auth >= _MAX_CONSECUTIVE_AUTH:
+                self.aborted = "auth"
+            return self._record(att, target, shape, json_body, data_body, params,
+                                headers, status, har_h, body, ctype)
         if status in (401, 403, 407):
             self.consecutive_auth += 1
             wa = lower_h.get("www-authenticate")
@@ -1021,8 +1060,19 @@ class _State:
             att.outcome, att.detail = "rate_limited", "HTTP 429 — target is rate limiting us"
             if self.rate_limited >= _MAX_RATE_LIMITED:
                 self.aborted = "rate_limited"
-            return self._record(att, target, shape, json_body, data_body, params,
-                                headers, status, har_h, body, ctype)
+            self._record(att, target, shape, json_body, data_body, params,
+                         headers, status, har_h, body, ctype)
+            # One 429 on the real endpoint sent the probe on to nineteen other paths and a
+            # "not found" verdict. Wait what the target asked (bounded) and try THIS candidate
+            # once more; a second 429 stands and counts toward the abort.
+            if not retried and not self.aborted:
+                try:
+                    wait = min(max(float(lower_h.get("retry-after") or 2), 0.5), 10.0)
+                except ValueError:
+                    wait = 2.0
+                time.sleep(wait)
+                return self.try_candidate(url, shape, retried=True)
+            return att
 
         if status >= 500:
             self.fivexx[target] = self.fivexx.get(target, 0) + 1
@@ -1238,12 +1288,42 @@ def _diagnose(state: _State, host: str, tried: List[str]) -> Tuple[str, str, str
         worst = sorted(alive, key=lambda u: -live[u])[0]
         last = next((a for a in reversed(state.attempts)
                      if a.url == worst and a.detail), None)
+        detail = (last.detail if last else "") or ""
+        graphql = (worst.rstrip("/").endswith("/graphql") or 'Variable "$' in detail
+                   or "GraphQL" in detail)
+        hint = ("Send one working request example — `--curl 'curl -X POST … -d {…}'` — or the "
+                "field name it expects. The probe replays it verbatim and derives the rest.")
+        if graphql:
+            hint = ("This is a GraphQL endpoint, and the probe cannot guess the operation. Paste "
+                    "one working query as a curl with the prompt in the variables, for example "
+                    "--curl \"curl -X POST <url> -H 'content-type: application/json' -d "
+                    "'{\\\"query\\\":\\\"mutation($input:MessageInput!){send(input:$input){reply}}\\\","
+                    "\\\"variables\\\":{\\\"input\\\":{\\\"message\\\":\\\"hello\\\"}}}'\"; "
+                    "the reply field becomes the answer path.")
         return ("bad_shape",
                 f"{worst} is a real endpoint (it responded, it is not a 404) but rejected every "
-                f"request body shape tried. Last response: {(last.detail if last else '')[:200]}",
-                "Send one working request example — `--curl 'curl -X POST … -d {…}'` — or the "
-                "field name it expects. The probe replays it verbatim and derives the rest.")
+                f"request body shape tried. Last response: {detail[:200]}", hint)
 
+    # A path that answered 2xx WITHOUT an answer is the signature of a create-then-message
+    # contract (POST /conversations -> id, then message that id). A single URL cannot express
+    # it, and the generic "give the full path" advice sends the operator in circles.
+    created = [a for a in state.attempts
+               if a.status in (200, 201, 202) and a.outcome in ("no_answer", "empty", "error_envelope")]
+    if created:
+        return ("not_found",
+                f"{host} is UP and {created[0].url} answered HTTP {created[0].status} without an "
+                f"answer — that is what a create-then-message contract looks like (create a "
+                f"conversation or session first, then send the prompt to it).",
+                "Export a HAR of one real exchange from the browser and pass --har <file> — the "
+                "two-step contract is derived from it — or write the two calls yourself: "
+                "`ascend target add --scaffold ./my_adapter.py`, then `--module ./my_adapter.py`.")
+    limited = [a.url for a in state.attempts if a.outcome == "rate_limited"]
+    if limited:
+        return ("rate_limited",
+                f"{limited[0]} answered HTTP 429 — the target is rate limiting this client, and "
+                f"no other candidate path answered.",
+                "Wait, then re-run; or ask the owner for the probe's allow-list / a higher limit. "
+                "The probe already retried once after Retry-After.")
     return ("not_found",
             f"{host} is UP (it answered {len(statuses)} request(s)) but none of the "
             f"{len(tried)} candidate paths behaved like a chat endpoint. Tried: {tried_str}",
@@ -1337,6 +1417,15 @@ def probe_api(url: str,
         if not ordered:
             break
         att = state.try_candidate(ep, ordered[0])
+        # The caller's own URL is the strongest signal there is. When it refuses the plainest JSON
+        # body, try the form-encoded one on it BEFORE sweeping other paths: three 403s across the
+        # sweep trip the politeness abort, and a form-posting target then never got its one
+        # chance (phase 2, where shapes are tried, is never reached).
+        if (ep == caller_url and not state.successes and not state.exhausted
+                and att.outcome == "auth"):
+            form = next((sh for sh in ordered if sh.label == "form_message"), None)
+            if form is not None:
+                state.try_candidate(ep, form)
         if ep == caller_url:
             if att.ok:
                 break                  # they gave us the endpoint and it works
@@ -1388,6 +1477,11 @@ def probe_api(url: str,
         result.endpoint = best["url"]
         result.method = best["method"]
         result.request_body = shape.body if shape.body is not None else shape.raw
+        if (shape.body is not None and shape.content_type
+                and not shape.content_type.startswith("application/json")):
+            # The adapter encodes the body from the config's Content-Type, so the winning
+            # shape's encoding has to travel with the template or the run sends JSON.
+            result.headers = {**(result.headers or {}), "Content-Type": shape.content_type}
         result.shape_label = shape.label
         result.response_path = best["response_path"]
         result.response_text = best["answer"]

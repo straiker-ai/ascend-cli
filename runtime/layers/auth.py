@@ -182,7 +182,7 @@ class AuthMaterial:
             # No adapter reads `params`; every URL-driven one reads `endpoint`/`url`. Folding the
             # parameters into the query string here is the one seam that reaches all of them —
             # without it `mode: api_key, in: query` resolved correctly and never left the machine.
-            for key in ("endpoint", "url"):
+            for key in ("endpoint", "url", "ws_url"):
                 if isinstance(merged.get(key), str) and merged[key]:
                     merged[key] = _with_query(merged[key], self.params)
         return merged

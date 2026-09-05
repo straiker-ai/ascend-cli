@@ -9,6 +9,14 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ### Added
 
+- **`ascend skills`, and the skills are named on the launch screen.** Measured in a controlled
+  trial: 0 of 22 operators ever opened the skills directory and 1 read the docs page, so nothing
+  the layer contained could help anyone. Two new skills from that trial's measured pain —
+  `verify-run` (every operator had to prove probes were answered by hand) and `manage-fleet`
+  (the CLI's widest measured advantage, previously unencoded) — and three updated: `build-adapter`
+  no longer leads with "capture a HAR" for two-step targets, `onboard-target` gains the `env:`
+  preflight and the answered-probe gate, `run-assessment` gains `--detail` and the evidence-based
+  false-pass check.
 - **A create-then-message target derives from its URL alone.** `ascend target add http://host`
   against a bot that requires `POST /session` before `POST /session/{id}/message` failed with
   `bad_shape` — while the diagnosis text already named the contract exactly and then told the

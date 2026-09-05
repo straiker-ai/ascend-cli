@@ -73,6 +73,12 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ### Fixed
 
+- **Every delete verb reports `deleted` under the same key.** `app delete --json` said
+  `deleted: true`; `target rm --json` said `app_deleted: true` with no `deleted` at all, so a
+  script written against one verb silently misread the other — a teardown checking `deleted` on
+  `target rm` reported every successful delete as failed. Both keys are now present on
+  `app delete`, `target rm` and `keys rm`.
+
 - **`target add --run` no longer orphans the run it starts.** It ran a bridge as a daemon thread
   inside the command, started the assessment, and then — under `--json`, so an agent could get its
   object and return — stopped that thread and exited: an assessment deliberately left with nobody

@@ -982,7 +982,7 @@ def cmd_app_delete(args):
                      + _cancel_note(_live_runs(c, app_id)))
     _say(args, f"Deleting {args.app}...")
     r = _retire_app(c, app_id, keep_key=args.keep_key)
-    payload = {"deleted": True, "app_id": app_id, "app_name": name,
+    payload = {"deleted": True, "app_deleted": True, "app_id": app_id, "app_name": name,
                "key_removed": r["key_removed"], "bridge_stopped": r["bridge_stopped"],
                "api_response": r["api_response"]}
     human = f"deleted {name or app_id}"
@@ -4427,10 +4427,13 @@ def cmd_target_rm(args):
         # can still be served and retried. If the app is already gone, `keys prune` drops the key.
         hint = ("\n  the app no longer exists; drop its dead key with:  ascend keys prune"
                 if "404" in str(e) else "")
-        _out({"app_id": app_id, "app_deleted": False, "key_removed": False, "error": str(e)},
+        _out({"app_id": app_id, "deleted": False, "app_deleted": False, "key_removed": False,
+              "error": str(e)},
              args, human=f"error: could not delete the application ({type(e).__name__}: {e}){hint}")
         sys.exit(EXIT_ERROR)
-    _out({"app_id": app_id, "app_deleted": True, "key_removed": r["key_removed"],
+    # `deleted` is the one key every delete verb carries (app delete had it, target rm did not);
+    # a script that checks one verb's result must not silently misread the other's.
+    _out({"app_id": app_id, "deleted": True, "app_deleted": True, "key_removed": r["key_removed"],
           "bridge_stopped": r["bridge_stopped"]}, args,
          human=f"removed {app_id}  (app_deleted=True, key_removed={r['key_removed']})")
 
@@ -5554,7 +5557,8 @@ def cmd_keys_rm(args):
     elif removed:
         human += ("\n  NOTE: the app still exists but can no longer be served — its key is shown "
                   "only at creation. Retire it with:  ascend keys rm <app> --delete-app")
-    _out({"removed": removed, "app_id": app_id, "app_deleted": app_deleted}, args, human=human)
+    _out({"removed": removed, "app_id": app_id, "deleted": bool(app_deleted), "app_deleted": app_deleted},
+         args, human=human)
 
 
 # ----------------------------------------------------------------------------- reports

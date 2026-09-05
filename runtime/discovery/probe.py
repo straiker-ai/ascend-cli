@@ -85,6 +85,9 @@ CANDIDATE_PATHS: Tuple[str, ...] = (
     # create-then-message contracts: the create call answers 2xx with an id and no answer, which
     # the diagnosis names as such instead of "no candidate path behaved like a chat endpoint"
     "conversations",
+    "conversation",
+    "threads",
+    "thread",
     "sessions",
     "session",
     "predict",
@@ -1192,6 +1195,142 @@ def _live_score(statuses: List[int]) -> int:
     return best
 
 
+_SESSION_ID_KEYS = ("session_id", "sessionid", "conversation_id", "conversationid",
+                    "thread_id", "threadid", "chat_id", "chatid", "id")
+_MESSAGE_SUFFIXES = ("message", "messages", "chat", "turns")
+
+
+def _maybe_json_obj(text):
+    try:
+        v = json.loads(text or "")
+    except (ValueError, TypeError):
+        return {}
+    return v if isinstance(v, dict) else {}
+
+
+def _session_id_field(body_text: Optional[str], sid: Optional[str]) -> str:
+    """Which key carried the id — session_api extracts by name, not by position."""
+    try:
+        parsed = json.loads(body_text or "")
+    except (ValueError, TypeError):
+        return "id"
+    if isinstance(parsed, dict) and sid is not None:
+        for k, v in parsed.items():
+            if str(v) == str(sid):
+                return str(k)
+    return "id"
+
+
+def _session_id_from(body_text: Optional[str]) -> Optional[str]:
+    """The id a create response handed back, if it looks like one."""
+    try:
+        parsed = json.loads(body_text or "")
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    lower = {str(k).lower(): v for k, v in parsed.items()}
+    for k in _SESSION_ID_KEYS:
+        v = lower.get(k)
+        if isinstance(v, (str, int)) and str(v).strip():
+            return str(v)
+    return None
+
+
+def _with_id_in_body(shape: Shape, field: str, sid: str) -> Optional[Shape]:
+    """The same body shape with the session id added under its own field name."""
+    if shape.body is None or not isinstance(shape.body, dict):
+        return None
+    body = dict(shape.body)
+    body[field] = sid
+    return Shape(label=f"{shape.label}+{field}", body=body, method=shape.method,
+                 content_type=shape.content_type)
+
+
+def _follow_create_then_message(state: "_State", shapes: List[Shape]):
+    """Follow a create-then-message contract instead of only diagnosing it.
+
+    A 2xx that returns an id and no answer is exactly the signature `_diagnose` already names --
+    and it then told the operator to go export a HAR and come back. The second call is cheap and
+    deterministic, so make it. Three placements of the id are tried, because the wild uses all of
+    them and a prober that only knows one finds one:
+
+      URL   POST {create}/{id}/message                       (session-style)
+      BODY  POST {sibling}   {"<id_field>": id, ...}          (conversation-style; id never in the URL)
+      BOTH  POST {create}/{id}/messages {"<id_field>": id}    (thread-style; must match)
+
+    Two things keep this from being a second blind search. Only the two most common body shapes
+    are tried per URL -- the create already told us the API speaks JSON. And for BODY placement,
+    paths the blind search already proved EXIST (a 400/405/422: "path is real, body rejected")
+    are tried first: a sibling that rejected a body without an id is the message endpoint waiting
+    for the id.
+
+    When one answers, BOTH exchanges are already in the evidence (every attempt records its
+    pair), so the session classifier builds the `session_api` config exactly as from a HAR. The
+    placement that won is recorded on the state so build_config emits the right template.
+
+    Returns the create pair when a follow-up answered, else None.
+    """
+    top = shapes[:2]
+    exists = []                     # sibling paths the blind search proved real
+    for att in state.attempts:
+        if att.status in (400, 405, 415, 422):
+            u = att.url.split("?")[0].rstrip("/")
+            if u not in exists:
+                exists.append(u)
+    for pair in list(state.pairs):
+        if state.exhausted or state.successes:
+            return None
+        resp = pair.get("response") or {}
+        if resp.get("status") not in (200, 201, 202):
+            continue
+        raw = resp.get("raw_body")
+        sid = _session_id_from(raw)
+        if not sid:
+            continue
+        field = _session_id_field(raw, sid)
+        base = str((pair.get("request") or {}).get("url") or "").split("?")[0].rstrip("/")
+        if not base or f"/{sid}" in base:          # already a per-session URL; nothing to create
+            continue
+        parent = base.rsplit("/", 1)[0] if "/" in base.split("://", 1)[-1] else base
+        body_shapes = [b for b in (_with_id_in_body(sh, field, sid) for sh in top) if b]
+
+        # URL placement
+        for suffix in _MESSAGE_SUFFIXES:
+            for shape in top:
+                if state.exhausted or state.successes:
+                    break
+                state.try_candidate(f"{base}/{sid}/{suffix}", shape)
+            if state.successes:
+                state.session_placement = ("url", field)
+                return pair
+        # BODY placement: proven-real siblings first, then the usual suffixes
+        body_urls = [u for u in exists if u != base] + \
+                    [f"{parent}/{sfx}" for sfx in _MESSAGE_SUFFIXES]
+        seen = set()
+        for url in body_urls:
+            if url in seen:
+                continue
+            seen.add(url)
+            for shape in body_shapes:
+                if state.exhausted or state.successes:
+                    break
+                state.try_candidate(url, shape)
+            if state.successes:
+                state.session_placement = ("body", field)
+                return pair
+        # BOTH: the route names the session and the payload must name it again
+        for suffix in _MESSAGE_SUFFIXES:
+            for shape in body_shapes:
+                if state.exhausted or state.successes:
+                    break
+                state.try_candidate(f"{base}/{sid}/{suffix}", shape)
+            if state.successes:
+                state.session_placement = ("both", field)
+                return pair
+    return None
+
+
 def _diagnose(state: _State, host: str, tried: List[str]) -> Tuple[str, str, str]:
     """Turn the attempt log into ``(diagnosis, message, hint)``.
 
@@ -1468,6 +1607,41 @@ def probe_api(url: str,
                 seen_labels.add(shape.label)
                 state.try_candidate(ep, shape)
 
+    # A 2xx that returned an id and no answer is a create-then-message contract. Follow it
+    # rather than only naming it in an error: the id is right there and the second call is one
+    # request. This is the difference between `target add <url>` working on a session-based bot
+    # and the operator having to capture a HAR or hand-write an adapter.
+    created_pair = None
+    if not state.successes and state.aborted is None:
+        # The blind search may have spent the whole budget reaching the create. The follow-up is
+        # a handful of targeted requests against an id we already hold, so it gets its own small
+        # allowance rather than being starved by the search that made it possible.
+        state.max_attempts = len(state.attempts) + 30
+        created_pair = _follow_create_then_message(state, shapes)
+        if created_pair is not None and state.successes:
+            # Record the flow, not the one session we happened to open. Baking the id into the
+            # endpoint would "work" for validation and then run every probe of the assessment
+            # through a single conversation -- which a turn cap or an expiry silently breaks, and
+            # which is not what the target's contract says.
+            _cid = _session_id_from((created_pair.get("response") or {}).get("raw_body"))
+            _cur = str((created_pair.get("request") or {}).get("url") or "").split("?")[0]
+            _win = str(state.successes[-1].get("url") or "")
+            _placement, _field = getattr(state, "session_placement", ("url", None))
+            _flow = {
+                "session_endpoint": _cur,
+                "session_body": _maybe_json_obj((created_pair.get("request") or {}).get("raw_body")),
+                "session_extract": _session_id_field(
+                    (created_pair.get("response") or {}).get("raw_body"), _cid),
+                "message_endpoint": _win.replace(str(_cid), "{{SESSION_ID}}") if _cid else _win,
+            }
+            if _placement in ("body", "both") and _field:
+                # the winning request body carried the id; template it, never freeze it
+                _wb = dict(state.successes[-1].get("shape").body or {}) \
+                    if getattr(state.successes[-1].get("shape"), "body", None) else {}
+                _wb = {k: ("{{SESSION_ID}}" if str(v) == str(_cid) else v) for k, v in _wb.items()}
+                _flow["message_body"] = _wb
+            result.session_flow = _flow
+
     result.attempts = state.attempts
 
     # ---------------- outcome ----------------
@@ -1493,8 +1667,13 @@ def probe_api(url: str,
         # Success evidence is JUST the winning exchange: classify picks its chat
         # pair by "the request whose body contains the prompt", and every failed
         # attempt contains it too — feeding them all in would invite a wrong pick.
+        # A two-step win needs BOTH exchanges in the evidence or the session classifier cannot
+        # see the create it depends on.
+        _won_pairs = [best["pair"]] if best["pair"] else []
+        if created_pair is not None and created_pair not in _won_pairs:
+            _won_pairs = [created_pair] + _won_pairs
         result.evidence = {
-            "pairs": [best["pair"]] if best["pair"] else [],
+            "pairs": _won_pairs,
             "ws_messages": [],
             "prompt_sent": prompt,
             "reply_text": best["answer"],
@@ -1614,6 +1793,28 @@ def build_config(result: ProbeResult, *, timeout_ms: Optional[int] = None) -> Di
         raise ValueError(
             f"probe did not find a working contract (diagnosis={result.diagnosis}): "
             f"{result.message} | next: {result.hint}")
+
+    flow = getattr(result, "session_flow", None)
+    if flow and flow.get("session_endpoint") and flow.get("message_endpoint"):
+        # A create-then-message target: emit the FLOW so every probe opens its own session.
+        cfg = {
+            "adapter": "session_api",
+            "session_endpoint": flow["session_endpoint"],
+            "session_body": flow.get("session_body") or {},
+            "session_extract": flow.get("session_extract") or "id",
+            "message_endpoint": flow["message_endpoint"],
+            "message_body": flow.get("message_body") or result.request_body,
+            "response_path": result.response_path,
+            # the templated endpoint, never the one session we happened to open: an id in
+            # here reads as part of the contract and gets copied into hand-edited configs
+            "_probe": {"derived": "create-then-message",
+                       "endpoint": flow["message_endpoint"]},
+        }
+        if result.headers:
+            cfg["headers"] = dict(result.headers)
+        if timeout_ms is not None:
+            cfg["timeout_ms"] = int(timeout_ms)
+        return cfg
 
     headers = dict(result.headers or {})
     # Do NOT bake a timeout into a generated config. `result.timeout_s` is the DISCOVERY timeout —

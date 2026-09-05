@@ -68,9 +68,13 @@ the run finishes **looking clean while measuring nothing**. Worse: when probes k
 failing the platform **auto-pauses the assessment**, so the visible symptom is a stalled
 run and an idle bridge — which reads as "the bridge died".
 
-Declare it instead of pasting a token. Two separate blocks, because they answer two
-different questions — **`auth`** is *who mints the credential* (Layer 2), and
-**`auth_lifecycle`** is *when to re-acquire it* (Layer 3):
+Declare it instead of pasting a token. For a credential that does not expire, give it on
+the command line as an environment reference — `--bearer env:MY_TOKEN`,
+`--api-key 'X-API-Key:env:MY_KEY'`, `--basic 'user:env:MY_PW'` — and the config carries the
+reference, never the value; the relay resolves it on every run. For a credential that is
+minted by a login, two separate blocks, because they answer two different questions —
+**`auth`** is *who mints the credential* (Layer 2), and **`auth_lifecycle`** is *when to
+re-acquire it* (Layer 3):
 
 ```json
 "auth": {
@@ -300,13 +304,10 @@ an already-used name is saved as `<name>-2` instead of overwriting, and both are
 output. When the endpoint cannot be read from a config at all (`bedrock` carries only a region,
 `session_poll` carries no URL), a re-run is treated as a refresh — never as a new target.
 
-> Fallback when the `validate` verb is a scaffold in your build: validate by a live
-> single-probe relay. Create a throwaway thin app, start the runtime against your
-> config, and confirm one probe returns the target's real answer:
-> `ascend app create --type bridge --name probe-check` →
-> `STRAIKER_BRIDGE_API_KEY=<tc-key> ascend runtime start --adapter <type> --config <config> --qpm 2`
-> then delete the throwaway app. A config that cannot return one correct live
-> answer is not validated.
+> The same gate, by target name once it is registered: `ascend target check <name>`. It
+> replays a prompt through the live endpoint, times it, and warns when the reply time is
+> close to the per-probe window. A config that cannot return one correct live answer is
+> not validated.
 
 ### 5. Iterate the failing layer, not the whole config
 On mismatch, the classifier's confidence map tells you which layer to suspect

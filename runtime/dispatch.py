@@ -93,8 +93,15 @@ def merge_auth(config: Dict[str, Any], *, timeout_s: float = 20.0,
         return config
     try:
         from layers.auth import AuthProvider  # lazy: only when a config actually needs auth
-        material = AuthProvider(auth_block).materialize(timeout_s=timeout_s, verify_tls=verify_tls)
-        return material.merge_into_config(config)
+        provider = AuthProvider(auth_block)
+        material = provider.materialize(timeout_s=timeout_s, verify_tls=verify_tls)
+        merged = material.merge_into_config(config)
+        # The token the provider just obtained, for the lifecycle's JWT-`exp` check. This merged
+        # dict lives only inside TargetCaller for the run and is never written to disk; the
+        # underscore marks it as runtime state, like `_auth_error` below.
+        if provider.token:
+            merged["_auth_token"] = provider.token
+        return merged
     except Exception as exc:  # noqa: BLE001
         merged = dict(config)
         merged["_auth_error"] = str(exc)

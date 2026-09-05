@@ -51,6 +51,14 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ### Fixed
 
+- **Restored a merge that was silently reverted.** Commit `9d140af`, described as a
+  changelog-only change, actually removed 858 lines across 17 files: the fleet wait from #52
+  (so `assess run --app A --app B` returned immediately, reported every run as "running" and
+  exited 0 — a false pass for any pipeline reading it), auth runtime fixes from #47, relay
+  reclaim from #49, polish from #55, four skill updates, and three whole test files (473 lines)
+  that would have caught all of it — which is why nothing did. Everything is restored, the one
+  hunk that collided with #66 hand-merged, and the fleet wait proven live.
+
 - **The `answered` line in `assess results` survives the relay stopping.** It read the relay's
   counters through `bridge ls`, which walks pid files — and a relay that finished and
   self-stopped has had its pid file pruned, so the app vanished from the list while its state

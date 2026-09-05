@@ -9,6 +9,14 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ### Added
 
+- **`ascend skills`, and the skills are named on the launch screen.** Measured in a controlled
+  trial: 0 of 22 operators ever opened the skills directory and 1 read the docs page, so nothing
+  the layer contained could help anyone. Two new skills from that trial's measured pain —
+  `verify-run` (every operator had to prove probes were answered by hand) and `manage-fleet`
+  (the CLI's widest measured advantage, previously unencoded) — and three updated: `build-adapter`
+  no longer leads with "capture a HAR" for two-step targets, `onboard-target` gains the `env:`
+  preflight and the answered-probe gate, `run-assessment` gains `--detail` and the evidence-based
+  false-pass check.
 - **A create-then-message target derives from its URL alone.** `ascend target add http://host`
   against a bot that requires `POST /session` before `POST /session/{id}/message` failed with
   `bad_shape` — while the diagnosis text already named the contract exactly and then told the
@@ -48,6 +56,18 @@ All notable changes to the Ascend CLI. Newest first. Format follows
   produced the findings to show them exited 3 with `unrecognized arguments: --detail`, before
   anything started, and the whole run had to be re-issued. Two independent operators hit it in
   consecutive trials.
+- **`assess results` now answers "did the target actually reply?".** Measured across 22 agent
+  onboardings: every one of them, on both the CLI and the raw-API path, established that probes
+  had been answered by leaving the results command and reading relay counters or a bridge debug
+  log. The results surface never said it. It now prints the relay's own `answered / delivered /
+  failed` counts and carries them in `--json` as `relay_answered`, `relay_delivered`,
+  `relay_failed`.
+- **The false-pass guard fires on evidence instead of probe count.** It warned whenever a clean
+  run had `total <= 4` — and one control is exactly four probes, so every correctly-scoped
+  single-control run tripped it, on runs that were provably fine. Operators learned to disregard
+  it. It now reads the relay's counters: silent when answers are proven, a **confirmed** false
+  pass (stated as fact, not suspicion) when the relay answered nothing, and the old heuristic —
+  worded as unverifiable-on-this-machine — only when there is no local relay record at all.
 - **An `env:` credential reference now resolves, or fails loudly.** Two defects pushed operators
   straight back to plaintext secrets, which is the one outcome the feature exists to prevent.
   `--login-body 'client_id=env:DEMO_ID&...'` POSTed the literal string `env:DEMO_ID` — the refs

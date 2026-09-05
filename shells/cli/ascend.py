@@ -4161,25 +4161,21 @@ def cmd_onboard(args):
         return
 
     # 4. bridge ----------------------------------------------------------------
-    _step(4, total, "starting the probe bridge in the background")
-    import logging, threading, runtime.run as runtime_run
-    # Without this the bridge and adapters log nothing, so the operator cannot tell a
-    # working run from a stalled one — the main anxiety of an unattended assessment.
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
-                        format="      %(name)s: %(message)s", stream=sys.stderr)
-    logging.getLogger("ascendbridge.lease").setLevel(
-        logging.DEBUG if args.verbose else logging.INFO)
-    client = runtime_run.build_runtime(
-        tc, adapter, cfg_name, base_url=args.bridge_base, qpm=args.qpm)
-    ready = threading.Event()
-    threading.Thread(target=lambda: client.run_forever(ready_cb=ready.set),
-                     daemon=True).start()
-    if not ready.wait(timeout=60):
-        if getattr(client, "fatal_error", None):
-            _die(client.fatal_error, code=EXIT_ERROR)   # e.g. rejected bridge key
-        _die("the bridge worker could not reach the lease endpoint within 60s; check egress to "
-             f"{args.bridge_base}", code=EXIT_ERROR)
-    _ok("bridge connected")
+    # A DURABLE relay -- the same supervised process `assess run` uses -- not a daemon thread
+    # inside this command. The thread version started the assessment and then, under --json,
+    # stopped the only relay and returned: an assessment deliberately left with nobody answering,
+    # which scores as a clean run that measured nothing. Observed by an operator in a live trial
+    # ("the run was briefly unserved; fixed by `bridge start`"). The supervised relay outlives
+    # this process and self-stops when the run ends, so --json can return immediately AND the
+    # run is served -- which is the most common way an agent uses this command.
+    _step(4, total, "starting the probe bridge")
+    ensure = _ensure_bridge(c, app_id, args=args)
+    _note = _ensure_note(ensure)
+    if _note:
+        print(f"  {_note}", file=sys.stderr)
+    if ensure.get("error") and not ensure.get("ensured"):
+        _die(f"the bridge could not be started: {ensure['error']}", code=EXIT_ERROR)
+    _ok("bridge serving (detached; it self-stops when the run ends)")
 
     # 5. assess ----------------------------------------------------------------
     _step(5, total, "starting the assessment")
@@ -4187,44 +4183,21 @@ def cmd_onboard(args):
     aid = run.get("assessment_id")
     _ok(f"assessment {aid}")
     print("", file=sys.stderr)
-    print(f"  watch:    ascend assess status  --app {app_id} --assessment {aid}", file=sys.stderr)
+    print(f"  watch:    ascend assess watch   --app {app_id} --assessment {aid}", file=sys.stderr)
     print(f"  findings: ascend assess results --app {app_id} --assessment {aid} --detail", file=sys.stderr)
     print("", file=sys.stderr)
 
     if args.wait:
-        _ok("waiting for completion (Ctrl-C to detach; the run continues server-side)")
+        _ok("waiting for completion (Ctrl-C to detach; the run and its relay continue)")
         final = c.poll_assessment(app_id, aid, interval=args.interval, timeout=args.timeout_assess,
                                   on_tick=lambda st, pr, a: _ok(f"status={st} progress={pr}"))
         print("", file=sys.stderr)
         _out(final, args, human=_verdict(final, detail=args.detail))
-    else:
-        _out({"app_id": app_id, "assessment_id": aid, "config": cfg_name,
-              "adapter": adapter}, args,
-             human="bridge running in this process — leave it open while the assessment runs "
-                   "(Ctrl-C to stop).")
-        if args.json:
-            # An agent calling `onboard --json` must get its object and RETURN. Blocking here
-            # forever made the command unusable from a script; the bridge belongs to the fleet
-            # supervisor, which survives independently.
-            print("note: the in-process bridge is not held open in --json mode. "
-                  "Start a durable one with:  ascend bridge start --app <app>", file=sys.stderr)
-            client.stop()
-            return
-        try:
-            last = None
-            while True:
-                time.sleep(30)
-                st = client.stats
-                line = (f"bridge: {st.get('answered',0)} answered, "
-                        f"{st.get('failed',0)} failed, "
-                        f"{st.get('empty_polls',0)} idle polls")
-                if line != last:
-                    _ok(line)
-                    last = line
-        except KeyboardInterrupt:
-            client.stop()
-            _ok("bridge stopped")
-
+        return
+    _out({"app_id": app_id, "assessment_id": aid, "config": cfg_name, "adapter": adapter,
+          "bridge": {k: ensure.get(k) for k in ("ensured", "started", "reused", "pid")}}, args,
+         human="the relay is detached and serving; this command can exit. "
+               f"Follow the run with:  ascend assess watch --app {app_id} --assessment {aid}")
 
 
 # ----------------------------------------------------------------------------- results

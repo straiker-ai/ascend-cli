@@ -14,6 +14,8 @@ Config keys:
   session_variable  - Variable name injected into message endpoint/body (default: "SESSION_ID")
   message_endpoint  - URL to send messages ({{SESSION_ID}} is replaced with extracted value)
   message_body      - Request body template with {{PROMPT}} and {{SESSION_ID}} placeholders
+  session_greeting  - Optional. A first turn sent after create and before the prompt; some widgets
+                      refuse any question until they have been greeted (409 'first turn must be a greeting')
   response_path     - Dot-path to extract response text (default: "messages.0.message")
   headers           - Dict of headers shared across both calls
   timeout_ms        - Request timeout in milliseconds (optional; otherwise derived from the platform's per-probe window)
@@ -95,6 +97,18 @@ class SessionAPIAdapter(BotAdapter):
 
         # --- Step 2: Send message ---
 
+        greeting = config.get("session_greeting")
+        if greeting:
+            # A widget that gates on a greeting returns 409 to any first question. One greeting
+            # turn opens it; its reply is not the answer to anything and is discarded.
+            gb = json.dumps(config.get("message_body", {}))
+            gb = gb.replace("{{PROMPT}}", _json_escape(str(greeting)))
+            gb = gb.replace(f"{{{{{variable_name}}}}}", _json_escape(str(session_value)))
+            try:
+                requests.post(resolved_endpoint, json=json.loads(gb), headers=headers,
+                              timeout=timeout)
+            except Exception as e:  # noqa: BLE001 -- a failed greeting is reported by the prompt turn
+                logger.info(f"SessionAPI: greeting turn failed ({e}); continuing")
         message_body = config.get("message_body", {})
         message_body_str = json.dumps(message_body)
         message_body_str = message_body_str.replace("{{PROMPT}}", _json_escape(prompt))

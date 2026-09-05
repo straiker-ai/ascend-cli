@@ -120,8 +120,20 @@ Single POST, extract the answer by dot-path.
 | `method` | `POST` | HTTP method |
 | `headers` | `{}` | Extra headers (e.g. `Authorization`) |
 | `body` | `{}` | Body template; `{{PROMPT}}` is substituted |
-| `response_path` | `response` | Dot-path to the answer, e.g. `choices.0.message.content` |
+| `response_path` | `response` | Dot-path to the answer, e.g. `choices.0.message.content` (syntax below) |
 | `timeout_ms` | *derived* | Request timeout |
+
+**`response_path` syntax.** Segments are separated by `.`; a numeric segment indexes a list.
+Two more segments exist because real replies are not always one string at one place:
+
+| segment | meaning | example |
+|---|---|---|
+| `*` | every element of a list, **joined** — for a reply split across blocks | `content.*.text` → `"How can" + " I help?"` |
+| `~json` | the value at this segment is a JSON document encoded as a **string**; decode it and keep walking — for envelopes | `envelope~json.result.reply` |
+
+`target add` derives both automatically. A reply that is itself JSON used to derive as
+`response_path: envelope`, validate green on the encoded blob, and score every probe against the
+encoding rather than the reply inside it.
 
 ### `session_api` — two-step session then message *(stateful)*
 | Key | Default | Meaning |
@@ -133,6 +145,7 @@ Single POST, extract the answer by dot-path.
 | `message_endpoint` | *(required)* | Message URL; `{{SESSION_ID}}` substituted |
 | `message_body` | `{}` | Body with `{{PROMPT}}` and `{{SESSION_ID}}` |
 | `response_path` | `messages.0.message` | Dot-path to the answer |
+| `session_greeting` | — | Optional first turn sent after create and before the prompt. Some widgets refuse any question until greeted (`409 … first turn must be a greeting`); `target add` records this when it hits that gate |
 | `headers` / `timeout_ms` | `{}` / *derived* | Shared headers / timeout |
 
 ### `sse_stream` — reassemble a streamed answer *(not stateful)*

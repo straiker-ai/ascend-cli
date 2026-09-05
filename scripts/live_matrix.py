@@ -155,6 +155,32 @@ def capture(shape: str, port: int, out_dir: Path) -> tuple[Path | None, str | No
                 break
             time.sleep(0.6)
         return h.write(out_dir / "ack-poll.har"), None
+    # ---- the thirteen shapes added to the forge after this matrix was written ----------------
+    # Single-shot shapes hand over a bare URL: that is what a customer gives us, and the prober
+    # derives transport (JSON / NDJSON / text), the body template and the answer path from it.
+    # A missing case here scored as "no evidence could be captured" and dragged the baseline to
+    # 11/24 while every covered shape passed -- a coverage gap masquerading as a health number.
+    if shape in ("ndjson", "lines", "blocks", "preamble", "envelope", "latin1", "form", "rotate"):
+        return None, f"{b}/chat"
+    if shape == "gateway":
+        return None, f"{b}/api/v3/assistant/messages"
+    if shape == "soap":
+        return None, f"{b}/services/AssistantService"
+    if shape == "grpc-web":
+        return None, f"{b}/acmeshop.assistant.v1.Assistant/Ask"
+    if shape == "widget":
+        # create-then-message with a greeting gate; the bare base URL lets the prober find
+        # /api/chat/v1/sessions and follow the id into /sessions/{id}/turns.
+        return None, b
+    if shape == "graphql":
+        # The prober cannot guess a GraphQL operation -- it says so and asks for one working
+        # request. Hand it exactly that, as the curl a customer would paste from their client.
+        curl = out_dir / "graphql.curl"
+        curl.write_text(
+            f"curl -X POST {b}/graphql -H 'content-type: application/json' -d "
+            + "'{\"query\":\"mutation($input:MessageInput!){sendMessage(input:$input){messages{role content}}}\","
+            + "\"variables\":{\"input\":{\"message\":\"" + QUESTION + "\"}}}'\n")
+        return curl, None
     if shape == "ws":
         return None, f"ws://127.0.0.1:{port}/"
     if shape == "page":

@@ -11,6 +11,14 @@ description: >-
 
 # build-adapter
 
+> **Try the bare URL first.** A create-then-message target — one that needs `POST /session`
+> before `POST /session/{id}/message` — is now derived automatically by
+> `ascend target add <url>`, which emits a `session_api` config whose `message_endpoint` carries
+> `{{SESSION_ID}}`. Capturing a HAR for that shape is a fallback, not the opening move. Reach for
+> the capture path when the bare URL genuinely fails, or when the flow needs a step the prober
+> cannot guess (a login page, a GraphQL operation, a browser-only widget).
+
+
 An adapter is **not** a class you pick from a list. It is a **composition of six
 orthogonal layers**, each with a finite set of values. This skill is the reasoning
 wrapper around a deterministic pipeline: the CLI classifies each layer from

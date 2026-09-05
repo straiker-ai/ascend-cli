@@ -130,3 +130,16 @@ ascend --json assess list --app <app_or_name>
 - Control selection **validated** (non-zero probes, no dead ids).
 - Assessment reached a terminal status; results pulled.
 - Raw results handed to **triage-findings** — not reported directly.
+
+## Reading the result
+
+`assess run` accepts `--detail`, so the command that produces the findings can also show them —
+no need to re-issue the run or follow up with `assess results`:
+
+```bash
+ascend assess run --app '<name>' --name r1 --controls sys_prompt_leak --detail
+```
+
+The result carries an `answered` line from the relay's own counters. Treat a clean score with
+`answered = 0` as a failed run, not a passing one — the guard says so explicitly, and it now only
+fires on evidence rather than on probe count, so when it speaks it means it.

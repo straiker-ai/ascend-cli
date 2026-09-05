@@ -9,6 +9,15 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ### Added
 
+- **`ascend skills`, and the skills are named on the launch screen.** Measured in a controlled
+  trial: 0 of 22 operators ever opened the skills directory and 1 read the docs page, so nothing
+  the layer contained could help anyone. Two new skills from that trial's measured pain —
+  `verify-run` (every operator had to prove probes were answered by hand) and `manage-fleet`
+  (the CLI's widest measured advantage, previously unencoded) — and three updated: `build-adapter`
+  no longer leads with "capture a HAR" for two-step targets, `onboard-target` gains the `env:`
+  preflight and the answered-probe gate, `run-assessment` gains `--detail` and the evidence-based
+  false-pass check.
+
 - **Reconnaissance as a first-class step.** In the Console, recon (capability enumeration) is
   started separately from an assessment. The CLI gives it one noun and one decision:
   `ascend recon run|list|show|results|controls`, and `ascend assess run --with-recon` (recon to

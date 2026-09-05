@@ -2,7 +2,7 @@
 
 *Generated from the CLI's argparse tree by `scripts/gen_command_map.py`. A test fails if this file is stale, so every flag here is a flag that exists.*
 
-21 command groups · 59 commands. Sections follow `ascend --help`.
+22 command groups · 60 commands. Sections follow `ascend --help`.
 
 ## Flags every command accepts
 
@@ -910,6 +910,11 @@ lease probes and relay them to a target via an adapter (see `bridge start --fore
 | `--no-self-reconcile` | — | — | do NOT self-stop on assessment completion (stay up until stopped manually) |
 
 > example: STRAIKER_BRIDGE_API_KEY=tc-... ascend runtime start --adapter direct_api --config mybot
+
+### `ascend skills`
+
+list the packaged skills (procedures for agents and operators)
+
 
 ### `ascend status`
 

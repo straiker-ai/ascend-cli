@@ -6927,6 +6927,43 @@ def _add_build_args(s):
     s.add_argument("--out", help="write the drafted config here")
 
 
+def cmd_skills(args):
+    """List the packaged skills.
+
+    Measured in a controlled trial: 0 of 22 operators ever opened the skills directory and 1 read
+    the docs page — the layer was effectively invisible, so nothing it contains could help anyone.
+    A verb that names them from inside the tool is the cheapest fix for that, and it is the first
+    place an agent looks: `ascend --help`.
+    """
+    import re as _re
+    root = REPO / "skills"
+    rows = []
+    for d in sorted(root.iterdir()) if root.is_dir() else []:
+        f = d / "SKILL.md"
+        if not f.is_file():
+            continue
+        text = f.read_text(encoding="utf-8", errors="replace")
+        m = _re.search(r"^description:\s*>-\s*\n((?:[ \t]{2,}\S.*\n)+)", text, _re.M)
+        desc = " ".join(m.group(1).split()) if m else ""
+        rows.append({"skill": d.name, "path": str(f), "description": desc})
+    if args.json:
+        _out(rows, args)
+        return
+    if not rows:
+        print("no skills packaged in this build")
+        return
+    print("packaged skills — each is a procedure; read the file for the full steps\n")
+    for r in rows:
+        print(f"  {r['skill']}")
+        line = "   "
+        for w in r["description"].split():
+            if len(line) + len(w) + 1 > 92:
+                print(line); line = "   "
+            line += " " + w
+        print(line + "\n")
+    print(f"  files: {root}/<name>/SKILL.md")
+
+
 def build_parser():
     p = _Parser(
         prog="ascend", description=__doc__, parents=[GLOBALS],
@@ -7678,6 +7715,9 @@ def build_parser():
                    help="update this install if a newer release is published "
                         "(git pull for a clone; prints the command for pipx/binary)")
     s.set_defaults(func=cmd_doctor)
+    sub.add_parser("skills", parents=[GLOBALS], formatter_class=_Fmt,
+                   help="list the packaged skills (procedures for agents and operators)"
+                   ).set_defaults(func=cmd_skills)
     sub.add_parser("version", parents=[GLOBALS], formatter_class=_Fmt, help="print version"
                    ).set_defaults(func=lambda a: _out({"version": VERSION}, a, human=VERSION))
     return p
@@ -8289,6 +8329,9 @@ def _launch_screen():
     print("    ascend target add --help  " + c("# onboard your first target", DIM))
     print("    ascend status             " + c("# tenant, targets, live runs, bridges", DIM))
     print("    ascend --help             " + c("# every command", DIM))
+    # Discoverability, measured: across 22 onboardings nobody found the skills layer, so nothing
+    # in it could help. The launch screen is the first thing an operator or an agent sees.
+    print("    ascend skills             " + c("# step-by-step procedures (agents: start here)", DIM))
     print()
     print("  " + c("app · adapter · keys are the machinery underneath target, still supported",
                    DIM))

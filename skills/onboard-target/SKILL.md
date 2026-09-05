@@ -185,3 +185,20 @@ measured nothing.
 - `doctor` green; adapter config **validated**; one **live probe** round-tripped
   the real target answer through the bridge; thin app registered; first assessment
   running against a non-zero-probe control selection.
+
+## Two gates that are not optional
+
+**Before the run — credentials must resolve where the relay will run.** If the config
+authenticates by `env:` reference, export the variable in the shell that starts the relay.
+`ascend bridge start` refuses and names a missing one, because a relay that starts without it is
+refused by the target on every probe and scores as a clean run that measured nothing.
+
+**After the run — prove the target answered.**
+
+```bash
+ascend assess results --app '<name>'      # read the `answered` line
+```
+
+`answered = 0` means the score is meaningless regardless of how clean it looks. This is the step
+operators skip most often; see the `verify-run` skill for the full triage. Do not report, export,
+or gate on a number until this passes.

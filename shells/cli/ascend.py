@@ -2558,6 +2558,31 @@ def _guard_egress(url, args):
     return None
 
 
+def _resolve_login_refs(obj, where):
+    """Resolve `env:NAME` references inside a --login-body before the exchange is sent.
+
+    The refs were recorded into the runtime auth block correctly but never resolved for the CLI's
+    OWN onboarding-time login call, so `--login-body 'client_id=env:DEMO_ID&...'` POSTed the
+    literal string "env:DEMO_ID" and the IdP answered 401. The operator's only way out was to put
+    the real secret on the command line -- exactly what `env:` exists to prevent.
+    """
+    if not isinstance(obj, dict):
+        return obj
+    from layers.auth import resolve_secret_ref, AuthError
+    out = {}
+    for k, v in obj.items():
+        if isinstance(v, str) and v.startswith("env:"):
+            try:
+                out[k] = resolve_secret_ref(v)
+            except (AuthError, KeyError) as e:
+                _die(f"{where}: {k}={v!r} but {str(e) or 'that variable is not set'}.\n"
+                     f"  export {v[4:]}=... in this shell, or pass the value literally.",
+                     code=EXIT_ERROR)
+        else:
+            out[k] = v
+    return out
+
+
 def _login_for_token(args):
     """Perform the login / access-code exchange: POST --login-body to --login-url, then
     pull the token at --token-path (or reuse a Set-Cookie session). Returns headers to add
@@ -2565,6 +2590,8 @@ def _login_for_token(args):
     import requests
     url = args.login_url
     body, form = _parse_login_body(args.login_body)
+    body = _resolve_login_refs(body, "--login-body")
+    form = _resolve_login_refs(form, "--login-body")
     print(f"[build] logging in at {url} ...", file=sys.stderr)
     try:
         method = (getattr(args, "login_method", None) or "POST").upper()

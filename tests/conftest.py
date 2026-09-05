@@ -344,3 +344,15 @@ def _build_adversarial_prompts() -> List[str]:
 
 
 ADVERSARIAL_PROMPTS: List[str] = _build_adversarial_prompts()
+
+# ---------------------------------------------------------------------------------------------
+# No test may reach the live tenant. The suite is offline by design (see feedback: live QA is a
+# separate, deliberate step), but a real PAT exported in the developer's shell leaked into tests
+# that spawn the CLI as a subprocess, because they only *defaulted* the variable. Three apps
+# created by a live repro vanished from the tenant minutes after such a suite run. Whether or
+# not that was the cause, a test process must not be able to do it: scrub every credential the
+# CLI reads before any test runs, for the whole session.
+import os as _os
+for _k in ("STRAIKER_PAT", "STRAIKER_TOKEN", "STRAIKER_DEMOPLATFORM_KEY",
+           "STRAIKER_NEW_DISCOVER_PLATFORM_KEY", "STRAIKER_BRIDGE_API_KEY"):
+    _os.environ.pop(_k, None)

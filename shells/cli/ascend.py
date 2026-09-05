@@ -79,7 +79,11 @@ def _client(args, *, check_tenant: bool = True):
     import api
     tok = args.token or os.environ.get("STRAIKER_PAT") or os.environ.get("STRAIKER_TOKEN")
     if not tok:
-        _die("no token: pass --token or set $STRAIKER_PAT")
+        # Name every variable the CLI actually reads. Operators arriving with a key under a
+        # different name (measured: several in a row) otherwise learn the accepted name by
+        # reading source.
+        _die("no token: pass --token, or export STRAIKER_PAT (or STRAIKER_TOKEN) — a personal "
+             "access token (s6r_pat_...) from the Console")
     c = api.AscendAPI(token=tok, base=args.base)
     if check_tenant and os.environ.get("ASCEND_SKIP_TENANT_CHECK"):
         # The lock is the guard against operating the WRONG customer's tenant. Disabling it is a

@@ -53,9 +53,12 @@ score — a green gate on an unanswered run is worse than a red one, because it 
 
 ## When answered is zero
 
-Work down, cheapest first:
+Work down, cheapest first. Note that `ascend bridge ls` is **not** on this list as a first step:
+it shows relays that are alive right now, and a four-probe run's relay has usually self-stopped
+before you look. `assess results` reads the relay's persisted counters, which outlive it.
 
-1. `ascend bridge ls` — is a relay serving this app at all? `ANS` is the same counter.
+1. `ascend assess results --app '<name>'` — the `answered` line is the relay's own count and
+   survives the relay stopping. If it is there and zero, the target was never reached.
 2. `ascend bridge logs --app '<name>'` — the relay records every call it made and what came back.
    A wall of `401`/`403` is a credential problem, not a target problem.
 3. `ascend target check '<name>'` — re-prove the adapter against the live target right now.
@@ -63,6 +66,8 @@ Work down, cheapest first:
 4. If the config authenticates by `env:` reference, confirm the variable is exported **in the
    shell that starts the relay**. `bridge start` refuses and names it, but a relay started earlier
    from a different shell will already be failing every probe.
+5. `ascend bridge ls` — only useful while the run is still going: is a relay serving this app
+   *right now*? `ANS` is the same counter, live.
 
 ## What this skill will not do
 

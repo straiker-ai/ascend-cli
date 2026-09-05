@@ -84,12 +84,21 @@ CANDIDATE_PATHS: Tuple[str, ...] = (
     "converse",
     # create-then-message contracts: the create call answers 2xx with an id and no answer, which
     # the diagnosis names as such instead of "no candidate path behaved like a chat endpoint"
+    # Ordered by how often the wild uses them, because the blind search has an attempt budget
+    # and whatever sits past it is never tried. Adding five nested variants ABOVE `session`
+    # pushed the single most common create path from index 19 to 24 -- outside a 20-attempt
+    # budget -- and the live matrix caught the regression within the hour. Common first.
     "conversations",
     "conversation",
-    "threads",
-    "thread",
     "sessions",
     "session",
+    "threads",
+    "thread",
+    "api/chat/v1/sessions",
+    "api/v1/sessions",
+    "api/sessions",
+    "api/v1/conversations",
+    "api/conversations",
     "predict",
     "completion",
     "v1/completions",
@@ -499,7 +508,25 @@ def _shapes_from_error(body_text: str, parsed: Any) -> List[Shape]:
                 if seg:
                     fields.append(".".join(seg))
 
-    for pat in (r"['\"`]([A-Za-z_][A-Za-z0-9_]{1,30})['\"`][^.]{0,40}(?:is )?required",
+    # A server that names its missing field UNQUOTED ("channel is required") was invisible to the
+    # quoted patterns, and one that hands over the exact body it wants ("hint": "message=<text>&
+    # channel=web") was ignored entirely. Both are common, and both are the server doing our job.
+    hinted: List[Shape] = []
+    hint = (parsed or {}).get("hint") if isinstance(parsed, dict) else None
+    if isinstance(hint, str) and "=" in hint and "&" in hint and " " not in hint.strip():
+        kv = dict(x.split("=", 1) for x in hint.split("&") if "=" in x)
+        body = {}
+        for k, v in kv.items():
+            body[k] = PROMPT_TOKEN if re.fullmatch(r"<[^>]+>", v) or k in ("message", "prompt",
+                                                                             "text", "query", "q") else v
+        if PROMPT_TOKEN in body.values():
+            hinted.append(Shape(label="hint_form", method="POST", body=body,
+                                content_type="application/x-www-form-urlencoded"))
+            hinted.append(Shape(label="hint_json", method="POST", body=dict(body)))
+    for pat in (r"\b([A-Za-z_][A-Za-z0-9_]{1,30}) is required\b",
+                # the docstring's own example -- "field required: 'question'" -- name AFTER the word
+                r"required[:\s]+['\"`]([A-Za-z_][A-Za-z0-9_]{1,30})['\"`]",
+                r"['\"`]([A-Za-z_][A-Za-z0-9_]{1,30})['\"`][^.]{0,40}(?:is )?required",
                 r"required (?:property|field|parameter)[: ]+['\"`]?([A-Za-z_][A-Za-z0-9_]{1,30})",
                 r"missing (?:required )?(?:field|parameter|property)[: ]+['\"`]?([A-Za-z_][A-Za-z0-9_]{1,30})"):
         for m in re.finditer(pat, body_text or "", re.I):
@@ -516,7 +543,7 @@ def _shapes_from_error(body_text: str, parsed: Any) -> List[Shape]:
         out.append(Shape(f"error_hint:{f}", "POST", body=body))
         if len(out) >= 3:
             break
-    return out
+    return hinted + out          # the server's own body hint outranks a field-name guess
 
 
 # --------------------------------------------------------------------------- #
@@ -810,6 +837,22 @@ def _understand_response(body: str, content_type: str, prompt: str
             # An envelope that says error=… but also carries prose: trust the flag.
             return "rest_json", None, None, {}, env
         best = max(candidates, key=lambda c: c[0])
+        # An ENVELOPE: the winning string is itself a JSON document ({"result":{"reply":…}} as a
+        # string). Accepting it as the answer validated green on a blob and scored every probe
+        # against the encoding rather than the reply. Decode it and choose again inside; the
+        # adapter walks the same `seg~json.inner` path at run time.
+        try:
+            _inner = json.loads(best[2]) if isinstance(best[2], str) and best[2].lstrip()[:1] in "{[" else None
+        except (ValueError, TypeError):
+            _inner = None
+        if isinstance(_inner, (dict, list)):
+            _cands = [(score_answer(p2, v2, prompt), p2, v2) for p2, v2 in string_paths(_inner)]
+            _cands = [c for c in _cands if c[0] >= MIN_ANSWER_SCORE]
+            if _cands:
+                _b2 = max(_cands, key=lambda c: c[0])
+                from .classify import _generalize_block_index as _gbi
+                _p2 = _gbi(_inner, _b2[1]) if _b2[1] else _b2[1]
+                return "rest_json", f"{best[1]}~json.{_p2}" if _p2 else f"{best[1]}~json", _b2[2], {}, ""
         # `max` picks ONE string, so a multi-block answer comes back as whichever block happens to
         # score highest and the rest is silently discarded on every request. Generalize the index
         # to a `*` when the siblings are parts of the same message. This IMPORTS the rule rather
@@ -1247,6 +1290,22 @@ def _with_id_in_body(shape: Shape, field: str, sid: str) -> Optional[Shape]:
                  content_type=shape.content_type)
 
 
+_GREETING = "hello"
+
+
+def _greet_then(state: "_State", url: str, shape: Shape) -> None:
+    """Send one greeting turn to a session that refuses questions until greeted (409 mentioning a
+    greeting), then let the caller re-send the real prompt. Widgets do this; a customer would
+    type "hi" first without thinking about it, so the prober does too."""
+    real = state.prompt
+    try:
+        state.prompt = _GREETING
+        state.try_candidate(url, shape)
+    finally:
+        state.prompt = real
+    state.session_greeting = _GREETING
+
+
 def _follow_create_then_message(state: "_State", shapes: List[Shape]):
     """Follow a create-then-message contract instead of only diagnosing it.
 
@@ -1300,7 +1359,10 @@ def _follow_create_then_message(state: "_State", shapes: List[Shape]):
             for shape in top:
                 if state.exhausted or state.successes:
                     break
-                state.try_candidate(f"{base}/{sid}/{suffix}", shape)
+                att = state.try_candidate(f"{base}/{sid}/{suffix}", shape)
+                if att.status == 409 and "greet" in (att.detail or "").lower() and not state.successes:
+                    _greet_then(state, f"{base}/{sid}/{suffix}", shape)
+                    state.try_candidate(f"{base}/{sid}/{suffix}", shape)
             if state.successes:
                 state.session_placement = ("url", field)
                 return pair
@@ -1482,7 +1544,7 @@ def probe_api(url: str,
               headers: Optional[Dict[str, str]] = None,
               method: Optional[str] = None,
               timeout_s: float = 20.0,
-              max_attempts: int = 40,
+              max_attempts: int = 64,
               rate_limit_s: float = 0.3,
               verify_tls: bool = True,
               paths: Optional[Sequence[str]] = None,
@@ -1542,8 +1604,15 @@ def probe_api(url: str,
     state = _State(prompt, headers or {}, timeout_s, max_attempts, rate_limit_s, verify_tls)
     shapes = default_shapes(method, bodies, extra_body=extra_body)
 
-    # Leave room for phase 2: half the budget for breadth, half for depth.
-    sweep_cap = max(6, max_attempts // 2)
+    # Phase 1 must reach EVERY candidate path: a 404 costs one cheap request, and phase 2 only
+    # runs against the few paths that were alive. "Half the budget for breadth" was tuned when the
+    # list had 20 entries; at 37 it silently never tried the last 17 on a bare URL, and twice in one
+    # day a real create path (`session`, then `api/chat/v1/sessions`) sat just past the cut. Breadth
+    # gets the whole list; the default budget below leaves 24 for depth on top of it.
+    # `paths` here is the caller's EXTRA paths (usually None); candidate_endpoints prepends them
+    # to CANDIDATE_PATHS, so the sweep must be sized to that combined list.
+    _n_paths = len([x for x in (list(paths or []) + list(CANDIDATE_PATHS)) if x])
+    sweep_cap = max(6, min(_n_paths, max_attempts - 24))
     endpoints = candidate_endpoints(url, paths, limit=sweep_cap)
     caller_url = endpoints[0] if given_path.strip("/") else None
     result.tried_urls = list(endpoints)
@@ -1634,6 +1703,8 @@ def probe_api(url: str,
                     (created_pair.get("response") or {}).get("raw_body"), _cid),
                 "message_endpoint": _win.replace(str(_cid), "{{SESSION_ID}}") if _cid else _win,
             }
+            if getattr(state, "session_greeting", None):
+                _flow["session_greeting"] = state.session_greeting
             if _placement in ("body", "both") and _field:
                 # the winning request body carried the id; template it, never freeze it
                 _wb = dict(state.successes[-1].get("shape").body or {}) \
@@ -1804,6 +1875,7 @@ def build_config(result: ProbeResult, *, timeout_ms: Optional[int] = None) -> Di
             "session_extract": flow.get("session_extract") or "id",
             "message_endpoint": flow["message_endpoint"],
             "message_body": flow.get("message_body") or result.request_body,
+            **({"session_greeting": flow["session_greeting"]} if flow.get("session_greeting") else {}),
             "response_path": result.response_path,
             # the templated endpoint, never the one session we happened to open: an id in
             # here reads as part of the contract and gets copied into hand-edited configs

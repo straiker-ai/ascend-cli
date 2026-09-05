@@ -3885,6 +3885,39 @@ def _refuse_duplicate_app_name(c, wanted, cfg_name):
          error_code="duplicate_app_name")
 
 
+def _response_path_from_replay(cfg, args):
+    """Send the described request once with a benign prompt and derive WHERE the answer is.
+
+    Shared by every source that describes only the request (a curl, a hand-written config): the
+    probe already knows how to read a reply, so reuse it rather than shipping a config that has
+    to guess at run time.
+    """
+    try:
+        import requests
+        from runtime.discovery.probe import _understand_response
+        prompt = "Hello! What can you help me with?"
+        body = cfg.get("body")
+        rendered = json.loads(json.dumps(body).replace("{{PROMPT}}", prompt)) if body is not None else None
+        headers = dict(cfg.get("headers") or {})
+        kw = {}
+        if rendered is not None:
+            if (headers.get("Content-Type") or headers.get("content-type") or "").startswith(
+                    "application/x-www-form-urlencoded"):
+                kw["data"] = rendered
+            else:
+                kw["json"] = rendered
+        r = requests.request(cfg.get("method") or "POST", cfg["endpoint"], headers=headers,
+                             timeout=min(int(getattr(args, "timeout", 30) or 30), 60),
+                             verify=not getattr(args, "insecure", False), **kw)
+        if r.status_code >= 400:
+            return None
+        _t, path, answer, _h, _reason = _understand_response(
+            r.text, r.headers.get("Content-Type", ""), prompt)
+        return path if (path and answer) else None
+    except Exception:
+        return None
+
+
 def cmd_onboard(args):
     """Zero to a running assessment in one command.
 
@@ -3991,6 +4024,15 @@ def cmd_onboard(args):
             _die(f"could not read that curl command: {e}")
         _guard_egress(cfg.get("endpoint") or cfg.get("url"), args)
         cfg = _finalize_target_auth(cfg, args)
+        if not cfg.get("response_path") and cfg.get("endpoint"):
+            # `from_curl` describes the REQUEST; nothing had ever looked at the reply. Without a
+            # response_path the adapter falls back to "deepest string", which on a GraphQL
+            # envelope is the __typename -- a constant, so the constant-response guard then
+            # refused a target that was answering perfectly well. Replay once and read the reply.
+            _found = _response_path_from_replay(cfg, args)
+            if _found:
+                cfg["response_path"] = _found
+                _ok(f"answer at {_found}")
         cfg_path, cfg_name = _write_named_config(cfg, cfg_name, exact=named_exactly)
     else:
         _step(1, total, f"capturing the contract from {args.url or args.har}")

@@ -192,6 +192,20 @@ def _extract(data: Any, path: str) -> Any:
     to name a fixed index: ``messages.0.content`` scores the probe's OWN prompt echoed back, and
     ``messages.1.content`` breaks the moment the target adds a system turn.
     """
+    # `seg~json`: the value at `seg` is a JSON document encoded as a STRING -- an envelope -- so
+    # decode it and keep walking. Targets that double-encode their payload used to derive as
+    # "answer at envelope", which validated green on a JSON blob and scored every probe against
+    # the raw blob rather than the reply inside it.
+    if "~json" in path:
+        head, _, rest = path.partition("~json")
+        inner = _extract(data, head) if head else data
+        if isinstance(inner, str):
+            try:
+                inner = json.loads(inner)
+            except (ValueError, TypeError):
+                return None
+        rest = rest.lstrip(".")
+        return _extract(inner, rest) if rest else inner
     # `content[].text` splits as ["content[]", "text"], so a trailing `[]` expands into its key
     # plus a wildcard segment; a bare `[]` is the wildcard on its own.
     parts = []

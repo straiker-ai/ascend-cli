@@ -73,6 +73,29 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ### Fixed
 
+- **The live matrix covers every forge shape, and the first full run found four real gaps.**
+  The matrix had capture cases for 11 of 24 shapes; the missing 13 scored as "no evidence could
+  be captured" and dragged the number to 11/24 while every covered shape passed — a coverage gap
+  masquerading as a health number. With all 24 covered the run scored 17/24, and the misses split
+  cleanly: two stale forge expectations (`blocks`, `envelope`), one flaky `ws` startup race, one
+  documented gap (`rotate`: a rotating conversation id cannot be seen from one probe), and four
+  real derivation gaps, all fixed:
+  - **envelope** — the reply was a JSON document encoded as a string; the CLI accepted the blob as
+    the answer. `response_path` gains the **`seg~json`** segment (decode the string, keep walking)
+    and derivation recurses into a winning string that parses as JSON: `envelope~json.result.reply`.
+  - **form** — the target's 400 said `channel is required` and handed over the exact body it
+    wanted (`hint: message=<text>&channel=web`); neither was read. Both are now, and the docstring's
+    own example (`field required: 'question'`) works for the first time.
+  - **graphql via curl** — `from_curl` described the request and nothing ever read the reply, so
+    `response_path` stayed unset and the runtime's deepest-string fallback picked a `__typename`;
+    the constant-response guard then correctly refused a healthy target. One replay now derives it.
+  - **widget** — nested create paths (`api/chat/v1/sessions`, …) and a session that 409s any
+    first question until greeted. The prober greets and records `session_greeting`; `session_api`
+    sends it after create.
+  Adding those nested paths above `session` pushed the most common create path past the 20-attempt
+  budget and it stopped deriving — on this same branch. The matrix caught it within the hour; the
+  order is now by commonality and a test pins the common nouns inside the budget.
+
 - **Every delete verb reports `deleted` under the same key.** `app delete --json` said
   `deleted: true`; `target rm --json` said `app_deleted: true` with no `deleted` at all, so a
   script written against one verb silently misread the other — a teardown checking `deleted` on

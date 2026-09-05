@@ -332,6 +332,7 @@ create->pause->resume->poll an assessment
 | `--with-recon` | — | — | run reconnaissance first (to completion), then the assessment |
 | `--recon-only` | — | — | run reconnaissance only — no attack probes (same as `ascend recon run`) |
 | `--recon-controls` | `IDS` | — | recon control ids for --with-recon/--recon-only (default: the whole recon catalog; see `ascend recon controls`) |
+| `--detail` | — | — | show key findings per control when the run completes |
 
 ```bash
 ascend assess run --app 'My Bot' --name 'run 1'

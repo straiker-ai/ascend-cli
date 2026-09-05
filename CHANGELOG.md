@@ -51,6 +51,11 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ### Fixed
 
+- **`assess run --detail` works.** The command waits for the run and prints the verdict, but
+  rejected the flag its sibling `assess results` has always had — so asking the command that just
+  produced the findings to show them exited 3 with `unrecognized arguments: --detail`, before
+  anything started, and the whole run had to be re-issued. Two independent operators hit it in
+  consecutive trials.
 - **`assess results` now answers "did the target actually reply?".** Measured across 22 agent
   onboardings: every one of them, on both the CLI and the raw-API path, established that probes
   had been answered by leaving the results command and reading relay counters or a bridge debug

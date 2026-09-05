@@ -186,7 +186,7 @@ class TestResultsDefault:
         monkeypatch.setattr(ascend, "_resolve_app", lambda c, r: "aapp_1")
         monkeypatch.setattr(ascend, "_resolve_assessment",
                             lambda c, appid, args, verb="": seen.setdefault("called", True) and "asmt_latest")
-        monkeypatch.setattr(ascend, "_false_pass_warning", lambda a: "WARN: measured nothing")
+        monkeypatch.setattr(ascend, "_false_pass_warning", lambda *a, **k: "WARN: measured nothing")
         ascend.cmd_assess_results(ns(json=True, app="A", assessment=None))
         d = json.loads(capsys.readouterr().out)
         assert seen["called"] and d["id"] == "asmt_latest"

@@ -1932,12 +1932,54 @@ def cmd_assess_watch(args):
         print("detached (the run continues server-side)", file=sys.stderr)
 
 
-def _false_pass_warning(a):
+def _relay_evidence(app_id):
+    """What THIS machine's relay actually saw for one app: {answered, delivered, failed} or None.
+
+    The relay counts every probe it handed to the target and every answer it got back, and those
+    counters survive the relay self-stopping. That is direct evidence about the one question that
+    decides whether a clean score means anything, and until now it was only reachable by running a
+    second command (`bridge ls`) or reading a log file.
+    """
+    if not app_id:
+        return None
+    try:
+        import supervisor as S
+        for r in S.ls():
+            if r.get("app_id") == app_id:
+                st = r.get("stats") or {}
+                if not st:
+                    return None
+                return {"answered": st.get("answered"), "delivered": st.get("delivered"),
+                        "failed": st.get("failed")}
+    except Exception:
+        return None
+    return None
+
+
+def _false_pass_warning(a, app_id=None):
     """A run whose bridge was dead still COMPLETES — unanswered probes aren't findings, so it can
-    read as `score 0 / low` from nothing. Say so instead of letting a clean number be trusted."""
+    read as `score 0 / low` from nothing. Say so instead of letting a clean number be trusted.
+
+    This used to fire on probe COUNT alone (`total <= 4` and clean). One control is exactly four
+    probes, so every correctly-scoped single-control run tripped it. Measured across 22 agent
+    onboardings: it fired on clean runs that were provably fine, every time, and operators learned
+    to disregard it and go read the relay log instead. A warning that always fires is a warning
+    that gets ignored — so it now speaks from evidence:
+
+      * the relay answered probes  -> silent, the run demonstrably reached the target
+      * the relay answered NOTHING -> a confirmed false pass, not a suspicion
+      * no relay on this machine   -> the old heuristic, worded as what it is: unverifiable here
+    """
     status = str(a.get("status", "")).lower()
     if status not in ("complete", "completed", "done"):
         return None
+    ev = _relay_evidence(app_id)
+    if ev is not None and (ev.get("answered") or 0) > 0:
+        return None
+    if ev is not None and (ev.get("answered") or 0) == 0 and (ev.get("delivered") or 0) == 0:
+        return ("  !! this machine's relay answered 0 probes for this run — the target was never\n"
+                "     reached, so a clean score here measured NOTHING. This is a FALSE PASS.\n"
+                "     check:  ascend bridge logs --app <name>   ·   docs/ASSESSMENT_LIFECYCLE.md")
     total = a.get("total")
     try:
         tiny = total is not None and int(total) <= 4
@@ -1945,9 +1987,10 @@ def _false_pass_warning(a):
         tiny = False
     clean = not a.get("failed") or str(a.get("severity", "")).lower() == "low"
     if tiny and clean:
-        return ("  !! only %s probe(s) recorded on a clean result — if the bridge was not running for\n"
-                "     the whole run, unanswered probes score as no findings (a FALSE PASS).\n"
-                "     check:  ascend bridge ls   ·   docs/ASSESSMENT_LIFECYCLE.md" % total)
+        return ("  !! %s probe(s) on a clean result, and this machine has no relay record for the\n"
+                "     run, so it cannot be confirmed here that the target answered. If the app is\n"
+                "     bridge-based and the relay was down, unanswered probes score as no findings\n"
+                "     (a FALSE PASS).  check:  ascend bridge ls" % total)
     return None
 
 
@@ -1956,7 +1999,18 @@ def cmd_assess_results(args):
     app_id = _resolve_app(c, args.app)
     a = c.get_assessment(app_id, _resolve_assessment(c, app_id, args, verb="reading"))
     human = _verdict(a, detail=getattr(args, "detail", False))
-    warn = _false_pass_warning(a)
+    # Answer "did the target actually reply?" HERE. Every operator had to leave this command and
+    # run `bridge ls` (or read a relay log) to establish it, on every single run.
+    ev = _relay_evidence(app_id)
+    if ev is not None:
+        a = dict(a)
+        a["relay_answered"] = ev.get("answered")
+        a["relay_delivered"] = ev.get("delivered")
+        a["relay_failed"] = ev.get("failed")
+        human = (f"{human}\n  answered   {ev.get('answered', 0)} probe(s) answered by the target"
+                 f"  ·  {ev.get('delivered', 0)} delivered  ·  {ev.get('failed', 0)} failed"
+                 f"   (this machine's relay)")
+    warn = _false_pass_warning(a, app_id)
     if warn:
         if args.json:
             # The warning travels with the numbers it qualifies, or a pipeline reads a clean score
@@ -5478,7 +5532,7 @@ def cmd_reports(args):
                 "policy_reranked": sum(1 for f in finds
                                        if f.get("severity_source") == "local-policy"),
                 "worst_severity": next((k for k, v in _SEV_RANK.items() if v == worst), None),
-                "false_pass_suspect": bool(_false_pass_warning(full)),
+                "false_pass_suspect": bool(_false_pass_warning(full, row["app_id"])),
             })
             return row
 

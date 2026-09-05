@@ -43,6 +43,18 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ### Fixed
 
+- **`assess results` now answers "did the target actually reply?".** Measured across 22 agent
+  onboardings: every one of them, on both the CLI and the raw-API path, established that probes
+  had been answered by leaving the results command and reading relay counters or a bridge debug
+  log. The results surface never said it. It now prints the relay's own `answered / delivered /
+  failed` counts and carries them in `--json` as `relay_answered`, `relay_delivered`,
+  `relay_failed`.
+- **The false-pass guard fires on evidence instead of probe count.** It warned whenever a clean
+  run had `total <= 4` — and one control is exactly four probes, so every correctly-scoped
+  single-control run tripped it, on runs that were provably fine. Operators learned to disregard
+  it. It now reads the relay's counters: silent when answers are proven, a **confirmed** false
+  pass (stated as fact, not suspicion) when the relay answered nothing, and the old heuristic —
+  worded as unverifiable-on-this-machine — only when there is no local relay record at all.
 - **An `env:` credential reference now resolves, or fails loudly.** Two defects pushed operators
   straight back to plaintext secrets, which is the one outcome the feature exists to prevent.
   `--login-body 'client_id=env:DEMO_ID&...'` POSTed the literal string `env:DEMO_ID` — the refs

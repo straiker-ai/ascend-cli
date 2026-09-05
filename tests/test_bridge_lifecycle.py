@@ -50,7 +50,20 @@ def test_is_serving_dead_pid_is_not_serving(sup):
     assert sup.is_serving("aapp_x") is False
 
 
-def test_start_keeps_secrets_off_argv_but_in_env(sup, monkeypatch):
+def _real_cfg(tmp_path, name="cfg"):
+    """A config that exists on disk. start() refuses to spawn a relay for one that does not:
+    the child runs from the CLI's own directory and could never have opened it."""
+    import json as _json
+    d = Path(tmp_path) / "cfgs"
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / f"{name}.json"
+    f.write_text(_json.dumps({"adapter": "direct_api", "endpoint": "http://127.0.0.1:9/chat",
+                              "method": "POST", "message_body": {"message": "{{PROMPT}}"},
+                              "response_path": "reply"}))
+    return str(f)
+
+
+def test_start_keeps_secrets_off_argv_but_in_env(sup, monkeypatch, tmp_path):
     captured = {}
 
     class FakePopen:
@@ -60,7 +73,7 @@ def test_start_keeps_secrets_off_argv_but_in_env(sup, monkeypatch):
             self.pid = 4321
     monkeypatch.setattr(sup.subprocess, "Popen", FakePopen)
 
-    sup.start("aapp_x", config="cfg", adapter=None, api_key="tc-secret",
+    sup.start("aapp_x", config=_real_cfg(tmp_path), adapter=None, api_key="tc-secret",
               assessment_id="asmt_1", control_token="s6r_pat_secret",
               control_base="https://ctrl.example", idle_timeout_s=1800)
 
@@ -81,7 +94,7 @@ def test_start_keeps_secrets_off_argv_but_in_env(sup, monkeypatch):
     assert sup.read_status("aapp_x").get("assessment_id") == "asmt_1"
 
 
-def test_no_self_reconcile_flag_on_argv(sup, monkeypatch):
+def test_no_self_reconcile_flag_on_argv(sup, monkeypatch, tmp_path):
     captured = {}
 
     class FakePopen:
@@ -89,7 +102,8 @@ def test_no_self_reconcile_flag_on_argv(sup, monkeypatch):
             captured["argv"] = argv
             self.pid = 55
     monkeypatch.setattr(sup.subprocess, "Popen", FakePopen)
-    sup.start("aapp_y", config="cfg", adapter=None, api_key="tc-x", self_reconcile=False)
+    sup.start("aapp_y", config=_real_cfg(tmp_path), adapter=None, api_key="tc-x",
+              self_reconcile=False)
     assert "--no-self-reconcile" in captured["argv"]
 
 

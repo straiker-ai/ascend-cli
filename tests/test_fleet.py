@@ -11,6 +11,7 @@ These pin the three properties that keep multi-engagement work safe:
 import base64
 import json
 import os
+import json
 import sys
 import time
 from pathlib import Path
@@ -136,18 +137,30 @@ def test_remove_and_archive(home):
 
 
 # --------------------------------------------------------------------------- supervisor
+def _real_config(tmp_path, name="c"):
+    """A config file that exists. `start()` refuses to spawn a relay for one that does not --
+    a doomed child used to be reported as a healthy pid (see test_relay_config_cwd)."""
+    d = tmp_path / "ascend" / "configs"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{name}.json").write_text(json.dumps(
+        {"adapter": "direct_api", "endpoint": "http://127.0.0.1:9/chat", "method": "POST",
+         "message_body": {"message": "{{PROMPT}}"}, "response_path": "reply"}))
+    return str(d / f"{name}.json")
+
+
 def test_start_stop_and_liveness(home, monkeypatch):
     import tenant, supervisor as S
     tenant.check(_jwt())
     # a harmless long-lived child instead of a real relay
     monkeypatch.setattr(S, "REPO", REPO)
-    r = S.start("aapp_x", config="c", adapter="direct_api", api_key="tc-test",
+    cfg = _real_config(home)
+    r = S.start("aapp_x", config=cfg, adapter="direct_api", api_key="tc-test",
                 python=sys.executable)
     # the spawned child is the real CLI; it will exit fast on a bad key/config, which is fine —
     # what we assert is the supervisor's own bookkeeping.
     assert r.get("pid") and S.read_pid("aapp_x") == r["pid"]
     assert S.paths_for("aapp_x")["log"].exists()
-    dup = S.start("aapp_x", config="c", adapter="direct_api", api_key="tc-test")
+    dup = S.start("aapp_x", config=cfg, adapter="direct_api", api_key="tc-test")
     assert "already running" in str(dup.get("error", "")) or dup.get("pid") == r["pid"]
     out = S.stop("aapp_x")
     assert out["app_id"] == "aapp_x"
@@ -170,7 +183,8 @@ def test_key_never_appears_in_child_argv(home, monkeypatch):
         return FakeProc()
 
     monkeypatch.setattr(S.subprocess, "Popen", fake_popen)
-    S.start("aapp_secret", config="c", adapter="direct_api", api_key="tc-SUPER-SECRET")
+    S.start("aapp_secret", config=_real_config(home), adapter="direct_api",
+            api_key="tc-SUPER-SECRET")
     assert "tc-SUPER-SECRET" not in " ".join(seen["argv"])
     assert seen["env"]["STRAIKER_BRIDGE_API_KEY"] == "tc-SUPER-SECRET"
     assert seen["new_session"] is True                        # detached: survives the terminal

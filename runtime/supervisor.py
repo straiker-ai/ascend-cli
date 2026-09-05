@@ -198,9 +198,34 @@ def start(app_id: str, *, config: str, adapter: Optional[str], api_key: str,
             f"probe, which scores as a clean run that measured nothing. "
             f"Export {'them' if len(missing) > 1 else 'it'} and start again."),
             "missing_env": missing}
+    # Resolve the config HERE, in the operator's shell, and hand the child an ABSOLUTE path.
+    # The child is spawned with cwd=REPO (below) while `config_dirs()` searches `Path.cwd()/configs`
+    # first -- so a bare name the operator can resolve is invisible to the relay. That split is not
+    # theoretical: `target add --save-as x` WRITES to ./configs when that directory exists, so any
+    # operator who keeps a configs/ dir in their working directory got a config every foreground
+    # command could read and the relay could not. It surfaced as `relay exited at startup (code 3)`
+    # naming a path in ~/.ascend/configs the operator never chose, the platform pausing the run,
+    # and "probes will go unanswered" -- a false pass in waiting.
+    cfg_for_child = config
+    _inline = str(config).lstrip().startswith("{")      # inline JSON: nothing to resolve
+    try:
+        from configs import resolve_config_path, config_dirs
+        _resolved = None if _inline else resolve_config_path(config)
+        if _resolved:
+            cfg_for_child = str(_resolved)
+        elif not _inline:
+            _where = ", ".join(str(d) for d in config_dirs())
+            return {"app_id": app_id, "error": (
+                f"config {config!r} not found, so the relay was not started. Looked in: {_where}. "
+                f"The relay runs from the CLI's own directory and cannot see a config that exists "
+                f"only relative to this shell -- pass a path to it, or save it under "
+                f"~/.ascend/configs.")}
+    except ImportError:
+        pass                                   # resolver unavailable: pass the reference through
+
     p = paths_for(app_id)
     argv = [python or sys.executable, str(REPO / "shells" / "cli" / "ascend.py"),
-            "runtime", "start", "--config", config,
+            "runtime", "start", "--config", cfg_for_child,
             # a unique consumer per child: the bridge protocol requires parallel clients to differ
             "--consumer", f"abv2-{_safe(app_id)}"]
     if adapter:

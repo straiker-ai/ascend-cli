@@ -73,6 +73,20 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ### Fixed
 
+- **The relay is handed a config it can actually open.** The detached relay is spawned with its
+  cwd set to the CLI's own directory, while config resolution searches `./configs` FIRST -- so a
+  bare config name resolved to a real file for every foreground command and to nothing for the
+  relay. This is not a corner: `target add --save-as x` WRITES to `./configs` whenever that
+  directory exists, so anyone who keeps a `configs/` folder beside their work got a config that
+  `target check` and `chat` could read and the relay could not. It surfaced as
+  `relay exited at startup (code 3)` quoting a `~/.ascend/configs/...` path the operator never
+  chose, the platform pausing the run, and the CLI warning that probes would go unanswered -- a
+  false pass in waiting. Found by an operator onboarding a multi-step target in a measured run.
+  The parent now resolves the config in the operator's own shell and hands the child an absolute
+  path; a config that cannot be resolved is refused before any process is spawned, naming the
+  directories searched. Inline JSON configs pass through untouched. Live: from a directory holding
+  `configs/repro-cfg.json`, main reports `exited at startup (code 3)` and the fix starts a relay.
+
 - **One warm-up turn, not two.** `target add` learned in #75 to record the greeting gate some
   widgets enforce (`409 … first turn must be a greeting`) -- under a new `session_greeting` key,
   while the `session_api` adapter already had `warmup_message` for exactly that purpose. Two keys

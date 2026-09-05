@@ -145,7 +145,7 @@ encoding rather than the reply inside it.
 | `message_endpoint` | *(required)* | Message URL; `{{SESSION_ID}}` substituted |
 | `message_body` | `{}` | Body with `{{PROMPT}}` and `{{SESSION_ID}}` |
 | `response_path` | `messages.0.message` | Dot-path to the answer |
-| `session_greeting` | — | Optional first turn sent after create and before the prompt. Some widgets refuse any question until greeted (`409 … first turn must be a greeting`); `target add` records this when it hits that gate |
+| `warmup_message` | — | Optional throwaway first turn after create. Agents that greet, ask consent, or refuse any question until greeted (`409 … first turn must be a greeting`) need one; `target add` records it when it hits that gate |
 | `headers` / `timeout_ms` | `{}` / *derived* | Shared headers / timeout |
 
 ### `sse_stream` — reassemble a streamed answer *(not stateful)*

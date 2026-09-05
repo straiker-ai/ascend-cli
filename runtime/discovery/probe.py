@@ -1303,7 +1303,7 @@ def _greet_then(state: "_State", url: str, shape: Shape) -> None:
         state.try_candidate(url, shape)
     finally:
         state.prompt = real
-    state.session_greeting = _GREETING
+    state.session_greeting = _GREETING   # emitted as warmup_message, the adapter's existing key
 
 
 def _follow_create_then_message(state: "_State", shapes: List[Shape]):
@@ -1704,7 +1704,7 @@ def probe_api(url: str,
                 "message_endpoint": _win.replace(str(_cid), "{{SESSION_ID}}") if _cid else _win,
             }
             if getattr(state, "session_greeting", None):
-                _flow["session_greeting"] = state.session_greeting
+                _flow["warmup_message"] = state.session_greeting
             if _placement in ("body", "both") and _field:
                 # the winning request body carried the id; template it, never freeze it
                 _wb = dict(state.successes[-1].get("shape").body or {}) \
@@ -1875,7 +1875,7 @@ def build_config(result: ProbeResult, *, timeout_ms: Optional[int] = None) -> Di
             "session_extract": flow.get("session_extract") or "id",
             "message_endpoint": flow["message_endpoint"],
             "message_body": flow.get("message_body") or result.request_body,
-            **({"session_greeting": flow["session_greeting"]} if flow.get("session_greeting") else {}),
+            **({"warmup_message": flow["warmup_message"]} if flow.get("warmup_message") else {}),
             "response_path": result.response_path,
             # the templated endpoint, never the one session we happened to open: an id in
             # here reads as part of the contract and gets copied into hand-edited configs

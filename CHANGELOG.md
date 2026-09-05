@@ -9,6 +9,21 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ### Added
 
+- **A create-then-message target derives from its URL alone.** `ascend target add http://host`
+  against a bot that requires `POST /session` before `POST /session/{id}/message` failed with
+  `bad_shape` — while the diagnosis text already named the contract exactly and then told the
+  operator to go export a HAR. The prober now follows it: create, take the id, send the prompt to
+  that session, and emit a `session_api` config whose `message_endpoint` carries `{{SESSION_ID}}`
+  so **every probe opens its own session**. All three placements the wild uses are derived:
+  the id in the URL (`/session/{id}/message`), in the body of a sibling endpoint
+  (`/messages` with `conversation_id`), and in both at once (`/threads/{id}/messages` with
+  `thread_id` echoed in the payload) — and auth composes with each, as a typed `env:`
+  reference shared across both calls. Baking the id in would validate green and then run a
+  whole assessment through one conversation, which a turn cap or an expiry silently breaks.
+  Measured: this was the only scenario in a 22-agent trial where using the CLI still required
+  writing code — one operator captured a HAR by hand, another hand-wrote an adapter module — and
+  the only scenario where the CLI's advantage over the raw API disappeared.
+
 - **Reconnaissance as a first-class step.** In the Console, recon (capability enumeration) is
   started separately from an assessment. The CLI gives it one noun and one decision:
   `ascend recon run|list|show|results|controls`, and `ascend assess run --with-recon` (recon to
@@ -40,6 +55,16 @@ All notable changes to the Ascend CLI. Newest first. Format follows
   it. It now reads the relay's counters: silent when answers are proven, a **confirmed** false
   pass (stated as fact, not suspicion) when the relay answered nothing, and the old heuristic —
   worded as unverifiable-on-this-machine — only when there is no local relay record at all.
+- **An `env:` credential reference now resolves, or fails loudly.** Two defects pushed operators
+  straight back to plaintext secrets, which is the one outcome the feature exists to prevent.
+  `--login-body 'client_id=env:DEMO_ID&...'` POSTed the literal string `env:DEMO_ID` — the refs
+  were recorded into the runtime auth block correctly, but the CLI's own onboarding-time login
+  call never resolved them, so the exchange 401'd and the documented fallback was to type the
+  secret on the command line. And a relay inherits `os.environ`, so one started from a shell that
+  does not export the referenced variable came up healthy and was then refused by the target on
+  every probe — which scores as no findings, i.e. exactly the false pass the design exists to
+  prevent. `bridge start` now refuses, names the missing variable, and says what would have
+  happened. Both found by driving real onboardings against gated targets.
 
 - **A recovered assessment that is running no longer reads like a failure.** `assess run`
   absorbs a transport error after the assessment is created — it asks the platform what state the

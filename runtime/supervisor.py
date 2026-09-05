@@ -150,6 +150,29 @@ def is_serving(app_id: str) -> bool:
     return _state_of(alive, age) == "serving"
 
 
+def _unresolved_env_refs(config: str):
+    """Every `env:NAME` in the config whose variable is absent from THIS process's environment.
+
+    A relay inherits os.environ, so a config that authenticates by `env:` reference works only in
+    a shell that exports it. Started from a shell that does not, the relay came up healthy and
+    then got a 401 from the target on every single probe -- which scores as no findings, i.e. the
+    exact false pass the whole design is meant to prevent. Refusing to start, and naming the
+    variable, turns a silent wrong answer into an obvious one.
+    """
+    import json as _json
+    import re as _re
+    try:
+        from configs import resolve_config_path
+        path = resolve_config_path(config)
+        if not path:
+            return []
+        blob = Path(path).read_text(encoding="utf-8")
+    except Exception:
+        return []
+    names = sorted(set(_re.findall(r"env:([A-Za-z_][A-Za-z0-9_]*)", blob)))
+    return [n for n in names if not os.environ.get(n)]
+
+
 def start(app_id: str, *, config: str, adapter: Optional[str], api_key: str,
           qpm: Optional[int] = None, max_workers: Optional[int] = None,
           bridge_base: Optional[str] = None, wait_ms: Optional[int] = None,
@@ -165,6 +188,16 @@ def start(app_id: str, *, config: str, adapter: Optional[str], api_key: str,
     if is_running(app_id):
         return {"app_id": app_id, "error": "a relay is already running for this app",
                 "pid": read_pid(app_id)}
+    missing = _unresolved_env_refs(config)
+    if missing:
+        names = ", ".join(missing)
+        return {"app_id": app_id, "error": (
+            f"config {config!r} authenticates by environment reference, but "
+            f"{'these variables are' if len(missing) > 1 else 'this variable is'} not set in this "
+            f"shell: {names}. The relay would start and then be refused by the target on every "
+            f"probe, which scores as a clean run that measured nothing. "
+            f"Export {'them' if len(missing) > 1 else 'it'} and start again."),
+            "missing_env": missing}
     p = paths_for(app_id)
     argv = [python or sys.executable, str(REPO / "shells" / "cli" / "ascend.py"),
             "runtime", "start", "--config", config,

@@ -245,10 +245,28 @@ class TestStartupDeath:
         assert "skip" not in ascend._target_for("aapp_1", store=store, config_override="real")
 
     def test_a_relay_that_dies_at_startup_is_an_error_not_a_pid(self, tmp_path, monkeypatch):
-        """Real child process, real death: the config does not exist, so `runtime start` exits."""
+        """Real child process, real death: the config resolves to a file that is not valid JSON,
+        so `runtime start` exits. (A config that does NOT resolve is refused earlier, before
+        anything is spawned -- the case below.)"""
         import supervisor as S
         monkeypatch.setattr(S, "relays_dir", lambda: tmp_path)
-        r = S.start("aapp_startup_death", config="no-such-config-xyz", adapter=None, api_key="tc-test",
-                    self_reconcile=False)
+        cfg = tmp_path / "dies.json"
+        cfg.write_text("this is not json")
+        r = S.start("aapp_startup_death", config=str(cfg), adapter=None,
+                    api_key="tc-test", self_reconcile=False)
         assert "error" in r and "exited at startup" in r["error"], r
         assert S.read_pid("aapp_startup_death") is None, "a dead child must not leave a pidfile"
+
+    def test_a_config_that_cannot_be_resolved_never_reaches_a_spawn(self, tmp_path, monkeypatch):
+        """The relay runs from the CLI's directory, so it cannot see a config that only exists
+        relative to the operator's shell. Refuse in the parent, where the name still resolves."""
+        import supervisor as S
+        monkeypatch.setattr(S, "relays_dir", lambda: tmp_path)
+        spawned = []
+        monkeypatch.setattr(S.subprocess, "Popen",
+                            lambda *a, **k: spawned.append(a) or (_ for _ in ()).throw(
+                                AssertionError("spawned a relay for a config that does not exist")))
+        r = S.start("aapp_no_cfg", config="no-such-config-xyz", adapter=None, api_key="tc-test",
+                    self_reconcile=False)
+        assert "error" in r and "no-such-config-xyz" in r["error"] and "Looked in" in r["error"]
+        assert not spawned

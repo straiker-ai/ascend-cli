@@ -29,7 +29,11 @@ CLEAN = {"status": "complete", "total": 4, "failed": 0, "severity": "low"}
 
 
 def _relay(monkeypatch, rows):
-    monkeypatch.setitem(sys.modules, "supervisor", types.SimpleNamespace(ls=lambda: rows))
+    """Stand in for the persisted per-app state files. Keyed by app_id, like read_status."""
+    by = {r["app_id"]: r for r in rows}
+    monkeypatch.setitem(sys.modules, "supervisor",
+                        types.SimpleNamespace(read_status=lambda aid: by.get(aid),
+                                              ls=lambda: [r for r in rows if r.get("alive")]))
 
 
 def test_silent_when_the_relay_proves_the_target_answered(monkeypatch):
@@ -68,12 +72,32 @@ def test_evidence_reads_the_right_app(monkeypatch):
     assert w and "FALSE PASS" in w, "another app's healthy relay must not vouch for this one"
 
 
+def test_evidence_survives_the_relay_self_stopping(monkeypatch):
+    """The common case: a four-probe run finishes in under a minute and the relay is gone before
+    anyone looks. Its pid file is pruned, so it vanishes from `bridge ls` -- but the state file
+    with the counters is still on disk. Five of twelve operators in a measured round were told
+    'no relay record for that run' and went and read that file by hand."""
+    _relay(monkeypatch, [{"app_id": "aapp_1", "alive": False,
+                          "stats": {"answered": 8, "delivered": 8, "failed": 0}}])
+    ev = ascend._relay_evidence("aapp_1")
+    assert ev and ev["answered"] == 8, "the counters outlive the process; read them"
+    assert ascend._false_pass_warning(CLEAN, "aapp_1") is None
+
+
 def test_an_unreadable_supervisor_degrades_to_the_heuristic(monkeypatch):
-    def _boom():
+    def _boom(*a, **k):
         raise OSError("state unreadable")
-    monkeypatch.setitem(sys.modules, "supervisor", types.SimpleNamespace(ls=_boom))
+    monkeypatch.setitem(sys.modules, "supervisor", types.SimpleNamespace(read_status=_boom, ls=_boom))
     assert ascend._relay_evidence("aapp_1") is None
     assert ascend._false_pass_warning(CLEAN, "aapp_1") is not None
+
+
+def test_evidence_is_read_from_the_state_file_not_the_live_list():
+    """Source discipline: going through ls() is the bug, whatever ls() returns in a test."""
+    import inspect
+    src = inspect.getsource(ascend._relay_evidence)
+    assert "read_status(app_id)" in src
+    assert "S.ls()" not in src, "ls() only sees relays that still have a pid file"
 
 
 def test_results_reports_the_answered_count():

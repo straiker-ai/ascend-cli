@@ -1935,25 +1935,26 @@ def cmd_assess_watch(args):
 def _relay_evidence(app_id):
     """What THIS machine's relay actually saw for one app: {answered, delivered, failed} or None.
 
-    The relay counts every probe it handed to the target and every answer it got back, and those
-    counters survive the relay self-stopping. That is direct evidence about the one question that
-    decides whether a clean score means anything, and until now it was only reachable by running a
-    second command (`bridge ls`) or reading a log file.
+    Read from the relay's persisted STATE FILE, not from `bridge ls`. `ls()` walks the `*.pid`
+    files, and a relay that finished and self-stopped has had its pid file pruned -- so the app
+    dropped out of the list while its `.json` state, with the counters, was still on disk. That
+    is the common case: a four-probe run finishes in under a minute and the relay is gone before
+    anyone looks. Measured in a 12-agent round: five operators were told "no relay record for
+    that run" and went and read this very file by hand. The counters survive the stop; the
+    lookup just was not reading where they live.
     """
     if not app_id:
         return None
     try:
         import supervisor as S
-        for r in S.ls():
-            if r.get("app_id") == app_id:
-                st = r.get("stats") or {}
-                if not st:
-                    return None
-                return {"answered": st.get("answered"), "delivered": st.get("delivered"),
-                        "failed": st.get("failed")}
+        st = S.read_status(app_id) or {}
+        stats = st.get("stats") or {}
+        if not stats:
+            return None
+        return {"answered": stats.get("answered"), "delivered": stats.get("delivered"),
+                "failed": stats.get("failed"), "relay_state": st.get("state")}
     except Exception:
         return None
-    return None
 
 
 def _false_pass_warning(a, app_id=None):

@@ -51,6 +51,14 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ### Fixed
 
+- **The `answered` line in `assess results` survives the relay stopping.** It read the relay's
+  counters through `bridge ls`, which walks pid files — and a relay that finished and
+  self-stopped has had its pid file pruned, so the app vanished from the list while its state
+  file, counters intact, sat on disk. A four-probe run finishes in under a minute, so this was
+  the common case, not the corner: in a measured 12-agent round, five operators were told "no
+  relay record for that run" and read the state file by hand. It reads the state file now.
+  Measured on this machine: 40 finished relays on disk, 0 visible to `ls`, all 40 now report.
+
 - **`assess run --detail` works.** The command waits for the run and prints the verdict, but
   rejected the flag its sibling `assess results` has always had — so asking the command that just
   produced the findings to show them exited 3 with `unrecognized arguments: --detail`, before

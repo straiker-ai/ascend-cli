@@ -94,3 +94,51 @@ def test_the_prober_actually_follows_the_create():
     src = inspect.getsource(P.probe_api)
     assert "_follow_create_then_message(state, shapes)" in src
     assert "session_flow" in src, "the flow must be recorded, not just the winning URL"
+
+
+class TestThreePlacements:
+    """The wild puts the session id in three places. A prober that knows one finds one."""
+
+    def _res(self, endpoint, flow):
+        r = P.ProbeResult()
+        r.endpoint, r.method, r.transport = endpoint, "POST", "rest_json"
+        r.request_body = {"message": "{{PROMPT}}"}
+        r.response_path, r.response_text = "reply", "hi"
+        r.session_flow = flow
+        return r
+
+    def test_body_placement_templates_the_id_in_the_body(self):
+        cfg = P.build_config(self._res("http://h:1/messages", {
+            "session_endpoint": "http://h:1/conversation", "session_body": {},
+            "session_extract": "conversation_id", "message_endpoint": "http://h:1/messages",
+            "message_body": {"message": "{{PROMPT}}", "conversation_id": "{{SESSION_ID}}"}}))
+        assert cfg["adapter"] == "session_api"
+        assert cfg["message_body"]["conversation_id"] == "{{SESSION_ID}}"
+        assert "{{SESSION_ID}}" not in cfg["message_endpoint"], "body placement: id is not in the URL"
+
+    def test_both_placement_templates_url_and_body(self):
+        cfg = P.build_config(self._res("http://h:1/threads/T/messages", {
+            "session_endpoint": "http://h:1/threads", "session_body": {},
+            "session_extract": "thread_id",
+            "message_endpoint": "http://h:1/threads/{{SESSION_ID}}/messages",
+            "message_body": {"message": "{{PROMPT}}", "thread_id": "{{SESSION_ID}}"}}))
+        assert "{{SESSION_ID}}" in cfg["message_endpoint"]
+        assert cfg["message_body"]["thread_id"] == "{{SESSION_ID}}"
+
+    def test_with_id_in_body_adds_the_field_and_keeps_the_prompt(self):
+        sh = P.Shape(label="message", body={"message": "{{PROMPT}}"})
+        got = P._with_id_in_body(sh, "conversation_id", "abc")
+        assert got.body == {"message": "{{PROMPT}}", "conversation_id": "abc"}
+        assert got.label == "message+conversation_id"
+
+    def test_with_id_in_body_refuses_a_non_dict_shape(self):
+        sh = P.Shape(label="raw_text", raw="{{PROMPT}}")
+        assert P._with_id_in_body(sh, "conversation_id", "abc") is None
+
+    def test_a_proven_sibling_path_is_tried_before_guessing(self):
+        """A 400 on /messages during the blind search means the path is real and wanted the id."""
+        import inspect
+        src = inspect.getsource(P._follow_create_then_message)
+        assert "(400, 405, 415, 422)" in src
+        assert src.index("exists") < src.index("_MESSAGE_SUFFIXES]"), (
+            "proven-real siblings must come before the guessed suffixes")

@@ -73,6 +73,14 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ### Fixed
 
+- **One warm-up turn, not two.** `target add` learned in #75 to record the greeting gate some
+  widgets enforce (`409 … first turn must be a greeting`) -- under a new `session_greeting` key,
+  while the `session_api` adapter already had `warmup_message` for exactly that purpose. Two keys
+  for one behaviour is how configs drift: an operator hand-editing the documented key would find
+  the derived one silently winning. The prober now emits `warmup_message`, the duplicate adapter
+  block is gone, and a config written with `session_greeting` is still honoured. Live: the forge
+  `widget` shape derives `session_api` with `warmup_message: hello` and the target answers.
+
 - **The live matrix covers every forge shape, and the first full run found four real gaps.**
   The matrix had capture cases for 11 of 24 shapes; the missing 13 scored as "no evidence could
   be captured" and dragged the number to 11/24 while every covered shape passed — a coverage gap

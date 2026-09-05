@@ -68,7 +68,8 @@ class TestFormHint:
 
 class TestGreetingGate:
     """`widget`: a session that 409s any first question until greeted. A customer types "hi"
-    without thinking; the prober does too, and records it so the adapter does as well."""
+    without thinking; the prober does too, and records it under the adapter's EXISTING
+    warm-up key rather than a second one -- two keys for one behaviour is how configs drift."""
 
     def test_build_config_carries_the_greeting(self):
         r = P.ProbeResult()
@@ -78,9 +79,9 @@ class TestGreetingGate:
         r.session_flow = {"session_endpoint": "http://h/api/chat/v1/sessions", "session_body": {},
                           "session_extract": "sessionId",
                           "message_endpoint": "http://h/api/chat/v1/sessions/{{SESSION_ID}}/turns",
-                          "session_greeting": "hello"}
+                          "warmup_message": "hello"}
         cfg = P.build_config(r)
-        assert cfg["adapter"] == "session_api" and cfg["session_greeting"] == "hello"
+        assert cfg["adapter"] == "session_api" and cfg["warmup_message"] == "hello"
 
     def test_nested_create_paths_are_candidates(self):
         assert "api/chat/v1/sessions" in P.CANDIDATE_PATHS

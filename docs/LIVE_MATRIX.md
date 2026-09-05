@@ -15,3 +15,4 @@ day. Rows before that are marked.
 | 2026-09-05 | `95f03c7`+matrix | derive | 17/24 | `ws` `graphql` `blocks` `envelope` `form` `rotate` `widget` | first full coverage; `ws` flaky (passed alone), `blocks`/`envelope` were stale forge expectations, four real gaps |
 | 2026-09-05 | `95f03c7`+fixes | derive | 21/24 | `session` `envelope` `rotate` | `session` = candidate-order regression from this branch (fixed); `envelope` = stale expectation (corrected); `rotate` = known gap |
 | 2026-09-05 | `feat/matrix-covers-every-shape` | derive | **23/24** | `rotate` | `rotate` = known gap (a rotating conversation id is invisible to one probe); sweep now covers every candidate path |
+| 2026-09-05 | `2a1c5f4` | derive | **23/24** | `rotate` |

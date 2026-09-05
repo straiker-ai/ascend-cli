@@ -3,9 +3,31 @@
 All notable changes to the Ascend CLI. Newest first. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow [SemVer](https://semver.org/).
 
+Within a release, **Regressions** lists fixes for behaviour that previously worked and was broken
+by a later change in this repo — kept apart from **Fixed** (inherited defects) so the ratio between
+them is visible at a glance. A growing Regressions section is a process signal, not a product one.
+
 ---
 
 ## [Unreleased]
+
+### Regressions
+
+- **Restored a merge that was silently reverted.** Commit `9d140af`, described as a
+  changelog-only change, actually removed 858 lines across 17 files: the fleet wait from #52
+  (so `assess run --app A --app B` returned immediately, reported every run as "running" and
+  exited 0 — a false pass for any pipeline reading it), auth runtime fixes from #47, relay
+  reclaim from #49, polish from #55, four skill updates, and three whole test files (473 lines)
+  that would have caught all of it — which is why nothing did. Everything is restored, the one
+  hunk that collided with #66 hand-merged, and the fleet wait proven live.
+
+- **The `answered` line in `assess results` survives the relay stopping.** It read the relay's
+  counters through `bridge ls`, which walks pid files — and a relay that finished and
+  self-stopped has had its pid file pruned, so the app vanished from the list while its state
+  file, counters intact, sat on disk. A four-probe run finishes in under a minute, so this was
+  the common case, not the corner: in a measured 12-agent round, five operators were told "no
+  relay record for that run" and read the state file by hand. It reads the state file now.
+  Measured on this machine: 40 finished relays on disk, 0 visible to `ls`, all 40 now report.
 
 ### Added
 
@@ -51,6 +73,17 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ### Fixed
 
+- **`target add --run` no longer orphans the run it starts.** It ran a bridge as a daemon thread
+  inside the command, started the assessment, and then — under `--json`, so an agent could get its
+  object and return — stopped that thread and exited: an assessment deliberately left with nobody
+  answering, which completes looking clean having measured nothing. It now uses the same
+  supervised relay `assess run` uses, started *before* the assessment; the relay outlives the
+  command and self-stops when the run ends, so `--json` returns immediately and the run is served.
+- **Visibility.** `docs/LIVE_MATRIX.md` + `scripts/live_matrix_record.py` append a dated
+  shapes-passing row after every merge — the count must only go up. The three session shapes
+  are now bare-URL rows in the matrix (a customer hands over a URL, not a HAR). The changelog
+  gains a **Regressions** section, kept apart from **Fixed**, so the ratio is visible at a glance.
+
 - **Tests can no longer reach the live tenant.** Four subprocess-spawning tests only *defaulted*
   `STRAIKER_PAT`, so a real token exported in the developer's shell was inherited and used.
   `conftest.py` now scrubs every credential the CLI reads for the whole session, and the four
@@ -58,21 +91,6 @@ All notable changes to the Ascend CLI. Newest first. Format follows
   the relay's persisted counters) instead of `bridge ls` (which only shows live relays); the
   no-token error names both variables the CLI accepts.
 
-- **Restored a merge that was silently reverted.** Commit `9d140af`, described as a
-  changelog-only change, actually removed 858 lines across 17 files: the fleet wait from #52
-  (so `assess run --app A --app B` returned immediately, reported every run as "running" and
-  exited 0 — a false pass for any pipeline reading it), auth runtime fixes from #47, relay
-  reclaim from #49, polish from #55, four skill updates, and three whole test files (473 lines)
-  that would have caught all of it — which is why nothing did. Everything is restored, the one
-  hunk that collided with #66 hand-merged, and the fleet wait proven live.
-
-- **The `answered` line in `assess results` survives the relay stopping.** It read the relay's
-  counters through `bridge ls`, which walks pid files — and a relay that finished and
-  self-stopped has had its pid file pruned, so the app vanished from the list while its state
-  file, counters intact, sat on disk. A four-probe run finishes in under a minute, so this was
-  the common case, not the corner: in a measured 12-agent round, five operators were told "no
-  relay record for that run" and read the state file by hand. It reads the state file now.
-  Measured on this machine: 40 finished relays on disk, 0 visible to `ls`, all 40 now report.
 
 - **`assess run --detail` works.** The command waits for the run and prints the verdict, but
   rejected the flag its sibling `assess results` has always had — so asking the command that just

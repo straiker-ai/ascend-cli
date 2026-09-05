@@ -125,11 +125,11 @@ def capture(shape: str, port: int, out_dir: Path) -> tuple[Path | None, str | No
         h.call("POST", f"{b}/conversations/{cid}/messages", {"message": QUESTION},
                expect_stream=True)
         return h.write(out_dir / "sse-create.har"), None      # a URL cannot express two steps
-    if shape == "session":
-        _, raw = h.call("POST", f"{b}/session", {})
-        sid = (json.loads(raw) or {}).get("session_id")
-        h.call("POST", f"{b}/session/{sid}/message", {"message": QUESTION})
-        return h.write(out_dir / "session.har"), None
+    if shape in ("session", "session-body", "session-both"):
+        # The bare URL, on purpose. A customer hands over a URL, not a HAR -- that is the most
+        # common case -- and since #68 the prober derives every placement of the session id from
+        # it (URL, body, both). The HAR path is the fallback and is exercised by build-adapter.
+        return None, b
     if shape == "poll":
         _, raw = h.call("POST", f"{b}/messages", {"message": QUESTION})
         jid = (json.loads(raw) or {}).get("job_id")

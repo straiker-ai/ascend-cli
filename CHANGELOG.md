@@ -51,6 +51,13 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ### Fixed
 
+- **Tests can no longer reach the live tenant.** Four subprocess-spawning tests only *defaulted*
+  `STRAIKER_PAT`, so a real token exported in the developer's shell was inherited and used.
+  `conftest.py` now scrubs every credential the CLI reads for the whole session, and the four
+  tests force a dummy. The `verify-run` skill now leads with `assess results` (which reads
+  the relay's persisted counters) instead of `bridge ls` (which only shows live relays); the
+  no-token error names both variables the CLI accepts.
+
 - **Restored a merge that was silently reverted.** Commit `9d140af`, described as a
   changelog-only change, actually removed 858 lines across 17 files: the fleet wait from #52
   (so `assess run --app A --app B` returned immediately, reported every run as "running" and

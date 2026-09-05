@@ -117,7 +117,7 @@ import subprocess  # noqa: E402
 
 def _cli(*args, env=None):
     e = dict(os.environ)
-    e.setdefault("STRAIKER_PAT", "s6r_pat_dummy")
+    e["STRAIKER_PAT"] = "s6r_pat_dummy"   # FORCED: setdefault kept a real PAT from the shell
     e["ASCEND_SKIP_TENANT_CHECK"] = "1"
     if env:
         e.update(env)

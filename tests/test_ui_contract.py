@@ -374,7 +374,7 @@ class TestSourceDiscipline:
 class TestStdoutContract:
     def _run(self, *args, env=None):
         e = dict(os.environ)
-        e.setdefault("STRAIKER_PAT", "s6r_pat_dummy")
+        e["STRAIKER_PAT"] = "s6r_pat_dummy"   # FORCED: setdefault kept a real PAT from the shell
         if env:
             e.update(env)
         return subprocess.run([sys.executable, str(REPO / "shells/cli/ascend.py"), *args],

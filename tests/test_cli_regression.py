@@ -22,7 +22,7 @@ EXIT_OK, EXIT_ERROR, EXIT_FINDINGS, EXIT_USAGE = 0, 1, 2, 3
 
 def run(*args, env=None):
     e = dict(os.environ)
-    e.setdefault("STRAIKER_PAT", "s6r_pat_dummy")  # so "no token" never masks the code under test
+    e["STRAIKER_PAT"] = "s6r_pat_dummy"   # FORCED: setdefault kept a real PAT from the shell  # so "no token" never masks the code under test
     if env:
         e.update(env)
     return subprocess.run([sys.executable, str(REPO / "shells/cli/ascend.py"), *args],

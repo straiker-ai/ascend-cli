@@ -106,6 +106,12 @@ _Nothing yet._
 
 ### Fixed
 
+- **The shipped binary carries the skills.** The build bundled the docs and the example configs
+  but not `skills/`, so `ascend skills` from the packaged binary said "no skills packaged in this
+  build" while a source checkout lists six -- an agent on the binary was told the procedures do
+  not exist. Found by running the release asset from outside the source tree. The build now
+  bundles `skills/`, and a test refuses a build script that leaves them out.
+
 - **The shipped binary can start its own relay.** In a PyInstaller build `sys.executable` is the
   `ascend` binary; the supervisor spawned the relay as `<binary> <bundle>/shells/cli/ascend.py
   runtime start …`, so the binary read the script path as its command, exited 3, and every

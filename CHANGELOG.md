@@ -102,6 +102,14 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ### Fixed
 
+- **The shipped binary can start its own relay.** In a PyInstaller build `sys.executable` is the
+  `ascend` binary; the supervisor spawned the relay as `<binary> <bundle>/shells/cli/ascend.py
+  runtime start …`, so the binary read the script path as its command, exited 3, and every
+  bridge-type assessment run from the binary sat with no relay -- `bridge down and could not be
+  restarted`, probes unanswered, the run never finishing. Found by running the packaged binary
+  from outside the source tree; nothing in a source checkout can see it. A frozen build now
+  spawns itself with no script path.
+
 - **The request after creating a run no longer inherits a dead connection.** The platform closes
   the connection after `POST …/assessments` returns 201 without saying so; the CLI's very next
   request -- pause, milliseconds later -- reused that socket and died with `RemoteDisconnected`

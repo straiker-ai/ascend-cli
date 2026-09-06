@@ -19,11 +19,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage", default="derive")
     ap.add_argument("--shapes", default="all")
+    ap.add_argument("--base-port", type=int, default=8700,
+                    help="first forge port; move it when 8700+ is busy (another target under test)")
     a = ap.parse_args()
     out = REPO / "captures" / "live_matrix_last.json"
     out.parent.mkdir(exist_ok=True)
     r = subprocess.run([sys.executable, str(REPO / "scripts" / "live_matrix.py"),
-                        "--stage", a.stage, "--shapes", a.shapes, "--out", str(out)],
+                        "--stage", a.stage, "--shapes", a.shapes, "--out", str(out), "--base-port", str(a.base_port)],
                        text=True)
     rows = json.loads(out.read_text()) if out.is_file() else []
     ok = [x for x in rows if x.get("ok")]

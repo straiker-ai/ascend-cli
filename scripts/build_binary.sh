@@ -37,6 +37,8 @@ pyinstaller \
   --collect-submodules transport \
   "${cfg_data[@]}" \
   --add-data "docs:docs" \
+  --add-data "skills:skills" \
+
   shells/cli/ascend.py
 
 echo

@@ -224,8 +224,14 @@ def start(app_id: str, *, config: str, adapter: Optional[str], api_key: str,
         pass                                   # resolver unavailable: pass the reference through
 
     p = paths_for(app_id)
-    argv = [python or sys.executable, str(REPO / "shells" / "cli" / "ascend.py"),
-            "runtime", "start", "--config", cfg_for_child,
+    # Frozen (PyInstaller) build: sys.executable IS the CLI, so the child is `ascend runtime start …`
+    # with no script path -- handing it the .py path made the binary read that path as its
+    # <command>, exit 3, and every bridge-type run from the shipped binary sat with no relay.
+    if getattr(sys, "frozen", False) and not python:
+        launcher = [sys.executable]
+    else:
+        launcher = [python or sys.executable, str(REPO / "shells" / "cli" / "ascend.py")]
+    argv = launcher + ["runtime", "start", "--config", cfg_for_child,
             # a unique consumer per child: the bridge protocol requires parallel clients to differ
             "--consumer", f"abv2-{_safe(app_id)}"]
     if adapter:

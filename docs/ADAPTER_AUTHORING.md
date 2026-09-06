@@ -146,6 +146,7 @@ encoding rather than the reply inside it.
 | `message_body` | `{}` | Body with `{{PROMPT}}` and `{{SESSION_ID}}` |
 | `response_path` | `messages.0.message` | Dot-path to the answer |
 | `warmup_message` | — | Optional throwaway first turn after create. Agents that greet, ask consent, or refuse any question until greeted (`409 … first turn must be a greeting`) need one; `target add` records it when it hits that gate |
+| `carry` | `direct_api` | `{"reply_path": "conversation_id", "request_field": "conversation_id"}` — echo the conversation id the target returns in each reply on the next request. The adapter instance keeps the latest one; a target that rotates ids (the old one 409s) or closes a conversation after N turns (410) gets one retry without the id, which opens a fresh conversation. `target add` records this when the winning reply carries such a field and then proves a second turn with it is accepted |
 | `headers` / `timeout_ms` | `{}` / *derived* | Shared headers / timeout |
 
 ### `sse_stream` — reassemble a streamed answer *(not stateful)*

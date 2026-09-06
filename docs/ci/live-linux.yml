@@ -1,0 +1,49 @@
+# Live gate on Linux: onboard a real public target and run one control, from an Ubuntu runner.
+#
+# Copy this file to .github/workflows/live-linux.yml (a push that touches .github/workflows needs
+# a token with the `workflow` scope, which is why it ships here) and add two repository secrets:
+#   STRAIKER_PAT           a personal access token for the tenant the gate may create apps on
+#   LIVE_TARGET_BEARER     the bearer the target expects (the public demo host needs a Defend key)
+# Then run it from the Actions tab. It creates one app named `live-linux-<run id>` and deletes it.
+name: live-linux
+on:
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: "chat endpoint of a reachable target"
+        default: "https://z6murpmcmg.us-east-2.awsapprunner.com/api/chat"
+      passcode_header:
+        description: "a literal header the target requires, e.g. 'x-demo-key: straikerse'"
+        default: "x-demo-key: straikerse"
+jobs:
+  onboard-and-run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      STRAIKER_PAT: ${{ secrets.STRAIKER_PAT }}
+      LIVE_TARGET_BEARER: ${{ secrets.LIVE_TARGET_BEARER }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Install from a clean tree
+        run: python -m pip install --upgrade pip && python -m pip install .
+      - name: Preflight
+        run: ascend doctor --json
+      - name: Onboard the target (bearer by environment reference)
+        run: |
+          ascend target add "${{ inputs.target_url }}" \
+            --header "${{ inputs.passcode_header }}" --bearer env:LIVE_TARGET_BEARER \
+            --save-as live-linux --name "live-linux-${{ github.run_id }}" --controls sys_prompt_leak --json
+      - name: Run one control and prove the target answered
+        run: |
+          ascend assess run --app "live-linux-${{ github.run_id }}" --name "live-linux" --controls sys_prompt_leak --timeout 1500 --json
+          ascend assess results --app "live-linux-${{ github.run_id }}" --json | tee results.json
+          python - <<'PY'
+          import json; d = json.load(open("results.json")); d = d.get("data", d)
+          assert (d.get("relay_answered") or 0) > 0, d
+          print("answered", d["relay_answered"], "delivered", d.get("relay_delivered"), "failed", d.get("relay_failed"))
+          PY
+      - name: Delete the app this run created
+        if: always()
+        run: ascend app delete "live-linux-${{ github.run_id }}" --yes --json || true

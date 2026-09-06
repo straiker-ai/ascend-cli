@@ -90,6 +90,17 @@ def validate_config(
     try:
         result = router.send(adapter, merged, "discovery-validate", sample_prompt,
                              None, timeout_s)
+        # A config that carries a conversation id forward is only proven by a SECOND turn on the
+        # same adapter instance: the id from turn 1 has to be accepted on turn 2. A target that
+        # rotates ids 409s a wrong one, so this is the check that separates "echoes the id" from
+        # "happened to work once". Failure is reported as turn 2's error; turn 1's text stands.
+        if result.get("success") and (merged.get("carry") or {}).get("request_field"):
+            second = router.send(adapter, merged, "discovery-validate",
+                                 "Thanks. And in one word, are you a person or a program?",
+                                 None, timeout_s)
+            if not second.get("success"):
+                result = {**result, "success": False,
+                          "error": f"turn 2 with the carried id failed: {second.get('error')}"}
     finally:
         router.reset()
 

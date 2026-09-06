@@ -38,6 +38,16 @@ them is visible at a glance. A growing Regressions section is a process signal, 
   from its own variable at start -- refusing to start and naming the variable if any is unset.
   Live: `--header 'x-demo-key: env:GATE' --bearer env:KEY` against that host -> `auth` list of two,
   no literal in the config, run complete, 7 of 7 probes answered.
+- **A conversation id the target hands back is carried to the next turn.** Some targets return
+  a conversation id in every reply and expect it on the next request; some ROTATE it, so the id
+  you used is invalid the moment you have the reply, and after N turns the conversation closes.
+  A stateless adapter sent turn 2 without the id (a new conversation, so multi-turn attacks never
+  landed) or with a stale one (a hard 409, and every probe after it a transport error). `target
+  add` now records `carry` when the winning reply names such a field, proves a second turn with
+  the carried id is accepted before registering, and `direct_api` echoes the latest id per
+  conversation -- dropping it and reopening when the target says 409/410. Live against the forge's
+  rotating shape: derived and validated, and five turns through one instance succeeded with a new
+  id each turn, including the reopen after the three-turn close. The live matrix's last gap.
 
 - **`docs/QA_COVERAGE.md`** -- every command path and how it was last proven to work: live by an
   agent in the 62-agent trial, live by hand (dated), platform-gated (the recon family, until the

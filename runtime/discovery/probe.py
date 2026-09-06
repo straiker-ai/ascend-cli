@@ -1843,6 +1843,44 @@ def _sentinel_extract(text, begin, end):
     return {}
 
 
+
+_CARRY_KEYS = ("conversation_id", "conversationId", "session_id", "sessionId",
+               "thread_id", "threadId", "chat_id", "chatId")
+
+
+def _carry_from_reply(result: "ProbeResult") -> Optional[Dict[str, str]]:
+    """A conversation id the target handed back in the winning reply, to be echoed next turn.
+
+    Read from the winning exchange's response body. When the target names one of the usual id
+    fields at the top level with a scalar value, the config carries it: the same field name on
+    both sides, which is what every such API in the field does. Some targets ROTATE the id, so
+    validation then proves a second turn with the carried id is accepted (see validate.py).
+    """
+    pairs = (result.evidence or {}).get("pairs") or []
+    for pair in reversed(pairs):
+        resp = (pair or {}).get("response") or {}
+        raw = None
+        if isinstance(resp, dict):
+            for k in ("raw_body", "body", "text"):          # the recorded exchange stores raw_body
+                if resp.get(k) is not None:
+                    raw = resp[k]
+                    break
+        if isinstance(raw, (bytes, bytearray)):
+            raw = raw.decode("utf-8", "replace")
+        data = raw
+        if isinstance(raw, str):
+            try:
+                data = json.loads(raw)
+            except ValueError:
+                continue
+        if not isinstance(data, dict):
+            continue
+        for key in _CARRY_KEYS:
+            val = data.get(key)
+            if isinstance(val, (str, int)) and str(val).strip():
+                return {"reply_path": key, "request_field": key}
+    return None
+
 def build_config(result: ProbeResult, *, timeout_ms: Optional[int] = None) -> Dict[str, Any]:
     """Turn a successful probe into a runnable adapter config.
 
@@ -1952,6 +1990,9 @@ def build_config(result: ProbeResult, *, timeout_ms: Optional[int] = None) -> Di
         }
         if result.response_path:
             cfg["response_path"] = result.response_path
+        carry = _carry_from_reply(result)
+        if carry:
+            cfg["carry"] = carry
 
     if cfg.get("timeout_ms") is None:
         cfg.pop("timeout_ms", None)      # absent => the runtime default and its env knob apply

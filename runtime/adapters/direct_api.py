@@ -61,7 +61,28 @@ def _strip_stop(text: str, config: Dict[str, Any]) -> str:
 class DirectAPIAdapter(BotAdapter):
     """Send a prompt via direct HTTP POST and extract the response."""
 
+    # Carry-forward state. Some targets hand back a conversation id in every reply and expect it on
+    # the next request -- and some ROTATE it, invalidating the one you used, so a stale id is a
+    # hard 4xx. The instance persists per conversation (see ConversationRouter), so the latest id
+    # lives here and is echoed on the next turn. `carry` in the config names where to read it in
+    # the reply and which body field to put it in. When the target rejects the carried id (409/410:
+    # stale, or a conversation that closed after N turns), it is dropped and the request is sent
+    # once more without it -- a fresh conversation, which is what the target asked for.
+    _carry_value: Any = None
+
     async def send_prompt(self, prompt: str, config: Dict[str, Any]) -> Dict[str, Any]:
+        carry = config.get("carry") or {}
+        if carry.get("request_field") and carry.get("reply_path"):
+            out = await self._send_once(prompt, config, carry, self._carry_value)
+            meta = out.get("metadata") or {}
+            code = out.get("status_code") or meta.get("status_code") or meta.get("http_status")
+            if not out.get("success") and self._carry_value is not None and code in (400, 404, 409, 410, 422):
+                self._carry_value = None
+                out = await self._send_once(prompt, config, carry, None)
+            return out
+        return await self._send_once(prompt, config, None, None)
+
+    async def _send_once(self, prompt: str, config: Dict[str, Any], carry, carried) -> Dict[str, Any]:
         start = time.time()
 
         endpoint = config.get("endpoint")
@@ -89,9 +110,12 @@ class DirectAPIAdapter(BotAdapter):
                 form = {k: (v.replace("{{PROMPT}}", prompt) if isinstance(v, str) else v)
                         for k, v in body_template.items()}
                 send_kwargs["data"] = form
-            elif body_template:
-                body_str = json.dumps(body_template).replace("{{PROMPT}}", _json_escape(prompt))
-                send_kwargs["json"] = json.loads(body_str)
+            elif body_template or (carry and carried is not None):
+                body_str = json.dumps(body_template or {}).replace("{{PROMPT}}", _json_escape(prompt))
+                payload = json.loads(body_str)
+                if carry and carried is not None and isinstance(payload, dict):
+                    payload[carry["request_field"]] = carried
+                send_kwargs["json"] = payload
         except (TypeError, ValueError) as e:
             return self._fail(f"body template render failed: {e}", start)
 
@@ -129,6 +153,10 @@ class DirectAPIAdapter(BotAdapter):
         # Try JSON; fall back to raw text for plain-text bots.
         try:
             data = resp.json()
+            if carry and isinstance(data, (dict, list)):
+                nxt = _extract(data, carry["reply_path"])
+                if nxt not in (None, ""):
+                    self._carry_value = nxt        # the id the NEXT turn must echo
         except (json.JSONDecodeError, ValueError):
             data = None
         if data is None:

@@ -10,41 +10,41 @@ Last regenerated: 2026-09-06. Command paths: 71.
 | Command | Last proven by |
 |---|---|
 | `ascend adapter` | live, by 3 agent invocations in the 62-agent trial (2026-09-04/05) |
-| `ascend adapter build` | live, by 15 agent invocations in the 62-agent trial (2026-09-04/05) |
+| `ascend adapter build` | live, by 16 agent invocations in the 62-agent trial (2026-09-04/05) |
 | `ascend adapter configs` | live, by 6 agent invocations in the 62-agent trial (2026-09-04/05) |
 | `ascend adapter layers` | live, by 2 agent invocations in the 62-agent trial (2026-09-04/05) |
 | `ascend adapter list` | live, by 6 agent invocations in the 62-agent trial (2026-09-04/05) |
-| `ascend adapter show` | live, by 4 agent invocations in the 62-agent trial (2026-09-04/05) |
+| `ascend adapter show` | live, by 5 agent invocations in the 62-agent trial (2026-09-04/05) |
 | `ascend adapter validate` | live, by 4 agent invocations in the 62-agent trial (2026-09-04/05) |
-| `ascend app` | live, by 3 agent invocations in the 62-agent trial (2026-09-04/05) |
+| `ascend app` | live, by 4 agent invocations in the 62-agent trial (2026-09-04/05) |
 | `ascend app bind` | live, by 1 agent invocation in the 62-agent trial (2026-09-04/05) |
 | `ascend app create` | live, by 6 agent invocations in the 62-agent trial (2026-09-04/05) |
 | `ascend app delete` | live, by 2 agent invocations in the 62-agent trial (2026-09-04/05) |
-| `ascend app get` | live, by 30 agent invocations in the 62-agent trial (2026-09-04/05) |
-| `ascend app list` | live, by 29 agent invocations in the 62-agent trial (2026-09-04/05) |
+| `ascend app get` | live, by 32 agent invocations in the 62-agent trial (2026-09-04/05) |
+| `ascend app list` | live, by 32 agent invocations in the 62-agent trial (2026-09-04/05) |
 | `ascend app resolve` | live by hand 2026-09-06: `app resolve "Sample Application"` -> the aapp_ id |
 | `ascend app update` | live, by 2 agent invocations in the 62-agent trial (2026-09-04/05) |
 | `ascend assess` | live, by 7 agent invocations in the 62-agent trial (2026-09-04/05) |
 | `ascend assess diff` | live by hand 2026-09-06: two completed runs -> `new_findings/resolved/regressions` (all empty, both clean) |
-| `ascend assess list` | live, by 20 agent invocations in the 62-agent trial (2026-09-04/05) |
+| `ascend assess list` | live, by 31 agent invocations in the 62-agent trial (2026-09-04/05) |
 | `ascend assess pause` | live by hand 2026-09-06: a `created` run -> `paused`, confirmed by `assess status` |
-| `ascend assess results` | live, by 66 agent invocations in the 62-agent trial (2026-09-04/05) |
+| `ascend assess results` | live, by 70 agent invocations in the 62-agent trial (2026-09-04/05) |
 | `ascend assess resume` | live by hand 2026-09-06: the paused run -> `running`, then completed against the relay |
-| `ascend assess run` | live, by 65 agent invocations in the 62-agent trial (2026-09-04/05) |
-| `ascend assess status` | live, by 6 agent invocations in the 62-agent trial (2026-09-04/05) |
-| `ascend assess watch` | live, by 18 agent invocations in the 62-agent trial (2026-09-04/05) |
-| `ascend bridge` | live, by 6 agent invocations in the 62-agent trial (2026-09-04/05) |
+| `ascend assess run` | live, by 70 agent invocations in the 62-agent trial (2026-09-04/05) |
+| `ascend assess status` | live, by 7 agent invocations in the 62-agent trial (2026-09-04/05) |
+| `ascend assess watch` | live, by 19 agent invocations in the 62-agent trial (2026-09-04/05) |
+| `ascend bridge` | live, by 7 agent invocations in the 62-agent trial (2026-09-04/05) |
 | `ascend bridge logs` | live, by 20 agent invocations in the 62-agent trial (2026-09-04/05) |
-| `ascend bridge ls` | live, by 135 agent invocations in the 62-agent trial (2026-09-04/05) |
+| `ascend bridge ls` | live, by 149 agent invocations in the 62-agent trial (2026-09-04/05) |
 | `ascend bridge start` | live, by 10 agent invocations in the 62-agent trial (2026-09-04/05) |
-| `ascend bridge stop` | live, by 15 agent invocations in the 62-agent trial (2026-09-04/05) |
+| `ascend bridge stop` | live, by 16 agent invocations in the 62-agent trial (2026-09-04/05) |
 | `ascend bridge sync` | live, by 1 agent invocation in the 62-agent trial (2026-09-04/05) |
-| `ascend chat` | live, by 8 agent invocations in the 62-agent trial (2026-09-04/05) |
+| `ascend chat` | live, by 9 agent invocations in the 62-agent trial (2026-09-04/05) |
 | `ascend ci` | live, by 2 agent invocations in the 62-agent trial (2026-09-04/05) |
-| `ascend controls` | live, by 7 agent invocations in the 62-agent trial (2026-09-04/05) |
-| `ascend controls list` | live, by 6 agent invocations in the 62-agent trial (2026-09-04/05) |
-| `ascend controls validate` | live, by 25 agent invocations in the 62-agent trial (2026-09-04/05) |
-| `ascend doctor` | live, by 45 agent invocations in the 62-agent trial (2026-09-04/05) |
+| `ascend controls` | live, by 10 agent invocations in the 62-agent trial (2026-09-04/05) |
+| `ascend controls list` | live, by 7 agent invocations in the 62-agent trial (2026-09-04/05) |
+| `ascend controls validate` | live, by 26 agent invocations in the 62-agent trial (2026-09-04/05) |
+| `ascend doctor` | live, by 50 agent invocations in the 62-agent trial (2026-09-04/05) |
 | `ascend export` | live, by 13 agent invocations in the 62-agent trial (2026-09-04/05) |
 | `ascend keys` | live, by 2 agent invocations in the 62-agent trial (2026-09-04/05) |
 | `ascend keys add` | live, by 1 agent invocation in the 62-agent trial (2026-09-04/05) |
@@ -64,19 +64,19 @@ Last regenerated: 2026-09-06. Command paths: 71.
 | `ascend recon run` | platform-gated: refuses with `reconnaissance is not exposed by the Ascend API on this tenant yet` (documented on the Commands page); cannot succeed until the API ships |
 | `ascend recon show` | platform-gated: same clean refusal as `recon run` |
 | `ascend reports` | live, by 2 agent invocations in the 62-agent trial (2026-09-04/05) |
-| `ascend results` | live, by 22 agent invocations in the 62-agent trial (2026-09-04/05) |
+| `ascend results` | live, by 27 agent invocations in the 62-agent trial (2026-09-04/05) |
 | `ascend runtime` | live, by 18 agent invocations in the 62-agent trial (2026-09-04/05) |
 | `ascend runtime start` | live, by 36 agent invocations in the 62-agent trial (2026-09-04/05) |
-| `ascend skills` | live, by 46 agent invocations in the 62-agent trial (2026-09-04/05) |
+| `ascend skills` | live, by 50 agent invocations in the 62-agent trial (2026-09-04/05) |
 | `ascend status` | live, by 1 agent invocation in the 62-agent trial (2026-09-04/05) |
-| `ascend target` | live, by 5 agent invocations in the 62-agent trial (2026-09-04/05) |
-| `ascend target add` | live, by 145 agent invocations in the 62-agent trial (2026-09-04/05) |
-| `ascend target check` | live, by 21 agent invocations in the 62-agent trial (2026-09-04/05) |
-| `ascend target list` | live, by 31 agent invocations in the 62-agent trial (2026-09-04/05) |
+| `ascend target` | live, by 6 agent invocations in the 62-agent trial (2026-09-04/05) |
+| `ascend target add` | live, by 155 agent invocations in the 62-agent trial (2026-09-04/05) |
+| `ascend target check` | live, by 22 agent invocations in the 62-agent trial (2026-09-04/05) |
+| `ascend target list` | live, by 32 agent invocations in the 62-agent trial (2026-09-04/05) |
 | `ascend target rm` | live, by 1 agent invocation in the 62-agent trial (2026-09-04/05) |
-| `ascend target show` | live, by 31 agent invocations in the 62-agent trial (2026-09-04/05) |
-| `ascend target types` | live, by 14 agent invocations in the 62-agent trial (2026-09-04/05) |
+| `ascend target show` | live, by 35 agent invocations in the 62-agent trial (2026-09-04/05) |
+| `ascend target types` | live, by 17 agent invocations in the 62-agent trial (2026-09-04/05) |
 | `ascend tenant` | live, by 2 agent invocations in the 62-agent trial (2026-09-04/05) |
-| `ascend tenant show` | live, by 3 agent invocations in the 62-agent trial (2026-09-04/05) |
+| `ascend tenant show` | live, by 4 agent invocations in the 62-agent trial (2026-09-04/05) |
 | `ascend tenant switch` | never run by a script on a shared tenant by policy (`--confirm` is an operator act); behaviour pinned by tests/test_tenant_*.py |
 | `ascend version` | live, by 2 agent invocations in the 62-agent trial (2026-09-04/05) |

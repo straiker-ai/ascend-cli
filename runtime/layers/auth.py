@@ -208,9 +208,20 @@ class AuthProvider:
     only when ``materialize`` runs.
     """
 
-    KINDS = ("none", "static", "oauth2", "csrf", "derived_multihop")
+    KINDS = ("none", "static", "oauth2", "csrf", "derived_multihop", "multi")
 
-    def __init__(self, auth_config: Optional[Dict[str, Any]]) -> None:
+    def __init__(self, auth_config: Optional[Any]) -> None:
+        # A target can stand behind more than one credential -- a gateway passcode header AND a
+        # bearer is the ordinary case, not a corner. `auth` may therefore be a LIST of static
+        # blocks; each is resolved from its own env: reference and the materials are merged.
+        # Network-backed kinds (oauth2, csrf, multihop) keep the single-block form.
+        self._parts: List["AuthProvider"] = []
+        if isinstance(auth_config, list):
+            self._parts = [AuthProvider(b) for b in auth_config]
+            bad = [p.kind for p in self._parts if p.kind not in ("static", "none")]
+            if bad:
+                raise AuthError(f"an auth list may hold static credentials only; got {bad}")
+            auth_config = {"type": "multi", "items": auth_config}
         self.config: Dict[str, Any] = auth_config or {"type": "none"}
         self.kind: str = self.config.get("type", "none")
         if self.kind not in self.KINDS:
@@ -231,6 +242,8 @@ class AuthProvider:
     @property
     def needs_network(self) -> bool:
         """True if :meth:`materialize` will make an HTTP request."""
+        if self.kind == "multi":
+            return any(p.needs_network for p in self._parts)
         return self.kind in ("oauth2", "csrf", "derived_multihop")
 
     @property
@@ -245,6 +258,16 @@ class AuthProvider:
             self._cached = AuthMaterial()
         elif self.kind == "static":
             self._cached = self._materialize_static()
+        elif self.kind == "multi":
+            mat = AuthMaterial()
+            for part in self._parts:
+                m = part.materialize(timeout_s=timeout_s, verify_tls=verify_tls)
+                mat.headers.update(m.headers)
+                mat.cookies.update(m.cookies)
+                mat.params.update(m.params)
+                mat.body_vars.update(m.body_vars)
+                self._cached_token = self._cached_token or part.token
+            self._cached = mat
         elif self.kind == "oauth2":
             self._cached = self._materialize_oauth2(timeout_s, verify_tls)
         elif self.kind == "csrf":

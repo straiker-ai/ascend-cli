@@ -28,7 +28,7 @@ warning: credential-shaped header(s) stored in plaintext in the config: X-API-Ke
       --header 'X-API-Key: env:MY_SECRET'   or   --api-key 'X-API-Key:env:MY_SECRET'
 ```
 
-One environment-referenced credential per target. Two are refused rather than one silently dropped.
+Any number of environment-referenced credentials per target -- a gateway passcode header and a bearer, say. Each is resolved by the relay at start from its own variable; if any is unset the relay refuses to start and names it. The config's `auth` is one block for one credential and a list past that. (Before 1.1.3 a second reference was refused.)
 
 ## 2. Handshakes — a login that mints something, repeated when it expires
 

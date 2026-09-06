@@ -39,17 +39,17 @@ class TestEnvReferencesResolveForTheProbeAndAreRecorded:
         a = ns(bearer="env:T_TOK")
         headers, query = ascend._target_auth(a)
         assert headers["Authorization"] == "Bearer s3cret-token"
-        block, strip = a._static_auth
+        block, strip = a._static_auth[0]
         assert block == {"type": "static", "mode": "bearer", "value_ref": "env:T_TOK"} and strip == ("header", "Authorization")
 
     def test_api_key_header_and_query(self, monkeypatch):
         monkeypatch.setenv("T_KEY", "k-123")
         a = ns(api_key="X-API-Key:env:T_KEY")
         headers, _ = ascend._target_auth(a)
-        assert headers["X-API-Key"] == "k-123" and a._static_auth[0]["in"] == "header"
+        assert headers["X-API-Key"] == "k-123" and a._static_auth[0][0]["in"] == "header"
         b = ns(api_key="key:env:T_KEY:in=query")
         _, query = ascend._target_auth(b)
-        assert query == {"key": "k-123"} and b._static_auth == (
+        assert query == {"key": "k-123"} and b._static_auth[0] == (
             {"type": "static", "mode": "api_key", "name": "key", "in": "query", "value_ref": "env:T_KEY"}, ("query", "key"))
 
     def test_basic_keeps_the_user_literal_and_references_the_password(self, monkeypatch):
@@ -57,17 +57,17 @@ class TestEnvReferencesResolveForTheProbeAndAreRecorded:
         a = ns(basic="demo:env:T_PW")
         headers, _ = ascend._target_auth(a)
         assert headers["Authorization"].startswith("Basic ")
-        assert a._static_auth[0] == {"type": "static", "mode": "basic", "username_ref": "literal:demo", "password_ref": "env:T_PW"}
+        assert a._static_auth[0][0] == {"type": "static", "mode": "basic", "username_ref": "literal:demo", "password_ref": "env:T_PW"}
 
     def test_cookie_and_custom_header(self, monkeypatch):
         monkeypatch.setenv("T_S", "sess-1")
         a = ns(cookie="session=env:T_S")
         headers, _ = ascend._target_auth(a)
-        assert headers["Cookie"] == "session=sess-1" and a._static_auth[0]["mode"] == "cookie"
+        assert headers["Cookie"] == "session=sess-1" and a._static_auth[0][0]["mode"] == "cookie"
         b = ns(header=["X-Auth-Token: env:T_S"])
         headers, _ = ascend._target_auth(b)
         assert headers["X-Auth-Token"] == "sess-1"
-        assert b._static_auth[0] == {"type": "static", "mode": "custom", "name": "X-Auth-Token", "value_ref": "env:T_S", "template": "{{VALUE}}"}
+        assert b._static_auth[0][0] == {"type": "static", "mode": "custom", "name": "X-Auth-Token", "value_ref": "env:T_S", "template": "{{VALUE}}"}
 
     def test_literals_still_work_and_record_nothing(self):
         a = ns(bearer="plain-token", header=["X-Extra: 1"])
@@ -80,11 +80,39 @@ class TestEnvReferencesResolveForTheProbeAndAreRecorded:
             ascend._target_auth(ns(bearer="env:T_MISSING"))
         assert "T_MISSING" in capsys.readouterr().err
 
-    def test_two_referenced_credentials_are_refused(self, monkeypatch, capsys):
+    def test_two_referenced_credentials_are_both_recorded(self, monkeypatch):
+        """A gateway passcode header AND a bearer is the ordinary field case (a public demo host
+        behind exactly that pair is what surfaced it). Until 1.1.3 the second one was refused."""
         monkeypatch.setenv("A1", "x"); monkeypatch.setenv("A2", "y")
-        with pytest.raises(SystemExit):
-            ascend._target_auth(ns(bearer="env:A1", cookie="s=env:A2"))
-        assert "one environment-referenced credential" in capsys.readouterr().err
+        a = ns(bearer="env:A1", cookie="s=env:A2")
+        headers, _ = ascend._target_auth(a)
+        assert headers["Authorization"] == "Bearer x" and headers["Cookie"] == "s=y"
+        modes = sorted(b["mode"] for b, _ in a._static_auth)
+        assert modes == ["bearer", "cookie"]
+        assert all("x" not in str(b) and "y" not in str(b.get("value_ref")) for b, _ in a._static_auth)
+
+
+class TestSeveralCredentialsResolveTogether:
+    def test_a_list_of_static_blocks_is_one_provider(self, monkeypatch):
+        import sys as _sys
+        from pathlib import Path as _P
+        _sys.path.insert(0, str(_P(ascend.__file__).resolve().parents[2] / "runtime"))
+        from layers.auth import AuthProvider, AuthError
+        monkeypatch.setenv("GATE", "pass-1"); monkeypatch.setenv("TOK", "tok-1")
+        prov = AuthProvider([
+            {"type": "static", "mode": "custom", "name": "x-demo-key", "value_ref": "env:GATE",
+             "template": "{{VALUE}}"},
+            {"type": "static", "mode": "bearer", "value_ref": "env:TOK"},
+        ])
+        mat = prov.materialize()
+        assert mat.headers["x-demo-key"] == "pass-1" and mat.headers["Authorization"] == "Bearer tok-1"
+        assert prov.needs_network is False
+        monkeypatch.delenv("TOK")
+        with pytest.raises(AuthError) as e:
+            AuthProvider([{"type": "static", "mode": "bearer", "value_ref": "env:TOK"}]).materialize()
+        assert "TOK" in str(e.value)
+        with pytest.raises(AuthError):
+            AuthProvider([{"type": "oauth2", "token_url": "https://x/t", "grant": "client_credentials"}])
 
 
 class TestFinalizeWritesTheReferenceNotTheValue:

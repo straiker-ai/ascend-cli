@@ -11,6 +11,10 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [1.1.3] — 2026-09-06
+
 ### Regressions
 
 - **Restored a merge that was silently reverted.** Commit `9d140af`, described as a

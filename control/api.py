@@ -320,10 +320,11 @@ class AscendAPI:
         if self._cache_enabled:
             _jwt_cache_clear()
 
-    def _req(self, method: str, path: str, *, json_body: Any = None,
+    def _req(self, method: str, path: str, *, json_body: Any = None, close_after: bool = False,
              retry_auth: bool = True) -> Any:
         url = self.base + path
         headers = {"Authorization": f"Bearer {self._bearer()}",
+                   **({"Connection": "close"} if close_after else {}),
                    "Content-Type": "application/json", "Accept": "application/json"}
         r = self._s.request(method, url, headers=headers, json=json_body, timeout=self.timeout)
         if r.status_code == 401 and retry_auth and self.token.startswith("s6r_pat_"):
@@ -463,8 +464,13 @@ class AscendAPI:
         say. If a run with this name is now live, it is returned tagged `recovered`.
         """
         try:
+            # The platform closes the connection after a 201 without announcing it. The next request
+            # on that socket -- pause, issued within milliseconds -- died with RemoteDisconnected
+            # before the FIN could be seen, and a POST is rightly never retried. Measured: 3 of 3
+            # in sequence, ~43% across 28 real runs (timing-dependent). Closing here means the
+            # transitions open a fresh connection instead of inheriting a dead one.
             return self._req("POST", f"/ascend/applications/{app_id}/assessments",
-                             json_body={"name": name})
+                             json_body={"name": name}, close_after=True)
         except Exception as exc:
             found = self._find_recent_assessment(app_id, name)
             if found is None:
@@ -472,8 +478,8 @@ class AscendAPI:
             return {**found,
                     "assessment_id": found.get("id"),
                     "recovered": True,
-                    "recovery_note": (f"the response was lost ({type(exc).__name__}), but the "
-                                      f"server did create this run")}
+                    "recovery_note": (f"the response was lost ({type(exc).__name__}: {str(exc)[:160]}), "
+                                      f"but the server did create this run")}
 
     def _find_recent_assessment(self, app_id: str, name: str):
         """Look for a just-created run by name. Returns None if the lookup itself fails."""
@@ -622,8 +628,8 @@ class AscendAPI:
             if state is None:
                 raise                       # cannot confirm anything — surface the real error
             status = str(state.get("status", "")).lower()
-            note = (f"the connection dropped ({type(exc).__name__}) after the assessment was "
-                    f"created; it is on the platform with status '{status or 'unknown'}'")
+            note = (f"the connection dropped ({type(exc).__name__}: {str(exc)[:160]}) after the "
+                    f"assessment was created; it is on the platform with status '{status or 'unknown'}'")
             # Two very different outcomes were reported in the same alarming sentence. Recovered
             # AND running is a transport hiccup the CLI already absorbed — nothing for the
             # operator to do. Recovered but `created`/`paused` needs them to resume it. The flag
@@ -659,13 +665,23 @@ class AscendAPI:
             return None
 
     def _safe_transition(self, fn, app_id: str, aid: str, *, want: str) -> None:
-        """Apply pause/resume, tolerating a 409 when already in/att the target state."""
-        try:
-            fn(app_id, aid)
-        except AscendAPIError as e:
-            if "409" in str(e) or "invalid_assessment_state" in str(e):
-                return  # already in the desired state; not fatal
-            raise
+        """Apply pause/resume, tolerating a 409 when already in the target state.
+
+        A transport drop with NO response (RemoteDisconnected on a reused socket) is retried once:
+        the transition is idempotent by construction -- if the first attempt did land, the retry is
+        a 409 and returns below; if it did not, the retry is the request. Any other error is raised."""
+        import requests as _rq
+        for attempt in (1, 2):
+            try:
+                fn(app_id, aid)
+                return
+            except AscendAPIError as e:
+                if "409" in str(e) or "invalid_assessment_state" in str(e):
+                    return  # already in the desired state; not fatal
+                raise
+            except _rq.exceptions.ConnectionError as e:
+                if attempt == 2 or "RemoteDisconnected" not in repr(e):
+                    raise
 
     def create_and_run(self, spec: Dict[str, Any], name: str, **kw) -> Any:
         app = self.create_app(spec)

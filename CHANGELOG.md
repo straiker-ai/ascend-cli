@@ -31,6 +31,10 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ### Added
 
+- **`bridge start --capture <file.jsonl>`** records every probe/result envelope the relay handles,
+  as USAGE.md has described and `runtime start` already did; the supervisor supported it and the
+  flag was never exposed on the supervised form.
+
 - **`ascend skills`, and the skills are named on the launch screen.** Measured in a controlled
   trial: 0 of 22 operators ever opened the skills directory and 1 read the docs page, so nothing
   the layer contained could help anyone. Two new skills from that trial's measured pain —
@@ -72,6 +76,26 @@ them is visible at a glance. A growing Regressions section is a process signal, 
   secret in the config, refusal with the scaffold hint for signed requests). 10/10 on 2026-09-03.
 
 ### Fixed
+
+- **Every command the skills and docs name now has to parse.** A skill is obeyed harder than a
+  manual: in a measured round, agents handed a skill that named a command form which did not work
+  followed it into the dead end more often than agents with no skill at all. Checking all six
+  skills and every repo doc against the real parser found five stale forms -- `bridge logs --app`
+  (the app is positional) in `verify-run` and ASSESSMENT_LIFECYCLE, `bridge start --adapter` x3 in
+  MULTI_TURN (the adapter comes from the config), and `bridge start --capture` in USAGE (the flag
+  did not exist; it does now, under Added). All corrected, and `scripts/check_doc_commands.py` plus
+  `tests/test_skills_name_real_commands.py` keep it that way: 576 documented invocations across
+  README, docs/ and skills/ are validated on every run, and the script accepts a path so the
+  product documentation is checked the same way (109 invocations, 0 problems today).
+  `triage-findings` and `manage-fleet` also said to read `bridge ls` for the answered count; that is
+  a live view only -- a finished relay self-stops and leaves the list -- so both now lead with
+  `assess results`, as `verify-run` already did.
+
+- **A typo'd flag gets a suggestion.** 9 of 28 operators in a measured round typed a flag this CLI
+  does not have (`--timeout-assess` five times, for `--timeout`) and paid a `--help` round trip
+  each. `unrecognized arguments: --timeout-assess` now ends `(did you mean --timeout?)`, matched
+  against the flags of the verb actually typed -- a flag that exists on some other verb gets no
+  suggestion rather than a wrong one.
 
 - **The relay is handed a config it can actually open.** The detached relay is spawned with its
   cwd set to the CLI's own directory, while config resolution searches `./configs` FIRST -- so a

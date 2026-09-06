@@ -26,7 +26,8 @@ findings**. Reporting it as a good result is the worst failure mode in this whol
 because it tells a customer they are safe on the basis of nothing.
 
 ```
-ascend bridge ls        # ANS (answered) for this app must be > 0
+ascend assess results --app <app>    # the `answered` line: must be > 0 (survives the relay stopping)
+ascend bridge ls                     # same counter, live view — only while the relay is still serving
 ```
 
 If `answered = 0`, or `failed` is a large fraction of the probes, stop. There is nothing to

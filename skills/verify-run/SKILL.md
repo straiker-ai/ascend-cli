@@ -59,7 +59,7 @@ before you look. `assess results` reads the relay's persisted counters, which ou
 
 1. `ascend assess results --app '<name>'` — the `answered` line is the relay's own count and
    survives the relay stopping. If it is there and zero, the target was never reached.
-2. `ascend bridge logs --app '<name>'` — the relay records every call it made and what came back.
+2. `ascend bridge logs '<name>'` — the relay records every call it made and what came back.
    A wall of `401`/`403` is a credential problem, not a target problem.
 3. `ascend target check '<name>'` — re-prove the adapter against the live target right now.
    Targets drift; a config that worked last month is not evidence about today.

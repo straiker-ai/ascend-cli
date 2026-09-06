@@ -87,9 +87,10 @@ below are the **advanced** path (a manually pre-started or remote relay), where 
 overrides all of this:
 
 ```bash
-ascend bridge start --adapter session_api --config mybot          # auto → 1 worker (sequential)
-ascend bridge start --adapter direct_api  --config mybot          # auto → 10 workers (concurrent)
-ascend bridge start --adapter session_api --config mybot --max-workers 4   # explicit override
+ascend bridge start --config mybot                    # session_api config → 1 worker (sequential)
+ascend bridge start --config otherbot                 # direct_api config  → 10 workers (concurrent)
+ascend bridge start --config mybot --max-workers 4    # explicit override
+# the adapter is read from the config's `adapter` key — there is no --adapter flag
 ```
 
 ### Sequential and the per-probe window

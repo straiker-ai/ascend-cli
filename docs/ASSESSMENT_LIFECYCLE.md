@@ -112,7 +112,7 @@ that continue the run, instead of polling to its timeout.
 
 ## Reading the relay's log
 
-`ascend bridge logs --app <name>` is the ground truth when a run looks wrong. The lines are
+`ascend bridge logs <name>` is the ground truth when a run looks wrong. The lines are
 prefixed by the component that wrote them, and those prefixes are the same three nouns the
 diagram uses:
 

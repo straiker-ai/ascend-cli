@@ -5225,7 +5225,7 @@ def cmd_relay_start(args):
                     qpm=qpm, max_workers=args.max_workers, bridge_base=args.bridge_base,
                     wait_ms=args.wait_ms, app_name=t.get("app_name"),
                     control_token=getattr(c, "token", None), control_base=getattr(args, "base", None),
-                    idle_timeout_s=_resolve_idle(args))
+                    idle_timeout_s=_resolve_idle(args), capture=getattr(args, "capture", None))
         results.append({"app_id": t["app_id"], "app_name": t.get("app_name"),
                         "started": "error" not in r, **({k: v for k, v in r.items() if k != "app_id"})})
     n = sum(1 for r in results if r.get("started"))
@@ -6990,9 +6990,44 @@ class _Parser(argparse.ArgumentParser):
     Subparsers inherit the class, so one override covers every verb."""
 
     def error(self, message):
+        message = self._with_suggestions(message)
         if not _wants_json():
             self.print_usage(sys.stderr)
         _die(message, code=EXIT_USAGE)
+
+    def _with_suggestions(self, message):
+        """`unrecognized arguments: --timeout-assess` -> `… (did you mean --timeout?)`.
+
+        In a measured round, 9 of 28 operators typed a flag this CLI does not have -- five of them
+        `--timeout-assess` for `--timeout` -- and each one cost a `--help` round trip. argparse
+        raises this error from the TOP-level parser, whose own flags are just the five globals, so
+        the candidates have to come from the verb the operator actually typed: walk the subparser
+        tree along sys.argv, then match against that verb's flags. A flag that exists on some
+        other verb gets no suggestion rather than a wrong one.
+        """
+        import difflib
+        m = re.match(r"unrecognized arguments: (.+)", message)
+        if not m:
+            return message
+        parser, argv = self, [a for a in sys.argv[1:] if not a.startswith("-")]
+        for tok in argv:                                    # descend: ascend assess run …
+            sub = next((a for a in parser._actions if isinstance(a, argparse._SubParsersAction)), None)
+            if sub is None or tok not in sub.choices:
+                break
+            parser = sub.choices[tok]
+        known = sorted(o for o in parser._option_string_actions if o.startswith("--"))
+        hints = []
+        for tok in m.group(1).split():
+            if not tok.startswith("--") or tok in known:
+                continue
+            close = difflib.get_close_matches(tok, known, n=1, cutoff=0.75)
+            if not close:                                   # `--timeout-assess` for `--timeout`
+                close = [k for k in known if tok.startswith(k + "-")]
+            if close:
+                hints.append(f"{tok} -> {close[0]}")
+        if hints:
+            message += "  (did you mean " + ", ".join(hints) + "?)"
+        return message
 
 
 class _Fmt(argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter):
@@ -7857,6 +7892,9 @@ def build_parser():
     s.add_argument("--foreground", action="store_true",
                    help="run ONE bridge in this terminal (logs here, Ctrl-C stops it) instead of "
                         "detaching — for debugging an adapter. Needs --config.")
+    s.add_argument("--capture", default=None, metavar="PATH",
+                   help="write a jsonl transcript of every probe/result envelope the relay handles "
+                        "(same as `runtime start --capture`)")
     s.set_defaults(func=cmd_relay_start)
     s = rp.add_parser("ls", parents=[GLOBALS], formatter_class=_Fmt,
                       help="list bridges + flag live assessments with NO bridge")

@@ -5,7 +5,7 @@ usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] b
        [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE] [--app APP]
        [--all-running] [--config CONFIG] [--qpm QPM] [--qpm-total QPM_TOTAL]
        [--max-workers MAX_WORKERS] [--wait-ms WAIT_MS] [--idle-timeout IDLE_TIMEOUT]
-       [--foreground]
+       [--foreground] [--capture PATH]
 
 options:
   -h, --help            show this help message and exit
@@ -31,6 +31,8 @@ options:
                         managed runs. (default: None)
   --foreground          run ONE bridge in this terminal (logs here, Ctrl-C stops it) instead of
                         detaching — for debugging an adapter. Needs --config. (default: False)
+  --capture PATH        write a jsonl transcript of every probe/result envelope the relay handles
+                        (same as `runtime start --capture`) (default: None)
 
 examples:
   ascend bridge start --all-running        # serve every live assessment

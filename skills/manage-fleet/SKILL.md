@@ -33,7 +33,8 @@ Two rules that prevent most fleet pain:
 
 ```bash
 ascend target list          # every target, its adapter, whether it is registered and serving
-ascend bridge ls            # every relay: state, and ANS = probes actually answered
+ascend bridge ls            # every LIVE relay: state, and ANS = probes actually answered
+                            # (a finished relay self-stops and leaves this list; its counters stay in `assess results`)
 ```
 
 `target list` flags same-named targets. If it does, fix that before running anything.

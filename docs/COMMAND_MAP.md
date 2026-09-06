@@ -411,6 +411,7 @@ start a detached bridge per app (key comes from the local store)
 | `--wait-ms` | `WAIT_MS` | — | — |
 | `--idle-timeout` | `IDLE_TIMEOUT` | — | seconds a paused, already-probed bridge waits before self-stopping. 0 never idle-stops (the default); the bridge stops when the run reaches a terminal state. $ASCEND_BRIDGE_IDLE_TIMEOUT sets this default for auto-managed runs. |
 | `--foreground` | — | — | run ONE bridge in this terminal (logs here, Ctrl-C stops it) instead of detaching — for debugging an adapter. Needs --config. |
+| `--capture` | `PATH` | — | write a jsonl transcript of every probe/result envelope the relay handles (same as `runtime start --capture`) |
 
 ```bash
 ascend bridge start --all-running        # serve every live assessment

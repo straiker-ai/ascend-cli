@@ -2675,12 +2675,10 @@ def _target_auth(args):
                              ("header", "Cookie")))
         else:
             headers["Cookie"] = ck
-    if len(refs) > 1:
-        _die(f"one environment-referenced credential per target ({len(refs)} given: "
-             + ", ".join(b.get("name") or b["mode"] for b, _ in refs)
-             + ").\n  the static auth layer carries one; give the others as literals, or fold them "
-             "into one header")
-    args._static_auth = refs[0] if refs else None
+    # Any number of environment-referenced credentials: a passcode header AND a bearer is the
+    # ordinary field case. Each is resolved by the relay at start from its own variable; the
+    # config carries only the references. (Until 1.1.3 a second reference was refused.)
+    args._static_auth = refs or None
     return headers, query
 
 
@@ -2701,26 +2699,28 @@ def _finalize_target_auth(cfg, args):
     stored in plaintext — ``probe.build_config`` has recorded that list since 1.1.1 and nothing
     ever printed it.
     """
-    rec = getattr(args, "_static_auth", None)
-    if rec:
-        block, (where, name) = rec
+    recs = getattr(args, "_static_auth", None) or []
+    if recs:
         if getattr(args, "_login_auth", None):
-            _die("use either an environment-referenced credential or --login-url for this target, "
+            _die("use either environment-referenced credentials or --login-url for this target, "
                  "not both: a config carries one auth block")
-        if where == "header":
-            hdrs = {k: v for k, v in (cfg.get("headers") or {}).items() if k.lower() != name.lower()}
-            if hdrs:
-                cfg["headers"] = hdrs
+        blocks = []
+        for block, (where, name) in recs:
+            if where == "header":
+                hdrs = {k: v for k, v in (cfg.get("headers") or {}).items() if k.lower() != name.lower()}
+                if hdrs:
+                    cfg["headers"] = hdrs
+                else:
+                    cfg.pop("headers", None)
             else:
-                cfg.pop("headers", None)
-        else:
-            for key in ("endpoint", "url", "ws_url"):
-                if cfg.get(key):
-                    cfg[key] = _strip_query_param(cfg[key], name)
-        cfg["auth"] = block
-        ref = block.get("value_ref") or block.get("password_ref")
-        print(f"[auth] {block['mode']} credential referenced as {ref} — the config carries the "
-              f"reference, never the value", file=sys.stderr)
+                for key in ("endpoint", "url", "ws_url"):
+                    if cfg.get(key):
+                        cfg[key] = _strip_query_param(cfg[key], name)
+            blocks.append(block)
+            ref = block.get("value_ref") or block.get("password_ref")
+            print(f"[auth] {block['mode']} credential referenced as {ref} — the config carries the "
+                  f"reference, never the value", file=sys.stderr)
+        cfg["auth"] = blocks[0] if len(blocks) == 1 else blocks
     inline = (cfg.get("_probe") or {}).get("inline_secret_headers") or []
     still = [h for h in inline if any(k.lower() == h.lower() for k in (cfg.get("headers") or {}))]
     if still:

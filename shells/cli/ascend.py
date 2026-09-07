@@ -7259,6 +7259,13 @@ def _add_build_args(s):
     s.add_argument("--out", help="write the drafted config here")
 
 
+def _skills_root() -> Path:
+    """The packaged skills: beside the bundled docs and example configs, so a PyInstaller build
+    finds them under sys._MEIPASS (the entry script sits at the bundle root, so the repo-relative
+    `REPO / "skills"` pointed above the bundle and the shipped asset listed none)."""
+    return _bundled_dir() / "skills"
+
+
 def cmd_skills(args):
     """List the packaged skills.
 
@@ -7268,7 +7275,7 @@ def cmd_skills(args):
     place an agent looks: `ascend --help`.
     """
     import re as _re
-    root = REPO / "skills"
+    root = _skills_root()
     rows = []
     for d in sorted(root.iterdir()) if root.is_dir() else []:
         f = d / "SKILL.md"

@@ -110,7 +110,8 @@ _Nothing yet._
   but not `skills/`, so `ascend skills` from the packaged binary said "no skills packaged in this
   build" while a source checkout lists six -- an agent on the binary was told the procedures do
   not exist. Found by running the release asset from outside the source tree. The build now
-  bundles `skills/`, and a test refuses a build script that leaves them out -- or one whose `pyinstaller` continuation is broken by a blank line, which is how the first asset build of this release failed.
+  bundles `skills/`, the lookup starts at the bundle root when frozen (the entry script sits
+  there, so the repo-relative path pointed above the bundle), and a test refuses a build script that leaves them out -- or one whose `pyinstaller` continuation is broken by a blank line, which is how the first asset build of this release failed.
 
 - **The shipped binary can start its own relay.** In a PyInstaller build `sys.executable` is the
   `ascend` binary; the supervisor spawned the relay as `<binary> <bundle>/shells/cli/ascend.py

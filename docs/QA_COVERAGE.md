@@ -5,7 +5,7 @@ are dated. "Live" means the command ran against the real demo tenant or a real t
 its documentation says. A command that is only unit-tested is marked as such -- offline tests are
 regression guards, not proof.
 
-Last regenerated: 2026-09-06. Command paths: 71.
+Last regenerated: 2026-09-07. Command paths: 71.
 
 | Command | Last proven by |
 |---|---|

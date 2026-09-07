@@ -11,6 +11,10 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [1.1.4] — 2026-09-07
+
 ### Fixed
 
 - **`assess results --json` always carries `false_pass_suspect` as a boolean.** A clean run

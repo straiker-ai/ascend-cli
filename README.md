@@ -224,6 +224,8 @@ ascend onboard --config mybot          # register + bridge + assess, one command
 
 ## Prerequisites
 
+Runs on **macOS and Linux**. On Windows the relay must be run in the foreground (`ascend bridge start --app <name> --foreground`) or under WSL; the supervised relay is managed with POSIX signals and says so if asked to start there.
+
 **One dependency, or none.**
 
 | How you run it | Needs |

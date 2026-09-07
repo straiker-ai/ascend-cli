@@ -185,6 +185,16 @@ def start(app_id: str, *, config: str, adapter: Optional[str], api_key: str,
     When self_reconcile is on, the child polls its app's assessment state and self-stops when the app
     goes terminal (or, if paused, after idle_timeout_s). To do that the child needs to reach the
     control plane, so the operator's token/base are injected into the child ENV (never argv)."""
+    if os.name == "nt":
+        # The detached relay is supervised with POSIX primitives -- setsid (start_new_session),
+        # os.kill for liveness and SIGTERM/SIGKILL to stop -- none of which Windows has. Until
+        # then it was spawned anyway and could never be seen or stopped: a relay nobody can
+        # supervise is the false pass this whole layer exists to prevent. Say so, with the two
+        # paths that do work.
+        return {"app_id": app_id, "error": (
+            "the supervised relay needs macOS or Linux (it is managed with POSIX signals). On "
+            "Windows run the relay in its own terminal with `ascend bridge start --app <name> "
+            "--foreground`, or use WSL for the supervised form.")}
     if is_running(app_id):
         return {"app_id": app_id, "error": "a relay is already running for this app",
                 "pid": read_pid(app_id)}

@@ -38,6 +38,11 @@ logger = logging.getLogger(__name__)
 class SessionAPIAdapter(BotAdapter):
     """Create a session, then send a prompt through it."""
 
+    # Sequential-mode state: the session kept across consecutive probes, and how many turns it has
+    # carried. Per-probe (the default) never reads these -- every probe opens a fresh session.
+    _session_value: Any = None
+    _seq_turns: int = 0
+
     async def send_prompt(self, prompt: str, config: Dict[str, Any]) -> Dict[str, Any]:
         start = time.time()
 
@@ -52,48 +57,60 @@ class SessionAPIAdapter(BotAdapter):
         headers.update(config.get("headers", {}))
 
         # --- Step 1: Create session ---
-        session_body = config.get("session_body", {})
-        session_body_str = json.dumps(session_body)
-        session_body_str = session_body_str.replace("{{UUID}}", str(uuid.uuid4()))
-        session_body = json.loads(session_body_str)
+        conv = config.get("conversation") or {}
+        policy = str(conv.get("policy") or "per-probe").replace("_", "-")
+        max_turns = int(conv.get("max_turns") or 10)
+        reuse = (policy == "sequential" and self._session_value is not None
+                 and self._seq_turns < max_turns)
+        if reuse:
+            session_value = self._session_value
+            variable_name = config.get("session_variable", "SESSION_ID")
+            resolved_endpoint = message_endpoint.replace(f"{{{{{variable_name}}}}}", str(session_value))
+        else:
+            self._session_value = None
+            self._seq_turns = 0
+            session_body = config.get("session_body", {})
+            session_body_str = json.dumps(session_body)
+            session_body_str = session_body_str.replace("{{UUID}}", str(uuid.uuid4()))
+            session_body = json.loads(session_body_str)
 
-        try:
-            logger.info(f"SessionAPI: creating session at {session_endpoint}")
-            resp = requests.post(
-                session_endpoint, json=session_body, headers=headers, timeout=timeout
-            )
-            resp.raise_for_status()
-            session_data = resp.json()
-        except requests.RequestException as e:
-            return self._fail(f"Session creation failed: {e}", start)
-        except json.JSONDecodeError:
-            return self._fail("Session response is not JSON", start)
-
-        extract_path = config.get("session_extract", "sessionId")
-        session_value = _extract(session_data, extract_path)
-        if not session_value:
-            return self._fail(
-                f"Could not extract '{extract_path}' from session response",
-                start,
-                raw=json.dumps(session_data)[:500],
-            )
-
-        variable_name = config.get("session_variable", "SESSION_ID")
-        logger.debug("SessionAPI: extracted session id (elided)")
-
-        # --- Step 1b (optional): warm-up / greeting discard ---
-        # Some agents return a mandatory greeting/consent on the FIRST message; send a
-        # throwaway first so the probe gets the real answer, not a false PASS on the greeting.
-        resolved_endpoint = message_endpoint.replace(f"{{{{{variable_name}}}}}", str(session_value))
-        warmup_message = config.get("warmup_message") or config.get("session_greeting")   # #75 alias
-        if warmup_message:
-            wb = json.dumps(config.get("message_body", {}))
-            wb = wb.replace("{{PROMPT}}", _json_escape(str(warmup_message)))
-            wb = wb.replace(f"{{{{{variable_name}}}}}", _json_escape(str(session_value)))
             try:
-                requests.post(resolved_endpoint, json=json.loads(wb), headers=headers, timeout=timeout)
-            except Exception as e:
-                logger.debug("SessionAPI: warmup send failed (non-fatal): %s", e)
+                logger.info(f"SessionAPI: creating session at {session_endpoint}")
+                resp = requests.post(
+                    session_endpoint, json=session_body, headers=headers, timeout=timeout
+                )
+                resp.raise_for_status()
+                session_data = resp.json()
+            except requests.RequestException as e:
+                return self._fail(f"Session creation failed: {e}", start)
+            except json.JSONDecodeError:
+                return self._fail("Session response is not JSON", start)
+
+            extract_path = config.get("session_extract", "sessionId")
+            session_value = _extract(session_data, extract_path)
+            if not session_value:
+                return self._fail(
+                    f"Could not extract '{extract_path}' from session response",
+                    start,
+                    raw=json.dumps(session_data)[:500],
+                )
+
+            variable_name = config.get("session_variable", "SESSION_ID")
+            logger.debug("SessionAPI: extracted session id (elided)")
+
+            # --- Step 1b (optional): warm-up / greeting discard ---
+            # Some agents return a mandatory greeting/consent on the FIRST message; send a
+            # throwaway first so the probe gets the real answer, not a false PASS on the greeting.
+            resolved_endpoint = message_endpoint.replace(f"{{{{{variable_name}}}}}", str(session_value))
+            warmup_message = config.get("warmup_message") or config.get("session_greeting")   # #75 alias
+            if warmup_message:
+                wb = json.dumps(config.get("message_body", {}))
+                wb = wb.replace("{{PROMPT}}", _json_escape(str(warmup_message)))
+                wb = wb.replace(f"{{{{{variable_name}}}}}", _json_escape(str(session_value)))
+                try:
+                    requests.post(resolved_endpoint, json=json.loads(wb), headers=headers, timeout=timeout)
+                except Exception as e:
+                    logger.debug("SessionAPI: warmup send failed (non-fatal): %s", e)
 
         # --- Step 2: Send message ---
 
@@ -114,6 +131,12 @@ class SessionAPIAdapter(BotAdapter):
             resp.raise_for_status()
             message_data = resp.json()
         except requests.RequestException as e:
+            code = getattr(getattr(e, "response", None), "status_code", None)
+            if reuse and code in (400, 401, 403, 404, 409, 410, 422):
+                # the kept session was refused (expired, closed): drop it and open a fresh one
+                self._session_value = None
+                self._seq_turns = 0
+                return await self.send_prompt(prompt, config)
             return self._fail(f"Message send failed: {e}", start)
         except json.JSONDecodeError:
             return self._fail("Message response is not JSON", start)
@@ -128,6 +151,9 @@ class SessionAPIAdapter(BotAdapter):
                 raw=json.dumps(message_data)[:500],
             )
 
+        if policy == "sequential":
+            self._session_value = session_value
+            self._seq_turns += 1
         return self._ok(
             str(response_text).strip(),
             start,

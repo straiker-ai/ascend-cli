@@ -25,86 +25,41 @@ per-conversation lock so a stateful adapter's turns stay strictly ordered even u
 
 ---
 
-## The correctness problem and the default policy
+## What is on the wire, and the default policy
 
-The platform gives the runtime **no correlation id**, so the runtime cannot tell which in-flight probe
-belongs to which conversation. If it ran probes concurrently against a single shared stateful
-instance, turns from different logical conversations would interleave and corrupt each other.
+A probe carries **only the prompt**. Measured on 176 captured envelopes: `header.id`,
+`header.type`, `metadata.timestamp`, `metadata.version`, `payload.body.prompt` -- no conversation
+key, no turn number, no strategy. The controls API carries no multi-turn flag either. So the relay
+cannot tell a single-shot probe from turn 3 of a multi-turn attack, and the platform cannot manage
+a conversation's lifecycle (a refresh, a new id) on the bridge's behalf.
 
-The default policy that avoids this is **sequential**:
+The default is therefore **per-probe**: every probe is its own conversation. That is what a
+single-shot control means, it is what the platform's own direct plugins do, and it never chains
+hundreds of unrelated attacks into one thread on the target. `session_api` opens a fresh session
+per probe; `direct_api` never echoes a conversation id across a probe boundary.
 
-- The runtime runs the app at **concurrency 1** for stateful adapters, so only *one* conversation
-  is ever in flight.
-- The single persistent instance threads the turns in order.
-
-This is why the legacy Go bridge forced `max_workers: 1` for session/browser targets. The
-constraint is inherent to "no correlation id on the wire".
-
-### Which adapters are stateful
-
-`STATEFUL_ADAPTERS` in `dispatch.py` — 12 of the 15 registered adapters:
-
-```
-session_api, browser, amazon_connect, scrt2_direct, agentforce,
-slack_direct, copilot_studio, websocket_direct, session_poll,
-sentinel_stream, custom, bedrock
-```
-
-The remaining three — `direct_api`, `sse_stream`, `vertex_ai` — are routed concurrently.
-
-The set is a **routing default, not a claim about each adapter's internals**. Two places where the
-default and the source diverge, both worth overriding:
-
-- **Sequential but not actually stateful.** `agentforce`, `scrt2_direct`, `copilot_studio`,
-  `session_api`, `session_poll` and `websocket_direct` hold no cross-prompt conversation state —
-  each `send_prompt` mints its own session or conversation and tears it down. They run at 1 worker
-  because that is the safe direction, not because they need it. Raise `max_workers` (or set
-  `conversation_key`) where the target tolerates it. `bedrock` is sequential for the same reason in
-  `converse` mode; only its `agent` and `agentcore` modes thread a session id.
-- **Concurrent but carrying state.** `sse_stream` is *not* in the set, so it defaults to 10 workers,
-  yet it keeps a persistent `requests.Session` (cookie jar), a bootstrap CSRF token, and — when the
-  config has a `create` block — **a conversation id reused across prompts** unless
-  `create.per_prompt` is set. The default is right for the bootstrap-only shape. For a config with
-  a `create` block, set `"create": {"per_prompt": true}` or `max_workers: 1`, or ten concurrent
-  probes will interleave into one conversation.
-
-`ascend target show <target>` prints the adapter and config a target actually resolves to, which is
-what these rules are read from.
-
-### How the concurrency is chosen
-
-`TargetCaller.recommended_workers()` (in `call_target.py`):
-
-1. If the config sets `max_workers`, use it.
-2. Else if the adapter is stateful **and** no `conversation_key` is set → **1** (sequential).
-3. Else → **10** (concurrent).
-
-`TargetCaller.is_stateful` is `adapter_type in STATEFUL_ADAPTERS and not config.get("conversation_key")`.
-
-For a normal run this is automatic: `ascend assess run` auto-starts the bridge, which reads the
-adapter/config and picks the worker count from the rules above. The `bridge start` invocations
-below are the **advanced** path (a manually pre-started or remote relay), where `--max-workers N`
-overrides all of this:
+**`sequential`** is the opt-in for a run of multi-turn controls: consecutive probes share one
+conversation. `session_api` keeps its session; `direct_api` carries the target's conversation id
+when the config names one (`carry`), including a rotating id. It is **bounded**: after
+`conversation.max_turns` (default 10) the next probe starts a fresh conversation, so an attack
+that needs five turns gets them and a long run does not accumulate a thousand. A session or id
+the target refuses (expired, closed) is dropped and a fresh one opened.
 
 ```bash
-ascend bridge start --config mybot                    # session_api config → 1 worker (sequential)
-ascend bridge start --config otherbot                 # direct_api config  → 10 workers (concurrent)
-ascend bridge start --config mybot --max-workers 4    # explicit override
-# the adapter is read from the config's `adapter` key — there is no --adapter flag
+ascend assess run --app mybot --name agentic --controls <multi-turn ids> --conversation sequential
+ascend bridge start --app mybot --conversation sequential
 ```
 
-### Sequential and the per-probe window
+`assess results` prints which policy the relay ran under, next to the answered line, and
+`--json` carries it as `relay_conversation`. Config form:
 
-Sequential is safe for correctness and expensive for the clock. The platform's per-probe window
-starts when a probe is **queued**, not when the bridge calls the target, so at 1 worker every probe
-behind the one in flight is spending its budget waiting. A target that answers in 40s is
-comfortably inside a ~120s window on its own and still times out once the queue is deep enough.
+```json
+"conversation": {"policy": "sequential", "max_turns": 10}
+```
 
-Set QPM to what a single sequential conversation can actually sustain rather than to the platform
-cap, and measure the target with `ascend target check` before the run. See
-[PERFORMANCE.md](PERFORMANCE.md) for the window and the values derived from it.
-
----
+On the record: under `sequential`, a multi-turn attack still shares its conversation with
+whatever single-shot probe the platform dispatched just before it. Until the platform puts a
+conversation key on the wire, that is the best the bridge can do -- and it says so here.
 
 ## Running conversations concurrently: `conversation_key`
 

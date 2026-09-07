@@ -69,18 +69,41 @@ class DirectAPIAdapter(BotAdapter):
     # stale, or a conversation that closed after N turns), it is dropped and the request is sent
     # once more without it -- a fresh conversation, which is what the target asked for.
     _carry_value: Any = None
+    _turns: int = 0
 
     async def send_prompt(self, prompt: str, config: Dict[str, Any]) -> Dict[str, Any]:
+        """One probe. The conversation policy decides whether it continues the previous one.
+
+        The platform puts only the prompt on the wire -- no conversation key, no turn number, no
+        strategy -- so the relay cannot tell a single-shot probe from turn 3 of a multi-turn attack.
+        The default is therefore **per-probe**: every probe is its own conversation, which is what
+        a single-shot control means and what the platform's own direct plugins do. `sequential`
+        (opt in for a multi-turn run) threads consecutive probes into one conversation, carrying
+        the target's conversation id when the config names one, and starts a fresh conversation
+        after `max_turns` so nothing chains hundreds of unrelated probes into one thread.
+        """
+        conv = config.get("conversation") or {}
+        policy = str(conv.get("policy") or "per-probe").replace("_", "-")
+        max_turns = int(conv.get("max_turns") or 10)
         carry = config.get("carry") or {}
-        if carry.get("request_field") and carry.get("reply_path"):
-            out = await self._send_once(prompt, config, carry, self._carry_value)
-            meta = out.get("metadata") or {}
-            code = out.get("status_code") or meta.get("status_code") or meta.get("http_status")
-            if not out.get("success") and self._carry_value is not None and code in (400, 404, 409, 410, 422):
-                self._carry_value = None
-                out = await self._send_once(prompt, config, carry, None)
-            return out
-        return await self._send_once(prompt, config, None, None)
+        carry = carry if (carry.get("request_field") and carry.get("reply_path")) else None
+        if policy != "sequential" or not carry:
+            self._carry_value = None                       # per-probe: nothing crosses a probe boundary
+            self._turns = 0
+            return await self._send_once(prompt, config, None, None)   # and nothing is recorded
+        if self._turns >= max_turns:
+            self._carry_value = None                       # bounded: a fresh conversation
+            self._turns = 0
+        out = await self._send_once(prompt, config, carry, self._carry_value)
+        meta = out.get("metadata") or {}
+        code = out.get("status_code") or meta.get("status_code") or meta.get("http_status")
+        if not out.get("success") and self._carry_value is not None and code in (400, 404, 409, 410, 422):
+            self._carry_value = None                       # stale or closed: reopen
+            self._turns = 0
+            out = await self._send_once(prompt, config, carry, None)
+        if out.get("success"):
+            self._turns += 1
+        return out
 
     async def _send_once(self, prompt: str, config: Dict[str, Any], carry, carried) -> Dict[str, Any]:
         start = time.time()

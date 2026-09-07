@@ -20,8 +20,17 @@ def build_runtime(api_key: str, adapter: str, config_name: str, *,
                   base_url: str = DEFAULT_BASE_URL, consumer: Optional[str] = None,
                   qpm: Optional[int] = None, max_workers: Optional[int] = None,
                   capture_path: Optional[str] = None,
-                  wait_ms: int = 25000) -> LeaseClient:
-    caller = TargetCaller(adapter, config_name)
+                  wait_ms: int = 25000, conversation: Optional[str] = None) -> LeaseClient:
+    if conversation:
+        # A run-level choice (`assess run --conversation`) lands on the loaded config, never on
+        # disk: the same target can run single-shot controls per-probe today and a multi-turn set
+        # sequentially tomorrow without editing anything.
+        from configs import load_config
+        cfg = dict(load_config(config_name))
+        cfg["conversation"] = {**(cfg.get("conversation") or {}), "policy": conversation}
+        caller = TargetCaller(adapter, config_name, config=cfg)
+    else:
+        caller = TargetCaller(adapter, config_name)
     workers = max_workers if max_workers is not None else caller.recommended_workers()
     client = LeaseClient(
         api_key=api_key, handler=caller.handler, base_url=base_url,

@@ -2116,6 +2116,17 @@ def _false_pass_warning(a, app_id=None):
     return None
 
 
+def _with_false_pass_verdict(a, warn):
+    """The verdict travels with the numbers it qualifies, or a pipeline reads a clean score from a
+    run that measured nothing. Same field name `reports --detail` uses -- and it is ALWAYS present
+    as a boolean: a clean run used to omit it, so `results["false_pass_suspect"]` raised KeyError
+    on exactly the runs a pipeline wants to pass (measured on the 62-control endurance run)."""
+    a = dict(a)
+    a["false_pass_suspect"] = bool(warn)
+    a["false_pass_warning"] = warn or None
+    return a
+
+
 def cmd_assess_results(args):
     c = _client(args)
     app_id = _resolve_app(c, args.app)
@@ -2144,15 +2155,10 @@ def cmd_assess_results(args):
                  f"  ·  {ev.get('delivered', 0)} delivered  ·  {ev.get('failed', 0)} failed"
                  f"   (this machine's relay)")
     warn = _false_pass_warning(a, app_id)
-    if warn:
-        if args.json:
-            # The warning travels with the numbers it qualifies, or a pipeline reads a clean score
-            # from a run that measured nothing. Same field name `reports --detail` uses.
-            a = dict(a)
-            a["false_pass_suspect"] = True
-            a["false_pass_warning"] = warn
-        else:
-            human = f"{human}\n\n{warn}"
+    if args.json:
+        a = _with_false_pass_verdict(a, warn)
+    elif warn:
+        human = f"{human}\n\n{warn}"
     _out(a, args, human=human)
 
 

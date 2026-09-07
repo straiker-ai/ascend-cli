@@ -107,3 +107,12 @@ def test_results_reports_the_answered_count():
     assert "_relay_evidence(app_id)" in src
     assert "relay_answered" in src, "--json must carry it too"
     assert "answered by the target" in src, "and the human output must say it in words"
+
+
+def test_the_verdict_is_always_a_boolean_in_json():
+    """A clean run used to omit `false_pass_suspect`; a pipeline reading the key got a KeyError on
+    exactly the runs it wanted to pass (seen on the 62-control endurance run)."""
+    clean = ascend._with_false_pass_verdict({"status": "complete"}, None)
+    assert clean["false_pass_suspect"] is False and clean["false_pass_warning"] is None
+    flagged = ascend._with_false_pass_verdict({"status": "complete"}, "the relay answered nothing")
+    assert flagged["false_pass_suspect"] is True and flagged["false_pass_warning"].startswith("the relay")

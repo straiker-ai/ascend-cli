@@ -333,6 +333,7 @@ create->pause->resume->poll an assessment
 | `--recon-only` | — | — | run reconnaissance only — no attack probes (same as `ascend recon run`) |
 | `--recon-controls` | `IDS` | — | recon control ids for --with-recon/--recon-only (default: the whole recon catalog; see `ascend recon controls`) |
 | `--detail` | — | — | show key findings per control when the run completes |
+| `--conversation` | `per-probe|sequential` | — | how the relay threads probes into conversations. per-probe (default): each probe is its own conversation -- what a single-shot control means. sequential: consecutive probes share one conversation, for multi-turn controls; bounded by the config's conversation.max_turns (default 10) |
 
 ```bash
 ascend assess run --app 'My Bot' --name 'run 1'
@@ -405,6 +406,7 @@ start a detached bridge per app (key comes from the local store)
 | `--app` *(repeatable)* | `APP` | — | app name or aapp_ id (repeatable) |
 | `--all-running` | — | — | every app whose latest assessment is actively running |
 | `--config` | `CONFIG` | — | override the bound config name for all targets |
+| `--conversation` | `per-probe|sequential` | — | per-probe (default) or sequential; see `assess run --conversation` |
 | `--qpm` | `QPM` | — | per-bridge queries per minute |
 | `--qpm-total` | `QPM_TOTAL` | — | split this total across the started bridges (protects a shared target host) |
 | `--max-workers` | `MAX_WORKERS` | — | — |
@@ -898,6 +900,7 @@ lease probes and relay them to a target via an adapter (see `bridge start --fore
 |---|---|---|---|
 | `--adapter` | `ADAPTER` | — | adapter type (default: from the config) |
 | `--config` **(required)** | `CONFIG` | — | config name in the config dir |
+| `--conversation` | `per-probe|sequential` | — | per-probe (default): every probe is its own conversation. sequential: consecutive probes share one conversation (for multi-turn controls), bounded by the config's conversation.max_turns (default 10) |
 | `--api-key` | `API_KEY` | — | bridge key (tc-); else $STRAIKER_BRIDGE_API_KEY |
 | `--app` | `APP` | — | resolve the bridge key from the local key store for this app |
 | `--consumer` | `CONSUMER` | — | bridge consumer id (parallel bridges MUST differ; auto per app) |

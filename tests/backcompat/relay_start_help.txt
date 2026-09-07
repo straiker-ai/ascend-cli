@@ -3,9 +3,9 @@ $ ascend relay start --help
 --- stdout
 usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] bridge start
        [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE] [--app APP]
-       [--all-running] [--config CONFIG] [--qpm QPM] [--qpm-total QPM_TOTAL]
-       [--max-workers MAX_WORKERS] [--wait-ms WAIT_MS] [--idle-timeout IDLE_TIMEOUT]
-       [--foreground] [--capture PATH]
+       [--all-running] [--config CONFIG] [--conversation {per-probe,sequential}] [--qpm QPM]
+       [--qpm-total QPM_TOTAL] [--max-workers MAX_WORKERS] [--wait-ms WAIT_MS]
+       [--idle-timeout IDLE_TIMEOUT] [--foreground] [--capture PATH]
 
 options:
   -h, --help            show this help message and exit
@@ -18,6 +18,9 @@ options:
   --app APP             app name or aapp_ id (repeatable) (default: None)
   --all-running         every app whose latest assessment is actively running (default: False)
   --config CONFIG       override the bound config name for all targets (default: None)
+  --conversation {per-probe,sequential}
+                        per-probe (default) or sequential; see `assess run --conversation`
+                        (default: None)
   --qpm QPM             per-bridge queries per minute (default: None)
   --qpm-total QPM_TOTAL
                         split this total across the started bridges (protects a shared target

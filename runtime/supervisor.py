@@ -179,7 +179,8 @@ def start(app_id: str, *, config: str, adapter: Optional[str], api_key: str,
           capture: Optional[str] = None, app_name: Optional[str] = None,
           assessment_id: Optional[str] = None, control_token: Optional[str] = None,
           control_base: Optional[str] = None, idle_timeout_s: Optional[int] = None,
-          self_reconcile: bool = True, python: Optional[str] = None) -> Dict[str, Any]:
+          self_reconcile: bool = True, python: Optional[str] = None,
+          conversation: Optional[str] = None) -> Dict[str, Any]:
     """Spawn a detached relay for one app. Returns {app_id, pid, log} or {error}.
 
     When self_reconcile is on, the child polls its app's assessment state and self-stops when the app
@@ -260,6 +261,8 @@ def start(app_id: str, *, config: str, adapter: Optional[str], api_key: str,
         argv += ["--assessment-id", assessment_id]
     if idle_timeout_s is not None:
         argv += ["--idle-timeout", str(idle_timeout_s)]
+    if conversation:
+        argv += ["--conversation", conversation]
     if not self_reconcile:
         argv += ["--no-self-reconcile"]
     argv += ["--status-file", str(p["status"]), "--log-file", str(p["log"])]
@@ -283,6 +286,7 @@ def start(app_id: str, *, config: str, adapter: Optional[str], api_key: str,
     _write_pid(app_id, proc.pid)
     write_status(app_id, {"app_id": app_id, "app_name": app_name, "config": config,
                           "adapter": adapter, "pid": proc.pid, "state": "starting",
+                          "conversation": conversation or "per-probe",
                           "assessment_id": assessment_id, "asmt_status": None,
                           "started_at": time.time(), "ts": time.time(), "stats": {}})
     # A relay that dies at startup — a config that does not exist, an adapter that fails to

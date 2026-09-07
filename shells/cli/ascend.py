@@ -1300,7 +1300,7 @@ def _ensure_bridge(c, app, *, assessment_id=None, args=None):
         return {"app_id": app_id, "ensured": False, "skip": t["skip"]}
     r = S.start(app_id, config=t["config"], adapter=t.get("adapter"), api_key=t["key"],
                 assessment_id=assessment_id, control_token=getattr(c, "token", None),
-                control_base=getattr(args, "base", None), idle_timeout_s=_default_idle_timeout_s(),
+                control_base=getattr(args, "base", None), idle_timeout_s=_default_idle_timeout_s(), conversation=getattr(args, "conversation", None),
                 app_name=t.get("app_name"), qpm=getattr(args, "qpm", None),
                 wait_ms=getattr(args, "wait_ms", None))
     if "error" in r:
@@ -2073,7 +2073,8 @@ def _relay_evidence(app_id):
         if not stats:
             return None
         return {"answered": stats.get("answered"), "delivered": stats.get("delivered"),
-                "failed": stats.get("failed"), "relay_state": st.get("state")}
+                "failed": stats.get("failed"), "relay_state": st.get("state"),
+                "conversation": st.get("conversation") or "per-probe"}
     except Exception:
         return None
 
@@ -2151,9 +2152,13 @@ def cmd_assess_results(args):
         a["relay_answered"] = ev.get("answered")
         a["relay_delivered"] = ev.get("delivered")
         a["relay_failed"] = ev.get("failed")
+        a["relay_conversation"] = ev.get("conversation")
+        _pol = {"per-probe": "each probe was its own conversation (single-shot)",
+                "sequential": "consecutive probes shared one conversation (multi-turn)"}
         human = (f"{human}\n  answered   {ev.get('answered', 0)} probe(s) answered by the target"
                  f"  ·  {ev.get('delivered', 0)} delivered  ·  {ev.get('failed', 0)} failed"
-                 f"   (this machine's relay)")
+                 f"   (this machine's relay)"
+                 f"\n  conversation   {ev.get('conversation')} — {_pol.get(ev.get('conversation'), '')}")
     warn = _false_pass_warning(a, app_id)
     if args.json:
         a = _with_false_pass_verdict(a, warn)
@@ -2373,7 +2378,8 @@ def cmd_runtime_start(args):
         client = runtime_run.build_runtime(
             key, args.adapter, args.config, base_url=args.bridge_base,
             qpm=args.qpm, max_workers=args.max_workers, capture_path=args.capture,
-            wait_ms=args.wait_ms, consumer=getattr(args, "consumer", None))
+            wait_ms=args.wait_ms, consumer=getattr(args, "consumer", None),
+            conversation=getattr(args, "conversation", None))
     except (FileNotFoundError, ConfigError, json.JSONDecodeError) as e:
         # A bad/missing config is a usage error (exit 3), the same class the CLI-resolved
         # commands use — not a tool crash (exit 1) via the global boundary.
@@ -5141,6 +5147,10 @@ def _add_runtime_start_args(s):
     reads the defaults from it to complete the namespace it hands to cmd_runtime_start."""
     s.add_argument("--adapter", help="adapter type (default: from the config)")
     s.add_argument("--config", required=True, help="config name in the config dir")
+    s.add_argument("--conversation", choices=["per-probe", "sequential"], default=None,
+                   help="per-probe (default): every probe is its own conversation. sequential: consecutive "
+                        "probes share one conversation (for multi-turn controls), bounded by the config's "
+                        "conversation.max_turns (default 10)")
     s.add_argument("--api-key", help="bridge key (tc-); else $STRAIKER_BRIDGE_API_KEY")
     s.add_argument("--app", help="resolve the bridge key from the local key store for this app")
     s.add_argument("--consumer", help="bridge consumer id (parallel bridges MUST differ; auto per app)")
@@ -5231,7 +5241,8 @@ def cmd_relay_start(args):
                     qpm=qpm, max_workers=args.max_workers, bridge_base=args.bridge_base,
                     wait_ms=args.wait_ms, app_name=t.get("app_name"),
                     control_token=getattr(c, "token", None), control_base=getattr(args, "base", None),
-                    idle_timeout_s=_resolve_idle(args), capture=getattr(args, "capture", None))
+                    idle_timeout_s=_resolve_idle(args), capture=getattr(args, "capture", None),
+                    conversation=getattr(args, "conversation", None))
         results.append({"app_id": t["app_id"], "app_name": t.get("app_name"),
                         "started": "error" not in r, **({k: v for k, v in r.items() if k != "app_id"})})
     n = sum(1 for r in results if r.get("started"))
@@ -7565,6 +7576,11 @@ def build_parser():
     # re-issued. Observed twice in a row across independent operators.
     s.add_argument("--detail", action="store_true",
                    help="show key findings per control when the run completes")
+    s.add_argument("--conversation", choices=["per-probe", "sequential"], default=None,
+                   help="how the relay threads probes into conversations. per-probe (default): each probe "
+                        "is its own conversation -- what a single-shot control means. sequential: consecutive "
+                        "probes share one conversation, for multi-turn controls; bounded by the config's "
+                        "conversation.max_turns (default 10)")
     s.set_defaults(func=cmd_assess_run)
 
     # assess diff — compare two runs (new / resolved / regressed findings)
@@ -7892,6 +7908,8 @@ def build_parser():
     s.add_argument("--all-running", action="store_true",
                    help="every app whose latest assessment is actively running")
     s.add_argument("--config", help="override the bound config name for all targets")
+    s.add_argument("--conversation", choices=["per-probe", "sequential"], default=None,
+                   help="per-probe (default) or sequential; see `assess run --conversation`")
     s.add_argument("--qpm", type=int, default=None, help="per-bridge queries per minute")
     s.add_argument("--qpm-total", type=int, default=None,
                    help="split this total across the started bridges (protects a shared target host)")

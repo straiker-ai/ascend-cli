@@ -74,7 +74,8 @@ def _resp(status, body):
 
 CFG = {"adapter": "direct_api", "endpoint": "http://t/chat", "method": "POST",
        "body": {"message": "{{PROMPT}}"}, "response_path": "reply",
-       "carry": {"reply_path": "conversation_id", "request_field": "conversation_id"}}
+       "carry": {"reply_path": "conversation_id", "request_field": "conversation_id"},
+       "conversation": {"policy": "sequential"}}   # carry is honoured under sequential only
 
 
 @pytest.fixture

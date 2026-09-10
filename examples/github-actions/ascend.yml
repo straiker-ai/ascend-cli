@@ -1,0 +1,74 @@
+# Run an Ascend AI assessment and gate the build on its findings.
+#
+# Setup:
+#   1. Store a Straiker PAT (scopes: ascend:read, ascend:write) as the
+#      repository secret STRAIKER_PAT.
+#   2. Set ASCEND_APP below to the application name in the Straiker Console.
+#
+# An assessment takes time. This is wired to releases and manual runs, not to
+# every push. Raise timeout-minutes above the run's expected duration.
+
+name: Ascend AI assessment
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+jobs:
+  assess:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      STRAIKER_PAT: ${{ secrets.STRAIKER_PAT }}
+      ASCEND_NO_UPDATE_CHECK: "1"
+      ASCEND_APP: AcmeShop
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the Ascend CLI
+        run: |
+          git clone --depth 1 https://github.com/straiker-ai/ascend-cli
+          pipx install ./ascend-cli
+          ascend --version
+
+      - name: Check connectivity
+        run: ascend doctor
+
+      - name: Run the assessment
+        id: run
+        run: |
+          ascend assess run --app "$ASCEND_APP" --name "ci-${GITHUB_SHA::7}" --json
+          AID=$(ascend assess list --app "$ASCEND_APP" --json \
+            | python3 -c 'import sys,json;print(json.load(sys.stdin)[0]["id"])')
+          echo "aid=$AID" >> "$GITHUB_OUTPUT"
+
+      - name: Export findings
+        if: always()
+        run: |
+          mkdir -p reports
+          ascend export --app "$ASCEND_APP" --assessment "${{ steps.run.outputs.aid }}" \
+            --format sarif --out reports/ascend.sarif
+
+      # The gate. Exit 0 clean, 2 findings at or above the threshold,
+      # 1 the results could not be trusted (never a silent pass).
+      - name: Gate the build
+        run: |
+          ascend ci --app "$ASCEND_APP" --assessment "${{ steps.run.outputs.aid }}" \
+            --fail-on-severity high \
+            --junit reports/ascend-junit.xml
+
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: reports/ascend.sarif
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ascend-reports
+          path: reports/

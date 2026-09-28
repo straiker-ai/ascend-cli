@@ -11,7 +11,7 @@ A GraphQL body looks like
 GraphQL *document*. `_body_template` then replaced the document with `{{PROMPT}}` and left the
 real question sitting in `variables` as a literal.
 
-The consequence, measured against a live GraphQL target: `target add` reported
+The consequence: `target add` reported
 `validated: true` and a real on-topic answer, and re-deriving with a completely different
 `--prompt` produced the *same* answer to the capture-time question. Every probe in an assessment
 would have scored the reply to "what is the status of order AC-10482273?" no matter what the

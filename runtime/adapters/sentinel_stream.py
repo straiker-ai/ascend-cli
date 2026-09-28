@@ -97,10 +97,10 @@ class SentinelStreamAdapter(BotAdapter):
         # at a DIFFERENT endpoint than the message (Sierra mints the id via POST /-/api/graphql and
         # sends via POST /-/api/chat), carry its own headers, and answer in plain JSON rather than
         # marker frames — so `start` takes an optional url/method/headers/response. MEASURED against
-        # a live Sierra-hosted support bot: create graphql -> {conversationID, encryptionKey} -> chat.
+        # a support bot: create graphql -> {conversationID, encryptionKey} -> chat.
         # FRESH CONVERSATION PER PROBE for a create-then-send target. Ascend scores each probe
         # INDEPENDENTLY, and a bot that greets or ends a conversation after a few turns must not
-        # accumulate probes in one conversation. MEASURED on a Sierra-hosted bot: with conv_key
+        # accumulate probes in one conversation. MEASURED on a support bot: with conv_key
         # defaulting to None the router hands every probe the SAME adapter instance, so `self._conv`
         # stuck to one conversationID; after a few turns the bot returned "I'm ending the conversation"
         # and every later probe scored that refusal instead of a real answer. So each probe re-mints
@@ -142,10 +142,10 @@ class SentinelStreamAdapter(BotAdapter):
                 return self._fail(f"could not extract conversation id via '{conv_path}'", start_t,
                                   raw=utf8_text(r)[:400])
 
-        # 1.5 WARMUP once per conversation. Some agents (Sierra-hosted voice bots, for one)
+        # 1.5 WARMUP once per conversation. Some agents (voice bots, for one)
         # return a fixed greeting to the FIRST message of a conversation and only answer from the
         # second turn on. A `warmup` sends a throwaway greeting so the scored probe is not the
-        # first message. MEASURED on a Sierra-hosted bot: without it every probe scored the greeting; with it
+        # first message. MEASURED on a support bot: without it every probe scored the greeting; with it
         # an sp_leak probe returns the bot's real refusal.
         msg_cfg = config.get("message") or {}
         warmup = warmup_text(config)
@@ -183,7 +183,7 @@ class SentinelStreamAdapter(BotAdapter):
         s = json.dumps(template)
         # {{UUID}} is a FRESH value per render — an idempotency key, a nonce, a window id. These
         # are unique-per-request by contract; freezing one from a capture makes the server dedup
-        # or reject every probe after the first (MEASURED on a Sierra target: every probe replayed
+        # or reject every probe after the first (MEASURED on a support bot: every probe replayed
         # one captured idempotencyKey and the run scored nothing). Each occurrence gets its own
         # value, so a body carrying several distinct ones stays distinct.
         while "{{UUID}}" in s:

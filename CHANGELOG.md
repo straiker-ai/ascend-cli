@@ -748,7 +748,7 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 - **A WebSocket target can now be onboarded from its URL.** `websocket_direct` shipped as an
   adapter, with an example config and its own tests — but nothing could *derive* one. `probe.py`
   spoke only HTTP, and `classify.py` reached `websocket_direct` solely from a HAR that already
-  contained a WebSocket entry. Measured against a real socket agent:
+  contained a WebSocket entry. Measured against a socket agent:
   `ascend target add ws://host/chat` exited 3 with "is not a URL, a file, or a known config",
   and `--url wss://host/` was worse — it drove a real browser at a socket and then reported
   "the capture never delivered the prompt". So a customer with a WebSocket bot and no HAR export

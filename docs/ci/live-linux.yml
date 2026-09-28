@@ -11,10 +11,10 @@ on:
     inputs:
       target_url:
         description: "chat endpoint of a reachable target"
-        default: "https://z6murpmcmg.us-east-2.awsapprunner.com/api/chat"
+        default: "https://your-agent.example.com/api/chat"
       passcode_header:
-        description: "a literal header the target requires, e.g. 'x-demo-key: straikerse'"
-        default: "x-demo-key: straikerse"
+        description: "a literal header the target requires, e.g. 'x-demo-key: REPLACE_WITH_SECRET'"
+        default: "x-demo-key: REPLACE_WITH_SECRET"
 jobs:
   onboard-and-run:
     runs-on: ubuntu-latest

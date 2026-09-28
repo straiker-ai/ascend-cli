@@ -112,7 +112,7 @@ def test_uuid_token_regenerates_per_request():
 def test_start_supports_separate_json_create_endpoint(monkeypatch):
     """A create step may live at a different endpoint than the message, carry its own headers, and
     answer in plain JSON (Sierra: POST /graphql mints the id, POST /chat sends). PROVEN against
-    live directv.com/support."""
+    a live Sierra-hosted support bot."""
     calls = []
     def fake(method, u, **kw):
         calls.append((method, u))

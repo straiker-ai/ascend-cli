@@ -86,7 +86,7 @@ jobs:
           pip install -e .
 
       - name: Back-compat (33 pre-1.1 command forms)
-        # The CVS gate. A customer mid-engagement is scripting these; changing one is a decision,
+        # The customer-contract gate. A customer mid-engagement is scripting these; changing one is a decision,
         # not a side effect. Re-recording to make this pass is the wrong fix.
         run: python scripts/back_compat.py --check
 

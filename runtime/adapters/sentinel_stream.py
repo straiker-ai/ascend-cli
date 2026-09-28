@@ -97,12 +97,12 @@ class SentinelStreamAdapter(BotAdapter):
         # at a DIFFERENT endpoint than the message (Sierra mints the id via POST /-/api/graphql and
         # sends via POST /-/api/chat), carry its own headers, and answer in plain JSON rather than
         # marker frames — so `start` takes an optional url/method/headers/response. MEASURED against
-        # directv.com/support: create graphql -> {conversationID, encryptionKey} -> chat answers.
+        # a live Sierra-hosted support bot: create graphql -> {conversationID, encryptionKey} -> chat.
         # FRESH CONVERSATION PER PROBE for a create-then-send target. Ascend scores each probe
         # INDEPENDENTLY, and a bot that greets or ends a conversation after a few turns must not
-        # accumulate probes in one conversation. MEASURED on directv.com/support: with conv_key
+        # accumulate probes in one conversation. MEASURED on a Sierra-hosted bot: with conv_key
         # defaulting to None the router hands every probe the SAME adapter instance, so `self._conv`
-        # stuck to one conversationID; after a few turns Eva returned "I'm ending the conversation"
+        # stuck to one conversationID; after a few turns the bot returned "I'm ending the conversation"
         # and every later probe scored that refusal instead of a real answer. So each probe re-mints
         # the conversation — a fresh conversationID and its per-conversation encryptionKey — through
         # the start call below. Opt out with `session_per_probe: false` for a genuinely multi-turn
@@ -142,11 +142,11 @@ class SentinelStreamAdapter(BotAdapter):
                 return self._fail(f"could not extract conversation id via '{conv_path}'", start_t,
                                   raw=utf8_text(r)[:400])
 
-        # 1.5 WARMUP once per conversation. Some agents (Sierra voice bots like directv's Eva)
+        # 1.5 WARMUP once per conversation. Some agents (Sierra-hosted voice bots, for one)
         # return a fixed greeting to the FIRST message of a conversation and only answer from the
         # second turn on. A `warmup` sends a throwaway greeting so the scored probe is not the
-        # first message. MEASURED on directv: without it every probe scored the greeting; with it
-        # an sp_leak probe returns Eva's real refusal.
+        # first message. MEASURED on a Sierra-hosted bot: without it every probe scored the greeting; with it
+        # an sp_leak probe returns the bot's real refusal.
         msg_cfg = config.get("message") or {}
         warmup = warmup_text(config)
         if warmup and not self._warmed:

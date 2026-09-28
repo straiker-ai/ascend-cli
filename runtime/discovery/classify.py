@@ -1120,7 +1120,7 @@ def classify_session(ev: Dict[str, Any], chat_idx: Optional[int]) -> Dict[str, A
     def _probe_turn(rid: Any) -> Optional[Dict[str, Any]]:
         # The turn to template the scored probe from is the SCORED PROMPT turn (chat_idx), which
         # carries prompt_sent — NOT the first id-using turn, which on a create-then-send target is
-        # a session init/resume with no real message. MEASURED on directv.com/support: the init
+        # a session init/resume with no real message. MEASURED on a Sierra-hosted bot: the init
         # turn froze clientEvent.type="resume-session", left userMessageText empty, and mismapped
         # {{PROMPT}} into memory.variables.VisitorID, so every probe scored the greeting. Because
         # `_body_template` templates {{PROMPT}} BY VALUE (prompt_sent), sourcing the body from
@@ -1133,13 +1133,13 @@ def classify_session(ev: Dict[str, Any], chat_idx: Optional[int]) -> Dict[str, A
 
     def _opener_before_scored(rid: Any) -> Optional[str]:
         # A create-then-send target mints a FRESH conversation per probe, so the scored probe is the
-        # conversation's first message — and greeting-first bots (Sierra voice/IVR, e.g. directv's
-        # Eva) answer only from the SECOND turn. When the capture shows a message-endpoint turn
+        # conversation's first message — and greeting-first bots (Sierra voice/IVR bots, for
+        # one) answer only from the SECOND turn. When the capture shows a message-endpoint turn
         # before the scored prompt that carries the session but no real message (a session
         # init/resume), the probe would score the verbatim greeting, so a throwaway opener has to
         # go first. Returns the opener text, or None. Generic: keyed on the shape (a distinct init
-        # turn to the message endpoint), no host names. PROVEN on directv: with it, an sp_leak probe
-        # returns Eva's real reply instead of the greeting.
+        # turn to the message endpoint), no host names. PROVEN on a Sierra-hosted bot: with it, an sp_leak probe
+        # returns the bot's real reply instead of the greeting.
         scored = pairs[chat_idx]["request"]
         for k in range(chat_idx):
             q = pairs[k]["request"]
@@ -1166,7 +1166,7 @@ def classify_session(ev: Dict[str, Any], chat_idx: Optional[int]) -> Dict[str, A
             # An id that lands in the message body must land in a CONVERSATION/SESSION-named field
             # to be the session. On a real page several minted values reach the chat body — a
             # static auth `token`, a `releaseHash` — and only the one in a conversation-shaped
-            # field is the per-turn session. MEASURED on directv.com/support: `token` (from
+            # field is the per-turn session. MEASURED on a Sierra-hosted bot: `token` (from
             # embedChatQuery) reached the chat body first and was wired as the session, so the
             # create call minted a token instead of the conversationID and no probe answered.
             if in_body and not in_url:
@@ -1439,7 +1439,7 @@ def compose(classified: Dict[str, Any]) -> Dict[str, Any]:
                 # key) per turn; freezing them replays a dead session and scores nothing. Wire the
                 # create call as a `start` step so the adapter mints a fresh one per probe, and
                 # template the per-conversation values in the message body. MEASURED + PROVEN
-                # against directv.com/support (Sierra): create graphql -> {conversationID,
+                # against a Sierra-hosted support bot: create graphql -> {conversationID,
                 # encryptionKey} -> chat answers.
                 config.update({
                     "url": sp.get("message_endpoint") or endpoint,

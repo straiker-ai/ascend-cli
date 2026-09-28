@@ -9,8 +9,8 @@
 # NOTHING HERE IS SYNTHETIC. Real commands, a real Straiker tenant, real assessments.
 #
 # TWO TARGETS, ON PURPOSE
-#   Acts 1-4 (the adapter, validated, and one benign question) run against a REAL third-party
-#   production chatbot — the only honest way to show that this works on real traffic.
+#   Acts 1-4 (the adapter, validated, and one benign question) run against the target you
+#   configure — your own agent.
 #   Acts 5-9 (register -> bridge -> ASSESSMENT -> findings) run against a target we own. An Ascend
 #   assessment fires thousands of adversarial probes; pointing that at someone else's production
 #   system is not something to script into a shareable demo. The script says so on camera.
@@ -23,7 +23,7 @@
 # Options
 #   PACE=1.5     slower (default 1.0)
 #   NO_RECORD=1  rehearse without recording
-#   FIXTURES=1   skip the third-party target; local agents only
+#   FIXTURES=1   skip the configured target; local agents only
 #   KEEP=1       leave the demo app in the tenant
 #   TARGET=name  which local adapter config to use as the real target for acts 1-4.
 #                Omit it and the script picks the first non-example config that still
@@ -61,7 +61,7 @@ note()  { printf '%s  %s%s\n' "$DIM" "$1" "$OFF"; nap 1.4; }
 run()   { printf '\n%s$ %s%s\n' "$PINK" "$1" "$OFF"; nap 0.9; eval "$1"; nap "${2:-2.6}"; }
 beat()  { printf '\n%s%s%s\n' "$BOLD" "$1" "$OFF"; nap 1.5; }
 
-# Which real target to demo against?
+# Which target to demo against?
 #
 # No target name is committed here: the repo ships no customer or third-party reference. The
 # script uses whatever adapter configs exist on THIS machine — pass TARGET=<name>, or let it pick
@@ -74,7 +74,7 @@ if [ -z "${FIXTURES:-}" ]; then
   CANDIDATES="$REAL_TARGET"
   if [ -z "$CANDIDATES" ]; then
     # Prefer a target that is NOT on this machine: the whole point of acts 1-4 is showing the
-    # adapter working against real production traffic, and a localhost fixture proves nothing.
+    # adapter working against real traffic, and a localhost fixture proves nothing.
     CANDIDATES="$(python3 - <<'PICK'
 import json, glob, os
 remote, local = [], []
@@ -137,7 +137,7 @@ nap 2
 act "ACT 1 — all we have is a URL"
 
 if [ "$USE_REAL" = "1" ]; then
-  say "A real production support chatbot. No schema, no docs, no sample request:"
+  say "Your own support chatbot. No schema, no docs, no sample request:"
   run "python3 -c \"import json;d=json.load(open('configs/${REAL_TARGET}.json'));print(d.get('url') or d.get('message',{}).get('url') or '(endpoint in the adapter config)')\"" 2.6
   note "Someone had to work out, by hand: the request shape, where the answer lives in the"
   note "response, how the stream frames it — and then keep that working."
@@ -169,8 +169,8 @@ act "ACT 2 — discovery: it works out the contract by trying it"
 if [ "$USE_REAL" = "1" ]; then
   say "Hand that one request to the CLI. It calls the target and works the rest out:"
   run "./ascend map --curl /tmp/ascend-demo-target.curl --out live-target.json" 10
-  note "Read those lines. It called production, got back RAW PROTOCOL FRAMES, recognised the"
-  note "markers, switched to the streaming adapter, and called production AGAIN to prove it —"
+  note "Read those lines. It called the target, got back RAW PROTOCOL FRAMES, recognised the"
+  note "markers, switched to the streaming adapter, and called the target AGAIN to prove it —"
   note "and the second answer is the bot's actual reply, not wire noise."
 else
   say "map sends ONE benign prompt, ranking candidate request shapes until the agent really answers."
@@ -200,9 +200,9 @@ note "Four protocols, four adapters, one command. No code written for any of the
 act "ACT 4 — the hard gate: an adapter is real only if the target answered"
 
 if [ "$USE_REAL" = "1" ]; then
-  say "Every adapter is validated against the LIVE target before it is written. Against production:"
+  say "Every adapter is validated against the LIVE target before it is written. Against your target:"
   run "./ascend adapter validate --config ${REAL_TARGET}" 7
-  note "ok=True means that exact config produced a real answer just now, from the real bot."
+  note "ok=True means that exact config produced a real answer just now, from the target."
   say "So you can simply talk to it through the adapter:"
   run "./ascend chat ${REAL_TARGET} --prompt 'what can you help me with?' --no-record" 9
   note "One benign question. The adversarial run comes next — against a target we own."

@@ -3,7 +3,7 @@ test_ws_onboarding.py — a WebSocket target must be onboardable from its URL.
 
 `websocket_direct` shipped as an adapter, with an example config and its own tests, but nothing
 could DERIVE one. probe.py spoke only HTTP, and classify.py reached `websocket_direct` solely
-from a HAR that already contained a WebSocket entry. The result, measured against a real socket
+from a HAR that already contained a WebSocket entry. The result, measured against a socket
 agent:
 
     ascend target add ws://host/chat      -> exit 3, "is not a URL, a file, or a known config"

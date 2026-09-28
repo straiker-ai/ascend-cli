@@ -10,7 +10,7 @@ The detector for that already existed, but only ran on the HAR path. A live prob
 a config that passes the hard gate while handing the scorer protocol noise instead of the agent's
 reply. Every probe in the assessment would then be scored against wire format.
 
-Verified against a real production target before and after the fix.
+Verified before and after the fix.
 """
 from __future__ import annotations
 

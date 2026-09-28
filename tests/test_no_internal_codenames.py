@@ -1,14 +1,17 @@
 """
 test_no_internal_codenames.py — a customer never reads an internal codename.
 
-This repo is public and its output is what a customer sees first. The launch screen's diagram
-named the assessment engine "Iris", an internal service name; in the customer's world that is
-**Ascend AI**, running in the Straiker cloud. The same word had spread into the generated adapter
-scaffold, the recon help, six docs pages and the architecture diagram.
+This repo is public, and its output is the first thing a customer sees. Internal service and project
+names must not appear in any shipped file or in user-visible output. The customer-facing names are
+Ascend AI (the assessment engine in the Straiker cloud) and Defend AI (runtime detection).
 
-The check is deliberately blunt: the words must not appear in user-visible output or in any
-shipped file. A new internal service name added to this list is protected the same way.
+The protected names are stored only as SHA-256 digests, so this test does not publish the words it
+guards. To protect a new name, add its digest:
+
+    python3 -c "import hashlib; print(hashlib.sha256(b'<name in lower case>').hexdigest())"
 """
+import functools
+import hashlib
 import io
 import re
 import subprocess
@@ -23,27 +26,39 @@ for p in ("shells/cli", "runtime", "control"):
         sys.path.insert(0, str(REPO / p))
 import ascend  # noqa: E402
 
-#: Internal service / project names, with the customer-facing word for each.
-#:
-#: This list is not a matter of taste. Straiker's own SE/FDE enablement material states the
-#: audience for each name explicitly: **Ascend** is "the customer-facing product … Customers,
-#: SE/FDE"; the execution engine is "**Engineering only**"; the runtime guardrail service is
-#: "Engineering / Defend customers". So a name below appearing in this repo — which is public — is
-#: a leak by the company's own definition, not by this test's opinion.
+#: sha256(internal name, lower case) -> what a customer should read instead. A two-word name is
+#: hashed joined with "_", which also covers its spaced and hyphenated forms.
 INTERNAL = {
-    "iris": "Ascend AI (the assessment engine in the Straiker cloud)",
-    "argus": "Defend AI (the runtime detection service)",
-    "probe_shadow": "the lease service",
-    "pallas": "an internal project name",
-    # Straiker's own SE/FDE enablement deck classifies these "Engineering only" in its
-    # "who sees it" column: the customer-facing name for the whole thing is Ascend.
-    "mjolnir": "the browser bridge client",
+    "47612b3175fece07f6c3e91992412c5b16ca88a9068cb72fecbcf653eb5ffcd7": "Ascend AI (the assessment engine in the Straiker cloud)",
+    "444b759c5264422ea582403ae2083d2447fd226a2e40795968dd740e9202cb97": "Defend AI (the runtime detection service)",
+    "de7f47456ce3ec92a81ef99712bf9ac1559a70004017cd30274d3983e6a0987e": "the lease service",
+    "0573e210e217cab724201408bd3283349f7721953ba343fa6dc319f580ae4f7e": "an internal project name",
+    "e04ea923deab50151c0289ec0cb3bb763241b949f7cf308cf7f5022b4116661e": "the browser bridge client",
 }
 
 #: Files that may legitimately carry one: none. Historical changelog entries were rewritten too,
 #: because a customer reads the changelog.
 SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "captures", "configs", "node_modules", "demo"}
 TEXT_SUFFIXES = {".py", ".md", ".mdx", ".html", ".txt", ".toml", ".yml", ".yaml", ".tape", ".json"}
+_WORD = re.compile(r"[a-z0-9]+")
+
+
+@functools.lru_cache(maxsize=None)
+def _digest(word):
+    return hashlib.sha256(word.encode()).hexdigest()
+
+
+def internal_names_in(text):
+    """Digests of internal names in text: each word, and each pair of adjacent words joined by '_'
+    (so 'a_b', 'a b' and 'a-b' all match a two-word name)."""
+    words = _WORD.findall(text.lower())
+    found = set()
+    for i, w in enumerate(words):
+        if _digest(w) in INTERNAL:
+            found.add(_digest(w))
+        if i + 1 < len(words) and _digest(w + "_" + words[i + 1]) in INTERNAL:
+            found.add(_digest(w + "_" + words[i + 1]))
+    return found
 
 
 def shipped_files():
@@ -57,23 +72,25 @@ def shipped_files():
         yield p
 
 
-@pytest.mark.parametrize("word", sorted(INTERNAL))
-def test_no_shipped_file_names_an_internal_service(word):
-    # `probe_shadow` also ships as "Probe Shadow" and "probe-shadow"; the underscore-only pattern
-    # let the spaced form through in transport/openapi.yaml, which a customer downloads.
-    loose = re.escape(word).replace("_", "[ _-]?")
-    pat = re.compile(rf"\b{loose}\b", re.I)
-    hits = []
+@functools.lru_cache(maxsize=1)
+def _hits_by_name():
+    hits = {d: [] for d in INTERNAL}
     for p in shipped_files():
         try:
             text = p.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
         for i, line in enumerate(text.splitlines(), 1):
-            if pat.search(line):
-                hits.append(f"{p.relative_to(REPO)}:{i}: {line.strip()[:100]}")
-    assert not hits, (f"{word!r} is an internal name; a customer should read "
-                      f"{INTERNAL[word]!r} instead:\n  " + "\n  ".join(hits[:12]))
+            for d in internal_names_in(line):
+                hits[d].append(f"{p.relative_to(REPO)}:{i}: {line.strip()[:100]}")
+    return hits
+
+
+@pytest.mark.parametrize("digest", sorted(INTERNAL))
+def test_no_shipped_file_names_an_internal_service(digest):
+    hits = _hits_by_name()[digest]
+    assert not hits, (f"an internal name is in a shipped file; a customer should read "
+                      f"{INTERNAL[digest]!r} instead:\n  " + "\n  ".join(hits[:12]))
 
 
 class TestTheLaunchScreen:
@@ -81,7 +98,7 @@ class TestTheLaunchScreen:
         buf = io.StringIO()
         ascend._print_flow(buf)
         art = buf.getvalue()
-        assert "Ascend AI" in art and "iris" not in art.lower()
+        assert "Ascend AI" in art and not internal_names_in(art)
 
     def test_it_is_the_three_column_diagram(self):
         buf = io.StringIO()
@@ -102,6 +119,5 @@ class TestTheLaunchScreen:
     def test_help_output_is_clean(self):
         r = subprocess.run([sys.executable, str(REPO / "shells" / "cli" / "ascend.py"), "--help"],
                            capture_output=True, text=True)
-        blob = (r.stdout + r.stderr).lower()
-        for word in INTERNAL:
-            assert word not in blob, f"`ascend --help` says {word!r}"
+        blob = r.stdout + r.stderr
+        assert not internal_names_in(blob), "`ascend --help` names an internal service"

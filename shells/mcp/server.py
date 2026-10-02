@@ -77,7 +77,20 @@ TOOLS: list[dict[str, Any]] = [
         "description": (
             "Onboard a target from a URL, a cURL/HAR file, or a saved config name, and register it "
             "with Ascend. `source` is auto-detected — do not pre-classify it. This is the one call "
-            "that goes from nothing to a ready target; follow it with ascend_target_check."
+            "that goes from nothing to a ready target; follow it with ascend_target_check. "
+            "IT CAN AUTHENTICATE: bearer, api_key, basic (user:pass), cookie, a raw header, or a "
+            "full LOGIN via login_url/login_body when the target wants credentials exchanged for "
+            "a token. Prefer login_url over a static token whenever a login exists — it survives "
+            "the token expiring mid-run, which a pasted bearer does not. "
+            "IF THIS RETURNS `auth_required`: do NOT go and read documentation, and do not ask "
+            "the operator for anything yet. The error text names the exact remedy and you "
+            "already hold every parameter it names — CALL THIS TOOL AGAIN with them. For an "
+            "OAuth2 client_credentials target that is login_url=<token endpoint>, "
+            "login_body='grant_type=client_credentials&client_id=<id>&client_secret=<secret>', "
+            "token_path='access_token'. Use an env reference (client_secret=env:NAME) when the "
+            "secret is in the credential store rather than in the conversation. A second "
+            "attempt carrying the credential is nearly always right; a detour into the docs is "
+            "nearly always wrong."
         ),
         "cli": ["target", "add"],
         "params": {
@@ -87,6 +100,25 @@ TOOLS: list[dict[str, Any]] = [
             "controls": {"kind": "option", "flag": "--controls"},
             "bearer": {"kind": "option", "flag": "--bearer"},
             "api_key": {"kind": "option", "flag": "--api-key"},
+            # EVERY way a real target authenticates, not just two. `target add` has accepted all
+            # of these for a long time; the tool surface exposed `bearer` and `api_key` alone, so
+            # an agent driving this could not wire a target behind HTTP Basic, a session cookie,
+            # a custom header, or — the most common enterprise flow of all — an OAuth2 login.
+            # MEASURED: asked to red-team an OAuth2 client_credentials target with the client id,
+            # the secret and the token URL all given in the request, the agent could only try a
+            # bare probe, got a 401, and gave up. Not because it lacked the credential or the
+            # knowledge, but because the parameter did not exist.
+            # The exact request, as a curl command, inline. This is what the probe's own
+            # `bad_shape` hint asks for, and the model reached for it twice unprompted.
+            "curl": {"kind": "option", "flag": "--curl"},
+            "basic": {"kind": "option", "flag": "--basic"},
+            "cookie": {"kind": "option", "flag": "--cookie"},
+            "header": {"kind": "option", "flag": "--header", "repeat": True},
+            "token_file": {"kind": "option", "flag": "--token-file"},
+            "login_url": {"kind": "option", "flag": "--login-url"},
+            "login_body": {"kind": "option", "flag": "--login-body"},
+            "login_method": {"kind": "option", "flag": "--login-method"},
+            "token_path": {"kind": "option", "flag": "--token-path"},
             "size": {"kind": "option", "flag": "--size"},
             "qpm": {"kind": "option", "flag": "--qpm"},
             "run": {"kind": "flag", "flag": "--run"},
@@ -101,6 +133,34 @@ TOOLS: list[dict[str, Any]] = [
                          "comma-separated control ids (default: the full non-deprecated catalog)"},
             "bearer": {"type": "string", "description": "bearer token for the target"},
             "api_key": {"type": "string", "description": "NAME:VALUE[:in=header|query]"},
+            "curl": {"type": "string", "description":
+                     "ONE WORKING REQUEST, as a curl command, pasted inline — e.g. "
+                     "\"curl -X POST https://host/api/chat -H 'Content-Type: application/json' "
+                     "-d '{\\\"message\\\":\\\"hi\\\"}'\". Use this when probing comes back "
+                     "`bad_shape`: it stops the guessing, because the request no longer has to "
+                     "be derived. A file path or '-' for stdin also work."},
+            "basic": {"type": "string", "description":
+                      "HTTP Basic as USER:PASS. 'user:env:MY_PW' keeps the password out of argv."},
+            "cookie": {"type": "string", "description": "Cookie header for a session-gated target"},
+            "header": {"type": "string", "description":
+                       "one raw header, 'Name: value' — for a credential under a custom name"},
+            "token_file": {"type": "string", "description": "read a bearer token from this file"},
+            "login_url": {"type": "string", "description":
+                          "LOG IN FIRST, then use the token. POST here to exchange credentials. "
+                          "This is the right answer for OAuth2 and for any portal login: it "
+                          "records a repeatable recipe, so the relay RE-AUTHENTICATES during a "
+                          "long run instead of 401-ing once the first token expires."},
+            "login_body": {"type": "string", "description":
+                           "body for login_url — JSON or form-encoded, whichever the endpoint "
+                           "wants (RFC 6749 token endpoints take form). Put credentials in as "
+                           "env references, e.g. "
+                           "'grant_type=client_credentials&client_id=env:ID&client_secret=env:SEC', "
+                           "so the secret stays out of the config file."},
+            "login_method": {"type": "string", "enum": ["POST", "GET"], "description":
+                             "GET for a bootstrap that only needs to set a cookie"},
+            "token_path": {"type": "string", "description":
+                           "dot-path to the token in the login response (default: token; "
+                           "OAuth2 uses access_token)"},
             "size": {"type": "string", "enum": ["small", "medium", "large"]},
             "qpm": {"type": "integer", "description": "queries per minute cap"},
             "run": {"type": "boolean", "description":
@@ -333,6 +393,38 @@ def build_argv(name: str, arguments: dict[str, Any] | None) -> list[str]:
     return argv
 
 
+def _flags_as_params(name: str, text: str) -> str:
+    """Translate the CLI flags a hint names into the PARAMETERS a caller of this tool can set.
+
+    The CLI writes excellent remedies and writes them for a human at a shell: "re-run with
+    --login-url URL --login-body '...' --token-path access_token". An agent driving this server
+    cannot pass a flag — it passes `login_url`, `login_body`, `token_path` — and it is told
+    elsewhere never to reach for the command line. So the most actionable sentence the product
+    produces arrived in a vocabulary the reader could not use.
+
+    MEASURED: an OAuth2 target returned that exact hint on four consecutive attempts. The model
+    had the parameters, had a description telling it to use them, and still retried unchanged
+    every time. The hint said `--login-url`; nothing said that was `login_url`.
+
+    So the mapping this server already holds — parameter to flag — is inverted and appended.
+    Nothing is invented: only flags this tool really accepts are named.
+    """
+    spec = next((t for t in TOOLS if t.get("name") == name), None)
+    if not spec or not text:
+        return ""
+    by_flag = {}
+    for param, meta in (spec.get("params") or {}).items():
+        flag = (meta or {}).get("flag")
+        if flag:
+            by_flag[flag] = param
+    hit = [by_flag[f] for f in by_flag if f in text]
+    if not hit:
+        return ""
+    return ("\n\nAs parameters of this tool, the remedy above is: "
+            + ", ".join(sorted(hit))
+            + ". Call this tool again with them — do not run a shell command.")
+
+
 def run_tool(name: str, arguments: dict[str, Any] | None, timeout: int = 7800) -> dict[str, Any]:
     """
     Execute a tool by shelling out to the CLI with --json and parsing stdout.
@@ -360,7 +452,26 @@ def run_tool(name: str, arguments: dict[str, Any] | None, timeout: int = 7800) -
     out = (proc.stdout or "").strip()
     err = (proc.stderr or "").strip()
     if proc.returncode != 0:
-        return {"ok": False, "returncode": proc.returncode, "error": err or out or "CLI error", "stdout": out}
+        msg = err or out or "CLI error"
+        res = {"ok": False, "returncode": proc.returncode,
+               "error": msg + _flags_as_params(name, msg), "stdout": out}
+        # The CLI's JSON error envelope is on stdout: its code, hint and — when the code knows
+        # the cause — a {reason, detail, next} diagnosis. Surfaced as fields, so a caller never
+        # has to regex the human text for them.
+        env = _last_json(out)
+        if isinstance(env, dict) and env.get("ok") is False:
+            e = env.get("error")
+            if isinstance(e, dict):
+                if e.get("message"):
+                    res["error"] = str(e["message"]) + _flags_as_params(name, str(e["message"]))
+                if e.get("code"):
+                    res["error_code"] = e["code"]
+                if e.get("hint"):
+                    res["hint"] = e["hint"]
+            d = env.get("diagnosis") or (e.get("diagnosis") if isinstance(e, dict) else None)
+            if isinstance(d, dict):
+                res["diagnosis"] = d
+        return res
 
     if not out:
         return {"ok": True, "result": None, "stderr": err or None}
@@ -369,6 +480,18 @@ def run_tool(name: str, arguments: dict[str, Any] | None, timeout: int = 7800) -
     except json.JSONDecodeError:
         # a --json path should always emit JSON; fall back to raw text rather than crash
         return {"ok": True, "result": out, "stderr": err or None}
+
+
+def _last_json(text: str):
+    """The last line of stdout that parses as JSON: the envelope, after any progress lines."""
+    for line in reversed((text or "").splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                return json.loads(line)
+            except ValueError:
+                continue
+    return None
 
 
 # --------------------------------------------------------------------------- JSON-RPC loop

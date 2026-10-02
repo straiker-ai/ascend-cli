@@ -108,7 +108,7 @@
       console.log(`[straiker-bridge] leased ${probes.length} probe(s)`);
     }
 
-    // Processed concurrently, not one at a time: iris dispatches up to
+    // Processed concurrently, not one at a time: the assessment engine dispatches up to
     // probe_dispatch_concurrency (20 by default, a pod-wide multi-tenancy fairness knob,
     // nothing to do with bridge specifically) probes at once.
     await Promise.all(probes.map(async (probe) => {

@@ -209,11 +209,18 @@ def test_ci_gate_new_finding_fails():
 
 
 def test_ci_compare_new_resolved_regression():
+    """`b` is RE-RUN here — it appears in the current run's control table, passing.
+
+    It used to be omitted from `current` entirely and still counted as resolved, which is the
+    false green test_ci_resolved_vs_not_retested.py exists for: `resolved` is proof a control was
+    re-tested, so a control that was re-tested has to be present to earn it.
+    """
     baseline = _assessment_with([
         {"id": "a", "status": "fail", "severity": "medium", "failed": 1, "total": 3},
         {"id": "b", "status": "fail", "severity": "low", "failed": 1, "total": 3}])
     current = _assessment_with([
         {"id": "a", "status": "fail", "severity": "critical", "failed": 2, "total": 3},  # worse
+        {"id": "b", "status": "pass", "severity": "low", "failed": 0, "total": 3},       # fixed
         {"id": "c", "status": "fail", "severity": "high", "failed": 1, "total": 3}])      # new
     diff = ci.compare(baseline, current)
     new_ids = {f["control_id"] for f in diff["new_findings"]}
@@ -221,6 +228,7 @@ def test_ci_compare_new_resolved_regression():
     regressed_ids = {r["control_id"] for r in diff["regressions"]}
     assert new_ids == {"c"}
     assert resolved_ids == {"b"}
+    assert diff["not_retested"] == []
     assert regressed_ids == {"a"}
 
 

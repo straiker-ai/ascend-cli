@@ -1,0 +1,86 @@
+# Cloud Run Job — one job execution per assessment.
+#
+#   gcloud run jobs replace cloud-run-job.yaml --region us-central1
+#   gcloud run jobs execute ascend-relay --region us-central1 \
+#       --update-env-vars ASCEND_RELAY_APP_ID=aapp_...,ASCEND_ASSESSMENT_ID=asmt_...
+#
+# A Job, not a Service: a Service is scaled by request traffic and the relay takes none — it is
+# an outbound long-poll client. A Service would also be scaled to zero between requests, which
+# for this workload means "stops leasing", i.e. the exact silent death the container is here to
+# make loud.
+apiVersion: run.googleapis.com/v1
+kind: Job
+metadata:
+  name: ascend-relay
+spec:
+  template:
+    metadata:
+      annotations:
+        # Reaching a target that is not on the public internet is the entire reason this
+        # container exists, so the egress settings are not optional decoration. Point the
+        # connector at the network the agent under test lives on. Delete both annotations only
+        # if the target really is public — in which case ask first whether a relay is needed at
+        # all, because the platform can usually call a public target directly.
+        run.googleapis.com/vpc-access-connector: REPLACE_CONNECTOR_NAME
+        run.googleapis.com/vpc-access-egress: private-ranges-only
+    spec:
+      # One execution answers one assessment. parallelism > 1 is wrong here and not a tuning
+      # knob: the bridge protocol hands each probe to ONE consumer, and two relays sharing a
+      # consumer id split one app's probes between them. That presents as "probes stopped
+      # flowing" and is a known way to lose half a run.
+      parallelism: 1
+      taskCount: 1
+      template:
+        spec:
+          # Retries matter more than they look. The container exits non-zero whenever the relay
+          # stopped while its assessment was still live, so a retry is Cloud Run putting the
+          # relay back in front of a run that is still going. Without retries, one preemption
+          # ends the relay and the assessment finishes quietly with nothing answering it.
+          maxRetries: 3
+          # 24h is the Cloud Run Job ceiling. The relay stops itself long before this when its
+          # assessment finishes; this is only the backstop for a run that never reaches a
+          # terminal state at all (PLATFORM-ASKS B0 — runs that stall while still saying
+          # "running" — is exactly that case, and it is not hypothetical).
+          timeoutSeconds: 86400
+          serviceAccountName: ascend-relay@REPLACE_PROJECT.iam.gserviceaccount.com
+          containers:
+            - image: REPLACE_REGION-docker.pkg.dev/REPLACE_PROJECT/ascend/ascend-relay:1.1.4
+              resources:
+                limits:
+                  # Measured while serving ~3 probes/s against a local target: 1.4-2.4% of one
+                  # core and ~60 MiB resident, flat. 512Mi is headroom, not a requirement.
+                  cpu: "1"
+                  memory: 512Mi
+              env:
+                # Per-run values. Override them at `gcloud run jobs execute` time rather than
+                # editing this file for every assessment.
+                - name: ASCEND_RELAY_APP_ID
+                  value: REPLACE_aapp_id
+                - name: ASCEND_ASSESSMENT_ID
+                  value: REPLACE_assessment_id
+                # The container's OWN ceiling, and the one that binds: it is lower than the
+                # timeoutSeconds above, and unlike that one it produces a verdict. Cloud Run
+                # hitting 86400 kills the task and says nothing about why; the entrypoint hitting
+                # this exits 1 with a line naming the stop condition. Raise BOTH for a scope that
+                # genuinely runs longer than six hours. See README §4.1.
+                - name: ASCEND_RELAY_DEADLINE_S
+                  value: "21600"
+                # Secrets. All three are live credentials and none of them belongs in the image
+                # or in this file: the relay key leases probes for one app, the PAT can read the
+                # tenant's assessments, and the target config carries whatever the agent under
+                # test authenticates with.
+                - name: STRAIKER_BRIDGE_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: ascend-relay-key
+                      key: latest
+                - name: STRAIKER_PAT
+                  valueFrom:
+                    secretKeyRef:
+                      name: ascend-pat
+                      key: latest
+                - name: ASCEND_RELAY_CONFIG_JSON
+                  valueFrom:
+                    secretKeyRef:
+                      name: ascend-target-config
+                      key: latest

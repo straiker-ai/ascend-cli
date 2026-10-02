@@ -42,6 +42,7 @@ from adapters import (  # noqa: F401  (lifted framework, all registered below)
     SlackDirectAdapter, VertexAIAdapter, WebSocketAdapter,
     CopilotStudioAdapter, SSEStreamAdapter, SessionPollAdapter,
     SentinelStreamAdapter, BedrockAdapter, CustomModuleAdapter,
+    OpenAICompatibleAdapter, DialogflowCXAdapter,
 )
 
 logger = logging.getLogger("ascendbridge.dispatch")
@@ -61,6 +62,8 @@ ADAPTER_REGISTRY: Dict[str, type] = {
     "session_poll": SessionPollAdapter,
     "sentinel_stream": SentinelStreamAdapter,
     "bedrock": BedrockAdapter,
+    "openai_compatible": OpenAICompatibleAdapter,   # /v1/chat/completions: OpenAI, Azure OpenAI, gateways, local servers
+    "dialogflow_cx": DialogflowCXAdapter,           # detectIntent, one session per prompt
     "custom": CustomModuleAdapter,   # a per-app adapter written as code
 }
 

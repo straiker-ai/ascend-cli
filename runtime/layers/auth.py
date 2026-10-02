@@ -88,7 +88,23 @@ def resolve_secret_ref(ref: Any, *, allow_literal: bool = False) -> str:
         name = ref[len("env:"):]
         val = os.environ.get(name)
         if val is None or val == "":
-            raise AuthError(f"environment variable {name!r} is not set (referenced by {ref!r})")
+            # Fall back to the tenant-scoped 0600 store. A credential captured from a browser
+            # session has to survive the process that captured it: the relay that sends the
+            # probes is started later, often by a different command, and an environment variable
+            # exported in the capture's shell reaches none of them. The environment still WINS,
+            # so an operator can override a stale captured credential for one run without
+            # editing anything. Import is local because `layers` must stay importable with no
+            # tenant state at all — `target_secrets` reads `~/.ascend`.
+            try:
+                import target_secrets as _store  # noqa: PLC0415
+                val = _store.get(name)
+            except Exception:                    # noqa: BLE001 - a missing store is not an error
+                val = None
+        if val is None or val == "":
+            raise AuthError(
+                f"no value for {name!r} (referenced by {ref!r}): it is not in the environment "
+                f"and not in this tenant's credential store. If it was captured from a browser "
+                f"session it may have expired — re-capture the target, or export {name}.")
         return val
     if ref.startswith("literal:"):
         if not allow_literal:
@@ -98,6 +114,20 @@ def resolve_secret_ref(ref: Any, *, allow_literal: bool = False) -> str:
         f"unrecognised secret reference {ref!r}; use 'env:NAME' "
         f"(inline literals are forbidden so secrets stay out of configs)"
     )
+
+
+def _resolve_env_values(headers: Dict[str, Any]) -> Dict[str, Any]:
+    """`env:NAME` header values in a multihop step or attach block resolve like any other secret.
+
+    A credential minted per request often rides next to a STATIC one — the site's access code,
+    a tenant key — that every call, the mint included, must carry. The static value belongs in
+    the store, referenced as env:NAME, never in the config; without this the reference went out
+    on the wire as the literal string "env:NAME".
+    """
+    out = {}
+    for k, v in (headers or {}).items():
+        out[k] = resolve_secret_ref(v) if isinstance(v, str) and v.startswith("env:") else v
+    return out
 
 
 def _render_vars(template: Any, variables: Dict[str, str]) -> Any:
@@ -306,6 +336,21 @@ class AuthProvider:
             val = resolve_secret_ref(cfg.get("value_ref") or cfg.get("value"))
             template = cfg.get("template", "{{VALUE}}")
             mat.headers[cfg.get("name", "Authorization")] = template.replace("{{VALUE}}", val)
+        elif mode == "headers":
+            # SEVERAL credential headers at once, each its own reference. Every mode above
+            # carries exactly one secret, which is why a browser capture could not use any of
+            # them: a signed-in session routinely presents two or three together — a bearer AND
+            # a cookie, or a tenant key AND a per-window token — and dropping any one of them
+            # fails the same as dropping all of them.
+            refs = cfg.get("headers") or {}
+            if not isinstance(refs, dict) or not refs:
+                raise AuthError("static auth mode 'headers' needs a non-empty 'headers' map of "
+                                "{header name: secret reference}")
+            for header_name, ref in refs.items():
+                # Resolved one at a time so the error names the header that is missing. A single
+                # "credentials unavailable" for a target that needs three of them sends the
+                # operator looking at the wrong one.
+                mat.headers[str(header_name)] = resolve_secret_ref(ref)
         else:
             raise AuthError(f"unknown static auth mode {mode!r}")
         return mat
@@ -428,7 +473,7 @@ class AuthProvider:
             url = _render_vars(step.get("url", ""), variables)
             if not url:
                 raise AuthError(f"derived_multihop step {i} missing 'url'")
-            headers = _render_vars(step.get("headers", {}) or {}, variables)
+            headers = _resolve_env_values(_render_vars(step.get("headers", {}) or {}, variables))
             json_body = _render_vars(step.get("json"), variables) if step.get("json") is not None else None
             data_body = _render_vars(step.get("data"), variables) if step.get("data") is not None else None
 
@@ -453,7 +498,7 @@ class AuthProvider:
         # Final material: render the downstream attach spec with the variables.
         attach = cfg.get("attach", {}) or {}
         mat = AuthMaterial()
-        mat.headers = _render_vars(attach.get("headers", {}) or {}, variables)
+        mat.headers = _resolve_env_values(_render_vars(attach.get("headers", {}) or {}, variables))
         mat.cookies = _render_vars(attach.get("cookies", {}) or {}, variables)
         mat.params = _render_vars(attach.get("params", {}) or {}, variables)
         # Also carry session cookies picked up along the way.

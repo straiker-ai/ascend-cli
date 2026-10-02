@@ -3,7 +3,7 @@ $ ascend target add --help
 --- stdout
 usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] target add
        [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE]
-       [--api URL | --ws URL | --url URL | --curl FILE | --har HAR | --config NAME|PATH | --module FILE.py]
+       [--api URL | --ws URL | --url URL | --curl FILE | --har HAR | --config NAME|PATH | --arn ARN | --vertex RESOURCE | --module FILE.py]
        [--scaffold FILE.py] [--name NAME] [--app NAME|aapp_id] [--save-as NAME]
        [--system-prompt SYSTEM_PROMPT] [--controls CONTROLS] [--adapter ADAPTER] [--warmup MSG]
        [--qualifier QUALIFIER] [--response-path DOTPATH] [--header 'Name: value'] [--bearer TOKEN]
@@ -20,8 +20,8 @@ usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] t
        [source]
 
 positional arguments:
-  source                a URL, a cURL/HAR file, or a saved config name — detected for you
-                        (default: None)
+  source                a URL, a cURL/HAR file, a Bedrock AgentCore ARN, a Vertex Agent Engine
+                        resource name, or a saved config name — detected for you (default: None)
 
 options:
   -h, --help            show this help message and exit
@@ -42,6 +42,16 @@ options:
                         None)
   --config NAME|PATH    a config already on disk — a name in the config dir, or a path to a .json
                         file anywhere (skip discovery) (default: None)
+  --arn ARN             an AWS Bedrock AgentCore runtime: arn:aws:bedrock-
+                        agentcore:<region>:<account>:runtime/<name>[/runtime-
+                        endpoint/<qualifier>]. The region is read out of the ARN. Probes go
+                        through a local relay, which signs them with the AWS credentials in its
+                        own environment — yours, never Straiker's. (default: None)
+  --vertex RESOURCE     a Vertex AI Agent Engine (ADK) agent:
+                        projects/<p>/locations/<loc>/reasoningEngines/<id>, or the :streamQuery
+                        URL containing it. The location is read out of the resource name. Probes
+                        go through a local relay, which authenticates with the gcloud ADC in its
+                        own environment. (default: None)
   --module FILE.py      a custom adapter you wrote: a Python file with `def send_prompt(prompt:
                         str) -> str`. Use this when the contract cannot be derived — signed
                         requests, a multi-step handshake, an async poll. It is proven against the
@@ -157,5 +167,9 @@ examples:
   ascend target add https://your-bot.example.com/chat
   ascend target add ./request.curl --name 'Support Bot'
   ascend target add ~/Downloads/session.har
+  ascend target add arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/my_agent
+      an AgentCore runtime — region comes from the ARN; the relay signs with YOUR AWS creds
+  ascend target add projects/p/locations/us-central1/reasoningEngines/123
+      a Vertex Agent Engine — location comes from the resource name; the relay uses gcloud ADC
   ascend target add mybot --run          # existing config, then assess
 --- stderr

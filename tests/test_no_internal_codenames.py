@@ -25,25 +25,33 @@ import ascend  # noqa: E402
 
 #: Internal service / project names, with the customer-facing word for each.
 #:
-#: This list is not a matter of taste. Straiker's own SE/FDE enablement material states the
-#: audience for each name explicitly: **Ascend** is "the customer-facing product … Customers,
-#: SE/FDE"; the execution engine is "**Engineering only**"; the runtime guardrail service is
-#: "Engineering / Defend customers". So a name below appearing in this repo — which is public — is
-#: a leak by the company's own definition, not by this test's opinion.
+#: This list is not a matter of taste. Straiker's own internal enablement material states the
+#: audience for each name explicitly: **Ascend** is the customer-facing product; the execution
+#: engine is "**Engineering only**"; the runtime guardrail service is "Engineering / Defend
+#: customers". So a name below appearing in this repo — which is public — is a leak by the
+#: company's own definition, not by this test's opinion.
 INTERNAL = {
     "iris": "Ascend AI (the assessment engine in the Straiker cloud)",
     "argus": "Defend AI (the runtime detection service)",
     "probe_shadow": "the lease service",
     "pallas": "an internal project name",
-    # Straiker's own SE/FDE enablement deck classifies these "Engineering only" in its
+    # Internal enablement material classifies these "Engineering only" in its
     # "who sees it" column: the customer-facing name for the whole thing is Ascend.
     "mjolnir": "the browser bridge client",
 }
 
 #: Files that may legitimately carry one: none. Historical changelog entries were rewritten too,
 #: because a customer reads the changelog.
-SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "captures", "configs", "node_modules", "demo"}
-TEXT_SUFFIXES = {".py", ".md", ".mdx", ".html", ".txt", ".toml", ".yml", ".yaml", ".tape", ".json"}
+#:
+#: `demo/` used to be skipped and `.js`/`.command`/`.sh` used to be unscanned, and both gaps held
+#: a real leak: the walkthrough script SAID the internal engine name out loud to the customer
+#: watching the demo, and `transport/bridge_client.browser.js` — which customers paste into their
+#: own DevTools console — carried it in a comment. A suffix this check does not read is a suffix
+#: the leak lives in, so the shipped scripts are scanned too. `captures/` and `configs/` stay out:
+#: both are gitignored local engagement material, never shipped.
+SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "captures", "configs", "node_modules", "build"}
+TEXT_SUFFIXES = {".py", ".md", ".mdx", ".html", ".txt", ".toml", ".yml", ".yaml", ".tape", ".json",
+                 ".js", ".command", ".sh"}
 
 
 def shipped_files():

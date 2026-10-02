@@ -27,6 +27,7 @@ dict (JSON), with no I/O.
 PUBLIC API
 ----------
     iter_findings(a) -> list[dict]     # normalized failed-control findings
+    tested_control_ids(a) -> set|None  # every control the run actually probed
     to_json(a) -> str
     to_csv(a) -> str
     to_sarif(a) -> str                 # SARIF 2.1.0, tool = "Straiker Ascend"
@@ -38,7 +39,7 @@ from __future__ import annotations
 import csv
 import io
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Set
 
 TOOL_NAME = "Straiker Ascend"
 SARIF_SCHEMA = "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json"
@@ -72,14 +73,64 @@ def _is_failed(control: Dict[str, Any]) -> bool:
     return isinstance(failed, int) and failed > 0
 
 
+def _was_probed(control: Dict[str, Any]) -> bool:
+    """Did this control actually get adversarial prompts sent at it?
+
+    A control listed with `total: 0` was enumerated, not exercised, and produces no evidence
+    either way. Unobserved in the two runs this was verified against (every control in
+    asmt_7fyEPrLQGXQOj0HrXFEavQ and asmt_9EnmJ2itb8QqxSjfusfhE carried total > 0), so it changes
+    nothing measured -- but "listed" and "tested" are the distinction the whole `resolved` bucket
+    turns on, so they are not collapsed here either.
+    """
+    total = control.get("total")
+    if isinstance(total, int):
+        return total > 0
+    return bool(control.get("status"))      # no counts at all: trust the status it reported
+
+
+def tested_control_ids(a: Dict[str, Any]) -> Optional[Set[str]]:
+    """Every control the run PROBED -- passed and failed alike -- or None if unknowable.
+
+    `iter_findings` is failure-only by design, so it cannot answer "was this control re-run?".
+    Without that answer a baseline failure missing from the current run is indistinguishable from
+    a baseline failure that now passes, and `ci.compare` called both of them `resolved` -- it told
+    a security team a control was FIXED when it had been dropped from the scope and never re-run
+    (measured: agentic_data_exfil, `fail` in asmt_7fyEPrLQGXQOj0HrXFEavQ, absent from all 58
+    controls of asmt_9EnmJ2itb8QqxSjfusfhE, reported resolved=1).
+
+    Returns None -- not an empty set -- for a payload that carries no `category_summary` (a
+    findings-only export from a CLI older than this change). None means "coverage unknown", and an
+    unknown roster must never be read as "nothing was tested" nor as "everything was".
+    """
+    cats = a.get("category_summary")
+    if not cats:
+        return None
+    ids: Set[str] = set()
+    for cat in cats:
+        for ctrl in cat.get("controls") or []:
+            if _was_probed(ctrl):
+                ids.add(ctrl.get("id", "unknown_control"))
+    return ids
+
+
 def iter_findings(a: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Flatten an assessment into a list of normalized failed-control findings.
 
     Each finding: {control_id, category, severity, status, failed, total,
     keyfindings[]}. Categories with no failed controls contribute nothing.
+
+    Accepts this module's own JSON export as well as a raw assessment. `to_json` now carries
+    `category_summary`, so a fresh export takes the normal path; the `findings` fallback is for
+    export files written before that fix -- fed to `ci --baseline` those parsed fine and yielded
+    ZERO findings, so every current failure looked brand new (measured: 33 phantom new findings
+    diffing asmt_9EnmJ2itb8QqxSjfusfhE against its own export).
     """
+    cats = a.get("category_summary")
+    if not cats and isinstance(a.get("findings"), list):
+        return [dict(f) for f in a["findings"] if isinstance(f, dict) and f.get("control_id")]
+
     findings: List[Dict[str, Any]] = []
-    for cat in a.get("category_summary") or []:
+    for cat in cats or []:
         category = cat.get("category", cat.get("name", "uncategorized"))
         for ctrl in cat.get("controls") or []:
             if not _is_failed(ctrl):
@@ -104,14 +155,47 @@ def iter_findings(a: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 # --- JSON --------------------------------------------------------------------
 def to_json(a: Dict[str, Any]) -> str:
-    """Structured export: the assessment header plus normalized findings."""
+    """Structured export: the assessment header, normalized findings, AND the raw control table.
+
+    The flat `findings` list is the readable part and the reason this format exists. It is not
+    enough to gate on, and the export was emitting nothing else -- so the one JSON artifact a
+    pipeline would naturally archive was the one input `ascend ci` could not take:
+
+        ascend export --format json --out export.json
+        ascend ci --file export.json
+          -> exit 1  "reports completed but carries no category_summary"
+
+    and as a baseline it was worse than useless, because it failed quietly: zero readable findings
+    means nothing was failing before, so every current finding is new. Measured on
+    asmt_9EnmJ2itb8QqxSjfusfhE against its OWN export: 33 brand-new findings, 55 gate reasons,
+    exit 2. A red build, from a file that describes the exact run under test.
+
+    The fix is on this side rather than in the gate because a failures-only document is
+    IRRECOVERABLY lossy for the question the gate asks. `findings` lists what failed; it cannot
+    say which controls ran and passed, so a gate taught to accept it would have to treat every
+    control absent from the list as "passing" -- which is precisely the false green BUG 2 is
+    about. `category_summary` carries the whole control table, so a round trip survives it.
+
+    `total`/`failed` come along for the same reason: without `total` the dead-bridge probe floor
+    (`min_probes`) has nothing to measure and silently stops guarding a gated export.
+    """
+    findings = iter_findings(a)
     doc = {
         "tool": TOOL_NAME,
+        # `or a.get("assessment_id")` so re-exporting an export keeps the run's name. A raw
+        # assessment calls it `id`; this document calls it `assessment_id`, and reading only the
+        # first dropped the identity on the second pass -- a baseline that could no longer say
+        # which run it came from.
+        "assessment_id": a.get("id") or a.get("assessment_id"),
         "status": a.get("status"),
         "score": a.get("score"),
         "severity": a.get("severity"),
-        "finding_count": len(iter_findings(a)),
-        "findings": iter_findings(a),
+        "total": a.get("total"),
+        "failed": a.get("failed"),
+        "finding_count": len(findings),
+        "findings": findings,
+        # The gate's actual input. Everything above it is derived from this.
+        "category_summary": a.get("category_summary") or [],
     }
     return json.dumps(doc, indent=2, ensure_ascii=False)
 

@@ -14,10 +14,14 @@ from .session_poll import SessionPollAdapter
 from .sentinel_stream import SentinelStreamAdapter
 from .custom_module import CustomModuleAdapter
 from .bedrock import BedrockAdapter
+from .openai_compatible import OpenAICompatibleAdapter
+from .dialogflow_cx import DialogflowCXAdapter
 
 __all__ = [
     "BotAdapter",
     "BedrockAdapter",
+    "OpenAICompatibleAdapter",
+    "DialogflowCXAdapter",
     "DirectAPIAdapter",
     "SessionAPIAdapter",
     "BrowserAdapter",

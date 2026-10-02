@@ -4,7 +4,9 @@ reporting/ci.py — CI gate + baseline diff for Ascend assessments.
 Lets an assessment fail a pipeline. Two pieces:
 
   * compare(baseline, current) diffs two assessments by control id and reports
-    new findings, resolved findings, and regressions (severity got worse).
+    new findings, resolved findings, findings that were never re-tested, and
+    regressions (severity got worse). Resolved and never-re-tested are kept
+    apart deliberately: a control dropped from the scope is not a control fixed.
   * gate(current, baseline, ...) turns that into an exit code + human reasons,
     so a CI job can `sys.exit(result["exit_code"])`.
 
@@ -16,9 +18,9 @@ finding-normalization (one failed control == one finding).
 
 PUBLIC API
 ----------
-    compare(baseline, current) -> {new_findings, resolved, regressions}
+    compare(baseline, current) -> {new_findings, resolved, not_retested, regressions}
     gate(current, baseline=None, fail_on_severity="high",
-         fail_on_new=True) -> {exit_code, reasons, ...}
+         fail_on_new=True, fail_on_unproven=True) -> {exit_code, reasons, ...}
     to_junit(a) -> str
 """
 
@@ -27,7 +29,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 from xml.sax.saxutils import escape, quoteattr
 
-from .export import iter_findings
+from .export import iter_findings, tested_control_ids
 
 # Severity ordering (lower index = more severe). Used for gate thresholds and
 # regression detection.
@@ -55,6 +57,40 @@ def _by_control(a: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     return {f["control_id"]: f for f in iter_findings(a)}
 
 
+def _apply_policy(policy: Optional[Dict[str, Any]], findings: List[Dict[str, Any]],
+                  app_name: Optional[str]) -> List[Dict[str, Any]]:
+    """Re-rank findings under the caller's local policy, so an override changes the VERDICT.
+
+    Every list this gate measures against `--fail-on-severity` goes through here, and that is the
+    point: the live findings were re-ranked and the `not_retested` bucket was not, so the same
+    control was gated at two different severities in one run. Measured on the two prod runs these
+    tests are built from, `ascend-policy.json` = {"default": {"controls": {"agentic_data_exfil":
+    "low"}}}, bar `high`:
+
+        live finding  agentic_data_exfil -> low   (policy honoured, does not breach)
+        not re-tested agentic_data_exfil -> high  (policy ignored, breaches)      <- exit 2
+
+    and in the other direction, a policy raising `app_grounding` to critical left ten unproven
+    baseline failures sitting at `low`, under the bar, unbreached -- the same false green BUG 2
+    was about, re-entered through the policy seam. Per-control severity is not settable in v3, so
+    this file IS the operator's statement of severity; a bucket that ignores it is not gating on
+    what they asked for.
+
+    Returns the list unchanged when there is no policy (and never raises: a broken policy module
+    must not take the gate down).
+    """
+    if not policy or not findings:
+        return findings
+    try:
+        import sys as _sys
+        from pathlib import Path as _P
+        _sys.path.insert(0, str(_P(__file__).resolve().parents[1] / "runtime"))
+        import policy as _pol
+        return _pol.apply_to_findings(policy, findings, app_name=app_name)
+    except Exception:
+        return findings
+
+
 # --- baseline diff -----------------------------------------------------------
 def compare(baseline_assessment: Optional[Dict[str, Any]],
             current_assessment: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
@@ -62,16 +98,47 @@ def compare(baseline_assessment: Optional[Dict[str, Any]],
 
     Returns:
       new_findings : controls failing now that were not failing in the baseline
-      resolved     : controls that failed in the baseline but pass now
+      resolved     : controls that failed in the baseline, were RE-RUN, and pass now
+      not_retested : controls that failed in the baseline and this run never exercised
       regressions  : controls failing in both, where severity got worse now
 
     A missing baseline means everything currently failing is "new".
+
+    `resolved` used to be `cid not in cur` -- every baseline failure absent from the current
+    findings. `cur` holds FAILURES only, so "absent" covered two opposite facts: the control was
+    re-run and passed, and the control was never run at all. The second is not a fix, and calling
+    it one inverts the product's whole purpose -- a team narrows the scope of a run, drops a
+    failing control out of it, and the CLI congratulates them on the fix.
+
+    Measured, on two real runs of one app on tenant 123:
+
+        ascend assess diff --baseline asmt_7fyEPrLQGXQOj0HrXFEavQ \\
+                           --current  asmt_9EnmJ2itb8QqxSjfusfhE --json
+          -> resolved: [agentic_data_exfil]
+
+    agentic_data_exfil is `fail` (2/2 probes) in the baseline and appears nowhere in the current
+    run's 58 controls. Nothing was fixed; the control was dropped. The severity was `high`.
+
+    `tested_control_ids` supplies the missing half -- the controls the run actually probed, pass
+    and fail alike. When it returns None the roster is unknown (a findings-only payload), and
+    nothing can be PROVEN re-tested, so every unmatched baseline failure lands in `not_retested`:
+    unproven, which is the honest answer and the safe one.
     """
     cur = _by_control(current_assessment)
     base = _by_control(baseline_assessment) if baseline_assessment else {}
+    retested = tested_control_ids(current_assessment)
 
     new_findings = [f for cid, f in cur.items() if cid not in base]
-    resolved = [f for cid, f in base.items() if cid not in cur]
+
+    resolved: List[Dict[str, Any]] = []
+    not_retested: List[Dict[str, Any]] = []
+    for cid, f in base.items():
+        if cid in cur:
+            continue                                  # still failing -- not this bucket
+        if retested is not None and cid in retested:
+            resolved.append(dict(f, retested=True))   # re-run, and it passed: a real fix
+        else:
+            not_retested.append(dict(f, retested=False))
 
     regressions: List[Dict[str, Any]] = []
     for cid, f in cur.items():
@@ -83,7 +150,8 @@ def compare(baseline_assessment: Optional[Dict[str, Any]],
                     "from_severity": base[cid]["severity"],
                     "to_severity": f["severity"],
                 })
-    return {"new_findings": new_findings, "resolved": resolved, "regressions": regressions}
+    return {"new_findings": new_findings, "resolved": resolved,
+            "not_retested": not_retested, "regressions": regressions}
 
 
 # --- gate --------------------------------------------------------------------
@@ -127,6 +195,7 @@ def gate(current_assessment: Dict[str, Any],
          baseline: Optional[Dict[str, Any]] = None,
          fail_on_severity: str = "high",
          fail_on_new: bool = True,
+         fail_on_unproven: bool = True,
          policy: Optional[Dict[str, Any]] = None,
          app_name: Optional[str] = None,
          min_probes: int = MIN_CREDIBLE_PROBES) -> Dict[str, Any]:
@@ -158,7 +227,8 @@ def gate(current_assessment: Dict[str, Any],
     def _unreadable(reason):
         return {"exit_code": 1, "reasons": [reason],
                 "threshold_breaches": [], "fail_on_severity": fail_on_severity,
-                "fail_on_new": fail_on_new, "finding_count": None, "diff": None,
+                "fail_on_new": fail_on_new, "fail_on_unproven": fail_on_unproven,
+                "finding_count": None, "diff": None,
                 "unreadable": True, "status": status or None}
 
     if not status:
@@ -200,21 +270,11 @@ def gate(current_assessment: Dict[str, Any],
                     f"nothing. Check `ascend bridge ls`, or pass --min-probes 0 if this run is "
                     f"genuinely this small."],
                     "threshold_breaches": [], "fail_on_severity": fail_on_severity,
-                    "fail_on_new": fail_on_new, "finding_count": 0, "diff": None,
+                    "fail_on_new": fail_on_new, "fail_on_unproven": fail_on_unproven,
+                    "finding_count": 0, "diff": None,
                     "unreadable": True, "probe_count": probe_count}
 
-    findings = iter_findings(current_assessment)
-    if policy:
-        # Re-rank under the caller's local policy BEFORE gating, so an override actually changes
-        # the verdict rather than only the display.
-        try:
-            import sys as _sys
-            from pathlib import Path as _P
-            _sys.path.insert(0, str(_P(__file__).resolve().parents[1] / "runtime"))
-            import policy as _pol
-            findings = _pol.apply_to_findings(policy, findings, app_name=app_name)
-        except Exception:
-            pass
+    findings = _apply_policy(policy, iter_findings(current_assessment), app_name)
     threshold = _sev_index(fail_on_severity)
     reasons: List[str] = []
 
@@ -232,6 +292,24 @@ def gate(current_assessment: Dict[str, Any],
             for r in diff["regressions"]:
                 reasons.append(f"regression: {r['control_id']} "
                                f"{r['from_severity']} -> {r['to_severity']}")
+        # A baseline failure this run never exercised is UNPROVEN, not fixed. It used to land in
+        # `resolved` and contribute nothing, so narrowing a run's scope past a failing control
+        # turned the gate green on a control nobody had re-tested. Held to the same severity bar
+        # as a live finding -- `--fail-on-severity` is already the operator's statement of what is
+        # allowed to fail a build, and an unproven `high` is exactly as unacceptable as a
+        # measured one. An unclassifiable severity breaches (_sev_index -> -1), same as anywhere
+        # else here. `--allow-unproven` opts out for a deliberately narrowed run; the bucket is
+        # still reported in `diff`, so opting out hides the failure, never the fact.
+        # Re-ranked under the SAME policy as the live findings, and written back into `diff`, so
+        # the severity the gate breached on is the severity the operator reads in the payload.
+        diff["not_retested"] = _apply_policy(policy, diff["not_retested"], app_name)
+        if fail_on_unproven:
+            for f in diff["not_retested"]:
+                if _sev_index(f["severity"]) <= threshold:
+                    reasons.append(
+                        f"not re-tested: {f['control_id']} ({f['severity']}) failed in the "
+                        f"baseline and this run never exercised it — unproven, not fixed "
+                        f"(re-run it, or pass --allow-unproven)")
 
     exit_code = 2 if reasons else 0      # 2 = the findings gate failed
     return {
@@ -240,6 +318,7 @@ def gate(current_assessment: Dict[str, Any],
         "threshold_breaches": breaches,
         "fail_on_severity": fail_on_severity,
         "fail_on_new": fail_on_new,
+        "fail_on_unproven": fail_on_unproven,
         "finding_count": len(findings),
         "diff": diff,
     }

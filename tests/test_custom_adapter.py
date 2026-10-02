@@ -95,7 +95,7 @@ class TestGenerator:
         cfg = {"adapter": "direct_api", "endpoint": "https://h/chat",
                "body": {"q": "{{PROMPT}}"}, "response_path": "status.data.answer"}
         src = codegen.generate_adapter_module("g", cfg, source="api")
-        assert '"status"' in src and '"answer"' in src
+        assert "status.data.answer" in src                 # carried whole; the module walks it with _dot
 
     def test_sentinel_module_is_valid_and_has_markers(self, tmp_path):
         cfg = {"adapter": "sentinel_stream", "url": "https://h/chat",
@@ -108,7 +108,7 @@ class TestGenerator:
         assert "B_BEGIN" in src and "state" in src
 
     def test_unknown_shape_yields_a_scaffold_that_is_still_valid_python(self, tmp_path):
-        cfg = {"adapter": "websocket_direct", "url": "wss://h/chat"}
+        cfg = {"adapter": "browser", "url": "https://h/chat"}      # WebSocket has its own generator since 2026-10-02
         src = codegen.generate_adapter_module("g", cfg, source="har")
         assert "NotImplementedError" in src            # honest: not finished
         m = tmp_path / "s.py"; m.write_text(src)
@@ -122,5 +122,5 @@ class TestGenerator:
         import importlib.util
         spec = importlib.util.spec_from_file_location("g", m)
         mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
-        body = mod._body("hello \"world\"")
+        body = mod._render(mod.BODY, PROMPT="hello \"world\"")
         assert body["outer"]["message"] == 'hello "world"'   # nested + quotes survive

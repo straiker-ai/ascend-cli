@@ -1449,9 +1449,13 @@ def _diagnose(state: _State, host: str, tried: List[str]) -> Tuple[str, str, str
                 "  a CSRF token in the HTML:    --login-url URL --login-method GET "
                 "--token-regex 'csrf-token\" content=\"([^\"]+)' --token-header X-CSRF-Token\n"
                 "  (--header 'Authorization: Bearer <token>' also works.)\n"
-                "  If the target SIGNS each request (HMAC / X-Signature) or needs a fresh nonce, "
-                "no flag can express that — the credential is computed per request. Write a small "
-                "adapter instead:  ascend target add <url> --scaffold mybot.py")
+                "  a credential minted PER REQUEST (a single-use nonce, a one-shot token): that "
+                "IS expressible — an `auth` block of type `derived_multihop` that fetches it, "
+                "with `auth_lifecycle` {\"type\": \"refresh_on_ttl\", \"ttl_s\": 0}, which means "
+                "'already stale' and so re-mints before every probe. Verified against a target "
+                "that 401s on any nonce reuse: three probes, three fresh nonces, three 200s.\n"
+                "  Only a credential the client must COMPUTE (an HMAC over timestamp+body, a "
+                "signature) genuinely needs code:  ascend target add <url> --scaffold mybot.py")
 
     statuses = [s for lst in state.endpoint_status.values() for s in lst]
     auth_hits = [s for s in statuses if s in (401, 403, 407)]

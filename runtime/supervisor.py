@@ -170,7 +170,27 @@ def _unresolved_env_refs(config: str):
     except Exception:
         return []
     names = sorted(set(_re.findall(r"env:([A-Za-z_][A-Za-z0-9_]*)", blob)))
-    return [n for n in names if not os.environ.get(n)]
+    # UNRESOLVED means the resolver cannot find it — not merely that this shell lacks it.
+    # `layers.auth.resolve_secret_ref` reads the environment FIRST and then the tenant's 0600
+    # credential store, and the store is the whole point: a credential the operator supplied
+    # has to outlive the command that received it, because the relay is started by a different
+    # command later. Checking `os.environ` alone made this refuse to start on a credential that
+    # was sitting in the store and would have resolved perfectly.
+    #
+    # MEASURED end to end: the OAuth login succeeded, the application registered, the live
+    # validation passed using that very credential — and then the relay refused, telling the
+    # operator to export a variable by hand. The one step that had to work was the one checking
+    # the wrong place. The refusal itself is right and stays; only its question changes.
+    missing = []
+    for n in names:
+        if os.environ.get(n):
+            continue
+        try:
+            from layers.auth import resolve_secret_ref
+            resolve_secret_ref(f"env:{n}")
+        except Exception:                 # noqa: BLE001 - unresolvable by any means
+            missing.append(n)
+    return missing
 
 
 def start(app_id: str, *, config: str, adapter: Optional[str], api_key: str,

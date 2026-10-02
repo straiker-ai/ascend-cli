@@ -7,7 +7,8 @@ usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] t
 
 positional arguments:
   {add,inspect,list,show,check,rm,types}
-    add                 onboard a target from a URL, a cURL/HAR file, or a saved config
+    add                 onboard a target from a URL, a cURL/HAR file, a cloud-runtime identifier,
+                        or a saved config
     inspect             look at a target first: what it is, what it needs, what is already
                         registered
     list                every target: its adapter, whether it is registered, whether it is serving

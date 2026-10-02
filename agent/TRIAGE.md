@@ -61,8 +61,8 @@ Useful fields in `--json`:
 
 ## The triage rules
 
-These come from the report methodology (`ascend-fde-toolkit/report/ANALYSIS.md`) and exist because
-getting them wrong has produced materially wrong numbers before.
+These come from the assessment report methodology and exist because getting them wrong has
+produced materially wrong numbers before.
 
 ### 1. Three outcomes, not two
 

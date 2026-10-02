@@ -20,6 +20,7 @@ import json
 import os
 import re
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
 BENIGN_DEFAULT = "Hello, what can you help me with?"
 
@@ -82,6 +83,36 @@ INPUT_SELECTORS = [
     "input[placeholder*='type' i]", "textarea[placeholder*='message' i]",
     "input[placeholder*='message' i]", "input[placeholder*='ask' i]",
 ]
+INPUT_WAIT_S = 20.0   # how long to keep looking for the chat input after the settle
+
+
+async def _await_chat_input(page, scan, wait_s: float, notes: List[str], *, clock=None):
+    """Poll for a usable chat input instead of trusting one fixed settle.
+
+    A bot challenge (WAF / CDN interstitial) solves itself in the page and then RELOADS it; a
+    widget inside an SPA mounts late. One scan straight after the settle looked at the
+    interstitial, found no input, and the capture came back holding nothing but the page
+    bootstrap while the real widget landed a second later. Seen live against a WAF-challenged
+    range: the HAR had the challenge, the token cookie and the 200 reload, never the chat call.
+    Re-scan every second until an input that is not a search box shows up or ``wait_s`` runs
+    out. ``scan`` returns the scored candidates; a note records the wait and any navigation."""
+    import time as _time
+    now = clock or _time.monotonic
+    url_before = getattr(page, "url", "") or ""
+    deadline = now() + max(float(wait_s or 0), 0.0)
+    polls = 0
+    while True:
+        found = await scan()
+        polls += 1
+        if any(c[0] >= 0 for c in found) or now() >= deadline:
+            break
+        await page.wait_for_timeout(1000)
+    if polls > 1:
+        moved = (getattr(page, "url", "") or "") != url_before
+        notes.append(f"waited {polls - 1}s more for the chat input"
+                     + (" (the page navigated meanwhile: bot challenge or redirect)" if moved else "")
+                     + ("" if any(c[0] >= 0 for c in found) else " — none appeared"))
+    return found
 
 
 def _browser_channels(preferred=None):
@@ -178,8 +209,93 @@ def _augment_pairs_from_har(pairs: List[Dict[str, Any]], har_path: Optional[str]
         notes.append(f"HAR saved for review: {har_path}")
 
 
+# The page's own view of a streamed reply. Playwright hands back neither the body of a
+# text/event-stream response nor its HAR text (both measured empty on the SSE lab widget), so the
+# derived config was a bare {"format": "sse"} with the field mapping left to the adapter's
+# defaults. This tees every streamed fetch body inside the page and keeps the text; EventSource
+# messages are kept too. Read back with _collect_streams before the context closes.
+STREAM_HOOK_JS = """
+(() => {
+  if (window.__ascendStreams) return;
+  const streams = window.__ascendStreams = [];
+  const keep = (rec, chunk) => { if (rec.text.length < 200000) rec.text += chunk; };
+  const origFetch = window.fetch;
+  if (origFetch) {
+    window.fetch = async function(input, init) {
+      const res = await origFetch.apply(this, arguments);
+      try {
+        const ct = (res.headers && res.headers.get('content-type')) || '';
+        if (res.body && (ct.includes('event-stream') || ct.includes('ndjson'))) {
+          const url = (typeof input === 'string') ? input : ((input && input.url) || '');
+          const method = ((init && init.method) || (input && input.method) || 'GET').toUpperCase();
+          const rec = {url: new URL(url, location.href).href, method, status: res.status, text: ''};
+          streams.push(rec);
+          const [forPage, forUs] = res.body.tee();
+          (async () => {
+            const reader = forUs.getReader(); const dec = new TextDecoder();
+            try { while (true) { const {done, value} = await reader.read(); if (done) break; keep(rec, dec.decode(value, {stream: true})); } }
+            catch (e) {}
+          })();
+          return new Response(forPage, {status: res.status, statusText: res.statusText, headers: res.headers});
+        }
+      } catch (e) {}
+      return res;
+    };
+  }
+  const OrigES = window.EventSource;
+  if (OrigES) {
+    window.EventSource = function(url, cfg) {
+      const es = new OrigES(url, cfg);
+      const rec = {url: new URL(String(url), location.href).href, method: 'GET', status: 200, text: ''};
+      streams.push(rec);
+      es.addEventListener('message', ev => keep(rec, 'data: ' + ev.data + '\\n\\n'));
+      return es;
+    };
+    window.EventSource.prototype = OrigES.prototype;
+  }
+})();
+"""
+
+
+async def _collect_streams(page) -> List[Dict[str, Any]]:
+    """The streamed bodies the hook kept, from the page and every frame. Never raises."""
+    out: List[Dict[str, Any]] = []
+    for fr in [page] + list(getattr(page, "frames", []) or []):
+        try:
+            recs = await fr.evaluate("() => (window.__ascendStreams || []).map(r => ({url: r.url, method: r.method, status: r.status, text: r.text.slice(0, 20000)}))")
+            out.extend(r for r in (recs or []) if isinstance(r, dict))
+        except Exception:
+            continue
+    return out
+
+
+def _fill_streamed_bodies(pairs: List[Dict[str, Any]], streams: List[Dict[str, Any]],
+                          notes: List[str]) -> int:
+    """Give a streamed pair its body from the page hook. Matches on method and URL (the hook
+    records absolute URLs); only a pair whose recorded body is empty is touched."""
+    if not streams:
+        return 0
+    filled = 0
+    for pr in pairs:
+        resp = pr.get("response") or {}
+        ct = (resp.get("content_type") or "").lower()
+        if resp.get("raw_body") or not ("event-stream" in ct or "ndjson" in ct):
+            continue
+        req = pr.get("request") or {}
+        for rec in streams:
+            if rec.get("text") and rec.get("url") == req.get("url") and \
+                    (rec.get("method") or "").upper() == (req.get("method") or "").upper():
+                resp["raw_body"] = rec["text"][:20000]
+                filled += 1
+                break
+    if filled:
+        notes.append(f"read {filled} streamed reply body(ies) from the page (SSE/NDJSON bodies are not in the HAR)")
+    return filled
+
+
 async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: int,
                          settle_s: int, manual: bool = False, manual_wait_s: int = 180,
+                         input_wait_s: float = INPUT_WAIT_S,
                          extra_headers: Optional[Dict[str, str]] = None,
                          proxy: Optional[str] = None, insecure: bool = False,
                          browser_channel: Optional[str] = None,
@@ -271,7 +387,12 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
             ctx = browser.contexts[0]
         else:
             ctx = await browser.new_context(**ctx_kw)
+        try:
+            await ctx.add_init_script(STREAM_HOOK_JS)
+        except Exception:
+            pass                          # an attached context may refuse; the capture still works
         page = await ctx.new_page()
+        streams: List[Dict[str, Any]] = []
 
         async def on_response(resp):
             try:
@@ -286,13 +407,24 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
                 ct = (resp.headers or {}).get("content-type", "")
                 if any(t in ct for t in ("json", "text", "event-stream", "ndjson")):
                     try:
+                        # A streamed body (text/event-stream, NDJSON) is NOT available here, nor
+                        # in the HAR: MEASURED, both come back empty. It is read by the page hook
+                        # (STREAM_HOOK_JS) and folded in by _fill_streamed_bodies below.
                         body = (await resp.text())[:20000]
                     except Exception:
                         body = None
+                # The headers the browser actually SENT, not the ones the page's script set.
+                # `request.headers` is the initial set and never includes Cookie; a widget whose
+                # access is a cookie (set by the page, sent by the browser) therefore captured with
+                # no credential at all, and the replay 401'd. MEASURED on a gated lab widget.
+                try:
+                    sent = await req.all_headers()
+                except Exception:
+                    sent = req.headers or {}
                 pairs.append({
                     "request": {
                         "method": req.method, "url": u,
-                        "headers": [{"name": k, "value": v} for k, v in (req.headers or {}).items()],
+                        "headers": [{"name": k, "value": v} for k, v in (sent or {}).items()],
                         "raw_body": (req.post_data or None),
                     },
                     "response": {
@@ -362,6 +494,7 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
                     await asyncio.wait(pending_tasks, timeout=10)
                 except Exception:
                     pass
+            streams = await _collect_streams(page)
             if not cdp:                       # flush the HAR: Playwright writes it on CONTEXT close;
                 try:                          # this is our own context, never the operator's
                     await ctx.close()
@@ -370,6 +503,7 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
             if not cdp:                       # never close the operator's own browser
                 await browser.close()
             _augment_pairs_from_har(pairs, _har_path, notes)
+            _fill_streamed_bodies(pairs, streams, notes)
 
             def _in_traffic_m(needle):
                 if not needle: return False
@@ -386,6 +520,34 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
                     "send_attempted": True, "send_verified": verified_m,
                     "reply_text": None, "url": url,
                     "har_path": _har_path if _har_path and os.path.exists(_har_path) else None}
+
+        # ---- consent / cookie gate first ---------------------------------------
+        # A banner that has to be accepted before the widget mounts (often the chat iframe is
+        # only injected after acceptance). Same list the browser adapter replays per session.
+        # Let the page paint first: headful, the banner was not visible yet when this ran.
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=5000)
+        except Exception:
+            pass
+        await page.wait_for_timeout(800)
+        try:
+            from consent import selectors as _consent_selectors  # noqa: PLC0415  (runtime/ on sys.path under the CLI)
+        except ImportError:
+            from runtime.consent import selectors as _consent_selectors  # noqa: PLC0415
+        for target in [page] + list(page.frames):
+            if recipe.get("consent"):
+                break
+            for sel in _consent_selectors():
+                try:
+                    el = target.locator(sel).first
+                    if await el.count() and await el.is_visible():
+                        await el.click(timeout=4000)
+                        notes.append(f"dismissed consent gate via {sel}")
+                        recipe["consent"] = sel
+                        await page.wait_for_timeout(2500)   # the widget frame mounts after acceptance
+                        break
+                except Exception:
+                    continue
 
         # ---- open the widget -------------------------------------------------
         # Widgets live in the page, in shadow DOM, or in a cross-origin iframe. Try the
@@ -437,16 +599,21 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
                 pass
             return score
 
-        candidates = []
-        for fr in [page] + list(page.frames):
-            for sel in INPUT_SELECTORS:
-                try:
-                    loc = fr.locator(sel).first
-                    if await loc.count() and await loc.is_visible():
-                        candidates.append((await score_input(fr, loc, sel), fr, loc, sel))
-                except Exception:
-                    continue
-        candidates.sort(key=lambda c: c[0], reverse=True)
+        async def scan_inputs():
+            found = []
+            for fr in [page] + list(page.frames):
+                for sel in INPUT_SELECTORS:
+                    try:
+                        loc = fr.locator(sel).first
+                        if await loc.count() and await loc.is_visible():
+                            found.append((await score_input(fr, loc, sel), fr, loc, sel))
+                    except Exception:
+                        continue
+            found.sort(key=lambda c: c[0], reverse=True)
+            return found
+
+        # not one scan on a fixed settle: a bot challenge reloads the page, a widget mounts late
+        candidates = await _await_chat_input(page, scan_inputs, input_wait_s, notes)
 
         sent = False
         for score, fr, loc, sel in candidates:
@@ -482,7 +649,11 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
             except Exception:
                 continue
         if not sent:
-            notes.append("no chat input found — capture may only contain page bootstrap")
+            # The site root is usually a landing page: the widget lives on a page of its own. Seen
+            # live: a drive at `/` (the operator had given `/rest`) captured the bootstrap and nothing else.
+            root = not urlsplit(url).path.strip("/")
+            notes.append("no chat input found — capture may only contain page bootstrap"
+                         + (" (this is the site root: if the chat lives on a specific page, capture that page's URL)" if root else ""))
 
         # ---- try to read the bot's reply back off the page -------------------
         reply_text = None
@@ -513,6 +684,7 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
                 await asyncio.wait(pending_tasks, timeout=10)
             except Exception:
                 pass
+        streams = await _collect_streams(page)
         if not cdp:                       # flush the HAR: Playwright writes it on CONTEXT close;
             try:                          # this is our own context, never the operator's
                 await ctx.close()
@@ -522,6 +694,7 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
             await browser.close()
 
     _augment_pairs_from_har(pairs, _har_path, notes)
+    _fill_streamed_bodies(pairs, streams, notes)
 
     # HARD VERIFICATION: typing into a box proves nothing — the prompt must appear in
     # real traffic. Two silent failure modes this catches: (a) we typed into a site
@@ -639,6 +812,39 @@ async def _derive_reply_recipe(fr, prompt, reply_text, recipe) -> None:
     recipe["reply_strategy"] = "new_element"
 
 
+def capture_diagnosis(ev: Dict[str, Any], url: str = "") -> Dict[str, str]:
+    """What a failed capture means, as {reason, detail, next} — read off the notes the drive
+    left. One reason each; the first that matches wins, most specific first."""
+    notes = [str(n) for n in (ev or {}).get("notes", [])]
+    text = "\n".join(notes)
+    if (ev or {}).get("diagnosis") and isinstance(ev["diagnosis"], dict):
+        return ev["diagnosis"]
+    if "this is the site root" in text:
+        return {"reason": "site_root_no_widget",
+                "detail": "the drive was at the site root and found no chat input; the widget lives on a page of its own",
+                "next": "capture the exact page URL that shows the chat widget (keep its path and query); do not retry the root"}
+    if "no chat input found" in text:
+        return {"reason": "no_chat_input",
+                "detail": "the page rendered but no visible chat input was found within the wait",
+                "next": "open the page yourself to see where the widget is; if it needs a click to appear, use --manual once; if it loads slowly, raise --settle"}
+    if "TYPED BUT NOT OBSERVED IN TRAFFIC" in text:
+        return {"reason": "typed_not_observed",
+                "detail": "text was typed into an input but never appeared in any request: that box was not the chat widget (a site search, a form)",
+                "next": "capture the page whose input is the chat box, or drive it with --manual once so the real send is recorded"}
+    if "navigation issue" in text:
+        return {"reason": "navigation_failed", "detail": notes[0] if notes else "the page did not load",
+                "next": "fix reachability first (DNS, VPN, the bot wall): a plain probe of the URL says which"}
+    if "MANUAL MODE" in text and "NO PROMPT SENT" in text:
+        return {"reason": "manual_no_send",
+                "detail": "manual mode waited for a message and none was sent in the browser",
+                "next": "someone must type in the opened browser during manual mode; otherwise use the driven capture"}
+    if "NO PROMPT SENT" in text:
+        return {"reason": "no_prompt_sent", "detail": "the capture holds only the page bootstrap",
+                "next": "capture the page that carries the widget; if a consent gate or login stands in front, deal with it first (--manual, or a login capture)"}
+    return {"reason": "capture_unverified", "detail": "the prompt was not seen in the traffic",
+            "next": "inspect the saved capture; pass a HAR of a real conversation with --har if you have one"}
+
+
 def diagnose_browser_failure(exc: Exception, url: str) -> Dict[str, str]:
     """Turn a Playwright failure into something a human can act on.
 
@@ -687,6 +893,7 @@ def diagnose_browser_failure(exc: Exception, url: str) -> Dict[str, str]:
 def capture_url(url: str, *, prompt: str = BENIGN_DEFAULT, headless: bool = False,
                 timeout_s: int = 60, settle_s: int = 6, manual: bool = False,
                 manual_wait_s: int = 180, extra_headers: Optional[Dict[str, str]] = None,
+                input_wait_s: float = INPUT_WAIT_S,
                 proxy: Optional[str] = None, insecure: bool = False,
                 browser_channel: Optional[str] = None,
                 cdp: Optional[str] = None) -> Dict[str, Any]:
@@ -703,6 +910,7 @@ def capture_url(url: str, *, prompt: str = BENIGN_DEFAULT, headless: bool = Fals
         return asyncio.run(_capture_async(url, prompt=prompt, headless=headless,
                                           timeout_s=timeout_s, settle_s=settle_s,
                                           manual=manual, manual_wait_s=manual_wait_s,
+                                          input_wait_s=input_wait_s,
                                           cdp=cdp,
                                           extra_headers=extra_headers, proxy=proxy,
                                           insecure=insecure,

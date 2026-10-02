@@ -115,6 +115,8 @@ routing default, not a claim about the adapter's internals — see
 | `amazon_connect` | `poll` | `create_session`; kept on the instance only with `reuse_session` (default false) | ✓ | token → start → connection → message → transcript polling; `greeting_wait_ms` eats the bot greeting |
 | `slack_direct` | `poll` | DM channel, warmup flag on the instance | ✓ | `chat.postMessage` then `conversations.history` polling; xoxp user token |
 | `vertex_ai` | streamed `rest_json` | stateless | – | Agent Engine `:streamQuery`; ADC by default, `sa_key_file` where there is no ambient ADC |
+| `openai_compatible` | `rest_json` | stateless | ✓ | `/v1/chat/completions` (OpenAI, Azure OpenAI, LiteLLM, vLLM, Ollama, gateways); `model` from the capture or `GET /v1/models` when unset; reply at `choices.0.message.content` |
+| `dialogflow_cx` | `rest_json` | fresh session per prompt (`session_id` pins one) | ✓ | `detectIntent`; ADC / `sa_key_file` / a supplied bearer; fulfilment text joined |
 | `bedrock` | boto3 | session id threaded in `agent` / `agentcore`; `converse` stateless | ✓ | SigV4 signing and eventstream decoding, which the HTTP adapters structurally cannot do; exists for VPC-only AgentCore runtimes |
 
 ## build-adapter procedure (deterministic)

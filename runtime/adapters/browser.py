@@ -262,16 +262,19 @@ class BrowserAdapter(BotAdapter):
                         except Exception:
                             pass
                 elif act == "dismiss_cookie":
-                    for sel in [
-                        "#CybotCookiebotDialogBodyButtonAccept",
-                        "button:has-text('Accept')",
-                        "button:has-text('Accept All')",
-                        "button:has-text('Got it')",
-                    ]:
+                    # The selector the capture actually clicked comes first, then the shared list
+                    # (runtime/consent.py) — the same one discovery uses, so the two cannot drift.
+                    try:
+                        from consent import selectors as _consent_selectors  # noqa: PLC0415  (runtime/ on sys.path under the CLI)
+                    except ImportError:
+                        from runtime.consent import selectors as _consent_selectors  # noqa: PLC0415
+                    first = (action.get("selectors") or [None])[0]
+                    for sel in _consent_selectors(first):
                         try:
-                            el = await page.wait_for_selector(sel, timeout=2000)
+                            el = await page.wait_for_selector(sel, timeout=1500)
                             if el and await el.is_visible():
                                 await el.click()
+                                await page.wait_for_timeout(1500)
                                 break
                         except Exception:
                             continue

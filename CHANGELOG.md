@@ -52,7 +52,9 @@ them is visible at a glance. A growing Regressions section is a process signal, 
   a real one runs without `--force`, a deleted or mistyped one is refused like any unknown id.
   And `assess run` without `--controls` refuses to start when the app's registered set names a
   custom control that has since been deleted — the platform would skip it and score it clean
-  without testing it. `--force` still runs anyway.
+  without testing it. `--force` still runs anyway. `ascend controls list` now shows your custom
+  controls too, under the `custom` category (tag `Custom`), so it names every id `--controls`
+  accepts.
 - **`app create --type api --config <name>` never worked with a derived config.** It read `url`
   while `target add` writes `endpoint`; added a second top-level `{{PROMPT}}` beside an already
   templated body; and flattened a nested answer path into one dotted key that matches nothing in

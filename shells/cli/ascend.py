@@ -1247,6 +1247,21 @@ def cmd_controls_list(args):
     cat = c.list_controls()
     controls = _unwrap_list(cat, "controls")
     categories = _unwrap_list(cat, "categories") if isinstance(cat, dict) else []
+    # Custom controls are not in the built-in catalog; they have their own list. Show them here
+    # under a `custom` category so this command names every id --controls accepts. A platform
+    # without the list, or a failure reading it, leaves the built-in catalog as it is.
+    try:
+        custom = c.list_custom_controls()
+    except Exception as e:
+        _warn(f"custom controls could not be listed ({type(e).__name__}); showing built-in "
+              f"controls only")
+        custom = None
+    custom_ids = [r.get("id") for r in custom or [] if r.get("id")]
+    if custom_ids:
+        controls = controls + [{"id": r.get("id"), "name": r.get("name"), "category_id": "custom",
+                                "custom": True} for r in custom if r.get("id")]
+        categories = categories + [{"id": "custom", "name": "Custom", "tag": "Custom",
+                                    "control_ids": custom_ids}]
     meta = {g.get("id"): g for g in categories}
 
     if args.categories:
@@ -1292,8 +1307,10 @@ def cmd_controls_list(args):
         if x.get("agentic"):
             flags.append("agentic")
         g = meta.get(x.get("category_id"), {})
+        # A custom control's own name says more than its category, which is just "Custom".
+        label = x.get("name") if x.get("custom") else (g.get("name") or x.get("category_id"))
         line = (f"  {x.get('id'):34} {(g.get('tag') or ''):9} "
-                f"{(g.get('name') or x.get('category_id') or ''):26}")
+                f"{(label or '')[:26]:26}")
         if x.get("prefix"):
             line += f" {x['prefix']}"
         print(line.rstrip() + (("  [" + ", ".join(flags) + "]") if flags else ""))

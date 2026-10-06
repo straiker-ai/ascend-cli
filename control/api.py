@@ -370,21 +370,25 @@ class AscendAPI:
     def list_controls(self) -> Any:
         return self._req("GET", "/ascend/controls")
 
-    def custom_control_ids(self) -> Optional[set]:
-        """The organization's custom control ids (`custom-<n>`), or None when the platform
-        does not list them.
+    def list_custom_controls(self) -> Optional[List[Dict[str, Any]]]:
+        """The organization's custom controls, or None when the platform does not list them.
 
         Custom controls are not in `/ascend/controls`, which is the built-in catalog; they have
         their own list. A platform without that list answers 404, and None lets the caller say
         so instead of calling every custom id unknown for a reason the operator cannot see.
         """
         try:
-            rows = self._rows(self._req("GET", "/ascend/custom-controls"))
+            return self._rows(self._req("GET", "/ascend/custom-controls"))
         except AscendAPIError as e:
             if re.search(r"-> (404|405|501)\b", str(e)):
                 return None
             raise
-        return {r.get("id") for r in rows if r.get("id")}
+
+    def custom_control_ids(self) -> Optional[set]:
+        """The organization's custom control ids (`custom-<n>`), or None when the platform
+        does not list them (see list_custom_controls)."""
+        rows = self.list_custom_controls()
+        return None if rows is None else {r.get("id") for r in rows if r.get("id")}
 
     def validate_controls(self, control_ids):
         """Reconcile requested control_ids against the live catalog.

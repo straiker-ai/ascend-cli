@@ -105,3 +105,64 @@ class TestDeletedCustomControls:
     def test_the_message_names_the_controls_and_the_fix(self):
         msg = ascend._deleted_custom_controls_msg(["custom-51"])
         assert "custom-51" in msg and "app update" in msg and "--force" in msg
+
+
+class _ListArgs:
+    json = False
+    verbose = False
+    categories = False
+    category = None
+    tag = None
+    include_deprecated = False
+    agentic_only = False
+
+
+class _CatalogClient:
+    def __init__(self, custom):
+        self._custom = custom
+
+    def list_controls(self):
+        return {"controls": [{"id": "sys_prompt_leak", "category_id": "security"}],
+                "categories": [{"id": "security", "name": "Security", "tag": "Security",
+                                "control_ids": ["sys_prompt_leak"]}]}
+
+    def list_custom_controls(self):
+        if isinstance(self._custom, Exception):
+            raise self._custom
+        return self._custom
+
+
+class TestControlsListShowsCustomControls:
+    def _run(self, monkeypatch, capsys, custom, **overrides):
+        monkeypatch.setattr(ascend, "_client", lambda _args: _CatalogClient(custom))
+        args = _ListArgs()
+        for k, v in overrides.items():
+            setattr(args, k, v)
+        ascend.cmd_controls_list(args)
+        return capsys.readouterr()
+
+    def test_custom_controls_are_listed_with_their_names(self, monkeypatch, capsys):
+        out = self._run(monkeypatch, capsys, [{"id": "custom-50", "name": "Refund promises"}]).out
+        assert "sys_prompt_leak" in out
+        assert "custom-50" in out and "Refund promises" in out
+        assert "total=2" in out
+
+    def test_the_custom_category_filter_shows_only_them(self, monkeypatch, capsys):
+        out = self._run(monkeypatch, capsys, [{"id": "custom-50", "name": "Refunds"}],
+                        category="custom").out
+        assert "custom-50" in out and "sys_prompt_leak" not in out
+
+    def test_the_categories_view_has_a_custom_row(self, monkeypatch, capsys):
+        out = self._run(monkeypatch, capsys, [{"id": "custom-50", "name": "Refunds"}],
+                        categories=True).out
+        assert "custom" in out and "Custom" in out
+
+    def test_a_platform_without_the_list_shows_the_catalog_quietly(self, monkeypatch, capsys):
+        res = self._run(monkeypatch, capsys, None)
+        assert "sys_prompt_leak" in res.out and "total=1" in res.out
+        assert "custom controls could not be listed" not in res.err
+
+    def test_a_failed_custom_list_warns_and_still_shows_the_catalog(self, monkeypatch, capsys):
+        res = self._run(monkeypatch, capsys, AscendAPIError("GET /ascend/custom-controls -> 502: x"))
+        assert "sys_prompt_leak" in res.out and "total=1" in res.out
+        assert "custom controls could not be listed" in res.err

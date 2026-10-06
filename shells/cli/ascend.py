@@ -684,12 +684,6 @@ def _resolve_all_controls(c, args, ctrl):
     control_type "all" and 400'd 100% of the time whenever `--controls` was omitted -- which is
     the default, and which is the exact command 1.1.2 makes the primary path. Two copies of one
     rule is how that happens; there is now one copy and two callers.
-
-    "Everything" means every built-in control, as the Console's "all" does. The catalog also lists
-    the organization's custom controls (category `custom`), but each is written for a particular
-    target: pinning all of them onto every new app would test targets against goals that are not
-    theirs, and deleting any one would then block every such app's next run. A custom control is
-    run by naming it in --controls.
     """
     if ctrl:
         return ctrl
@@ -698,8 +692,7 @@ def _resolve_all_controls(c, args, ctrl):
         # the catalog comes back as {"object", "controls": [...], "categories": [...]}
         rows = (raw.get("controls") if isinstance(raw, dict) else None) or _unwrap_list(raw)
         ctrl = [r.get("id") for r in rows
-                if isinstance(r, dict) and r.get("id") and not r.get("deprecated")
-                and r.get("category_id") != "custom"]
+                if isinstance(r, dict) and r.get("id") and not r.get("deprecated")]
     except Exception as e:
         _die(f"no --controls given, and the control catalog could not be read "
              f"({type(e).__name__}). The platform requires an explicit control set.\n"
@@ -709,7 +702,7 @@ def _resolve_all_controls(c, args, ctrl):
         _die("no --controls given and the control catalog came back empty — the platform "
              "requires an explicit control set.\n  list them:  ascend controls list",
              error_code="controls_unavailable")
-    _say(args, f"no --controls given — registering with all {len(ctrl)} built-in controls "
+    _say(args, f"no --controls given — registering with all {len(ctrl)} catalog controls "
                f"(scope with --controls to keep the first run small)")
     return ctrl
 

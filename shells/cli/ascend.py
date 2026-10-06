@@ -813,6 +813,39 @@ def _scope_run_controls(c, app_id, ctrl_ids, args):
     return f"scoped to {len(ctrl_ids)} control(s){was} — this is now the app's control set"
 
 
+def _deleted_custom_controls(c, app_id):
+    """The custom control ids in the app's registered set that no longer exist.
+
+    `assess run` without --controls runs the app's stored set. A custom control deleted since
+    the app was set up is skipped by the platform without a word, so it scores clean without
+    ever being tested — the false-pass shape again — and only the client can see it coming.
+    Under control_type "all" or a compliance standard the stored ids are not what runs, so they
+    are not checked. Returns [] when there is nothing to check against.
+    """
+    try:
+        app = c.get_app(app_id) or {}
+    except Exception:
+        return []                        # the run itself reports an app it cannot reach
+    ctype = str(app.get("control_type") or "")
+    if ctype == "all" or ctype.startswith("compliance-"):
+        return []
+    wanted = [i for i in app.get("control_ids") or [] if str(i).startswith("custom-")]
+    if not wanted:
+        return []
+    known = c.custom_control_ids()
+    if known is None:
+        return []                        # the platform cannot list them
+    return [i for i in wanted if i not in known]
+
+
+def _deleted_custom_controls_msg(missing):
+    return (f"the app's control set names custom control(s) that no longer exist: "
+            f"{', '.join(missing)}\n"
+            f"  they would be skipped and score clean without being tested\n"
+            f"  fix the set:  ascend app update <app> --controls <ids>\n"
+            f"  (--force to run anyway)")
+
+
 def _validated_control_ids(c, ids, *, force=False, say=None, what="this app"):
     """The one check behind every `--controls`. Returns the ids to apply, or dies.
 
@@ -1337,6 +1370,10 @@ def _assess_run_many(args, c, refs, scope_ids=None):
         try:
             # Scope BEFORE the bridge and the run: the control set is read at create time.
             _scope_run_controls(c, appid, scope_ids, args)
+            if scope_ids is None and not args.force:
+                missing = _deleted_custom_controls(c, appid)
+                if missing:
+                    return {"app": ref, "error": _deleted_custom_controls_msg(missing)}
             # Auto-lifecycle: ensure a bridge per bridge-type app before the run is scheduled.
             ensure = _ensure_bridge(c, appid, args=args)
             # AscendAPI.create_assessment already verifies against the server when the response
@@ -1932,6 +1969,12 @@ def cmd_assess_run(args):
     _scoped = _scope_run_controls(c, appid, scope_ids, args)
     if _scoped:
         print(f"  {_scoped}", file=sys.stderr)
+    if scope_ids is None:
+        missing = _deleted_custom_controls(c, appid)
+        if missing and not args.force:
+            _die(_deleted_custom_controls_msg(missing), error_code="unknown_control")
+        if missing:
+            _warn(f"running with deleted custom control(s) {', '.join(missing)} (--force)")
     # Auto-lifecycle: a bridge-type app needs a live relay BEFORE probes are scheduled, or the very
     # first probes go unanswered (a false pass). Ensure it up front; it self-stops when the run ends.
     ensure = _ensure_bridge(c, appid, args=args)

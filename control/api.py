@@ -370,20 +370,42 @@ class AscendAPI:
     def list_controls(self) -> Any:
         return self._req("GET", "/ascend/controls")
 
+    def custom_control_ids(self) -> Optional[set]:
+        """The organization's custom control ids (`custom-<n>`), or None when the platform
+        does not list them.
+
+        Custom controls are not in `/ascend/controls`, which is the built-in catalog; they have
+        their own list. A platform without that list answers 404, and None lets the caller say
+        so instead of calling every custom id unknown for a reason the operator cannot see.
+        """
+        try:
+            rows = self._rows(self._req("GET", "/ascend/custom-controls"))
+        except AscendAPIError as e:
+            if re.search(r"-> (404|405|501)\b", str(e)):
+                return None
+            raise
+        return {r.get("id") for r in rows if r.get("id")}
+
     def validate_controls(self, control_ids):
         """Reconcile requested control_ids against the live catalog.
 
         Returns {valid, deprecated, unknown, agentic, warnings}. Deprecated and
         unknown ids generate zero probes, so surface them before a run silently
-        scores nothing.
+        scores nothing. A `custom-<n>` id is checked against the organization's
+        custom controls, fetched only when one is asked for.
         """
         cat = self.list_controls()
         # isinstance FIRST: a bare-list response must not hit cat.get (AttributeError).
         controls = cat if isinstance(cat, list) else cat.get("controls", [])
         by_id = {c.get("id"): c for c in controls}
+        custom = None
+        if any(str(cid).startswith("custom-") for cid in control_ids or []):
+            custom = self.custom_control_ids()
         valid, deprecated, unknown, agentic = [], [], [], []
         for cid in control_ids or []:
             c = by_id.get(cid)
+            if c is None and custom and cid in custom:
+                valid.append(cid); continue
             if c is None:
                 unknown.append(cid); continue
             if c.get("deprecated"):
@@ -392,6 +414,9 @@ class AscendAPI:
                 agentic.append(cid)
             valid.append(cid)
         warnings = []
+        if custom is None and any(str(cid).startswith("custom-") for cid in unknown):
+            warnings.append("this platform does not list custom controls, so custom ids "
+                            "cannot be checked")
         if deprecated:
             warnings.append(f"deprecated (0 probes): {deprecated}")
         if unknown:

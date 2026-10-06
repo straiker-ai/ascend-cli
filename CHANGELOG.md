@@ -46,6 +46,12 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ### Fixed
 
+- **No `--controls` no longer pins custom controls onto a new app.** The control catalog now also
+  lists your organization's custom controls, and `target add` / `app create` without `--controls`
+  register "every catalog control" — so each new app would have picked up every custom control,
+  whatever target it was written for, and deleting one would have blocked every such app's next
+  run. The implicit set is now every built-in control, as in the Console's "all"; run a custom
+  control by naming it, e.g. `--controls custom-50`.
 - **`app create --type api --config <name>` never worked with a derived config.** It read `url`
   while `target add` writes `endpoint`; added a second top-level `{{PROMPT}}` beside an already
   templated body; and flattened a nested answer path into one dotted key that matches nothing in

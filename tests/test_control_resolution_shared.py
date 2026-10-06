@@ -56,6 +56,17 @@ class TestTheHelperResolvesTheCatalog:
         assert got == ["sys_prompt_leak", "pii_leak"], \
             "a deprecated control generates zero probes, so it must not be selected"
 
+    def test_an_empty_selection_leaves_out_custom_controls(self):
+        """Custom controls are target-specific; "everything" is the built-ins, as in the Console."""
+        c = _Client({"controls": [{"id": "sys_prompt_leak", "category_id": "security"},
+                                  {"id": "custom-50", "category_id": "custom"}],
+                     "categories": [{"id": "custom", "control_ids": ["custom-50"]}]})
+        assert ascend._resolve_all_controls(c, _Args(), []) == ["sys_prompt_leak"]
+
+    def test_an_explicit_custom_control_is_passed_through(self):
+        c = _Client({"controls": [{"id": "custom-50", "category_id": "custom"}]})
+        assert ascend._resolve_all_controls(c, _Args(), ["custom-50"]) == ["custom-50"]
+
     def test_an_explicit_selection_is_passed_through_untouched(self):
         c = _Client({"controls": [{"id": "everything_else"}]})
         assert ascend._resolve_all_controls(c, _Args(), ["pii_leak"]) == ["pii_leak"]

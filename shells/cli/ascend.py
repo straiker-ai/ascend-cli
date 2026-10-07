@@ -813,6 +813,15 @@ def _scope_run_controls(c, app_id, ctrl_ids, args):
     return f"scoped to {len(ctrl_ids)} control(s){was} — this is now the app's control set"
 
 
+def _in_ci():
+    """Is this a CI job? `CI` is set by GitHub Actions, GitLab, CircleCI, Travis and Buildkite;
+    Azure Pipelines sets `TF_BUILD` and Jenkins `JENKINS_URL` instead."""
+    v = os.environ.get("CI", "").strip().lower()
+    if v and v not in ("0", "false", "no"):
+        return True
+    return bool(os.environ.get("TF_BUILD") or os.environ.get("JENKINS_URL"))
+
+
 def _ensure_system_prompt(c, app_id, ref, args):
     """Make sure the app carries the target's REAL system prompt before a run is created.
 
@@ -825,6 +834,9 @@ def _ensure_system_prompt(c, app_id, ref, args):
     So a run on a placeholder is refused off a terminal (exit 3, `system_prompt_required`) with the
     two ways forward in the hint, and asked for on one. `--system-prompt` supplies it (inline or
     @file) and is written to the app; `--no-system-prompt` runs on the placeholder, on the record.
+
+    Under CI (see `_in_ci`) it only warns: existing pipelines ran on the placeholder before this
+    check existed, and nobody is there to ask.
     """
     supplied = _read_maybe_file(getattr(args, "system_prompt", None))
     if supplied and supplied.strip():
@@ -848,6 +860,9 @@ def _ensure_system_prompt(c, app_id, ref, args):
            f"so a leaked prompt reads as a pass")
     if getattr(args, "no_system_prompt", False):
         return f"warning: {why} (running anyway: --no-system-prompt)"
+    if _in_ci():
+        return (f"warning: {why} (running anyway under CI — pass --system-prompt @prompt.txt "
+                f"to score leaks properly)")
     if _stdio_is_tty() and not _wants_json():
         print(f"  {why}.", file=sys.stderr)
         try:

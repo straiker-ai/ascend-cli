@@ -18,7 +18,8 @@ them is visible at a glance. A growing Regressions section is a process signal, 
   rarely recovers the real one — so a target that recited its whole prompt scored as a pass. A run
   on an app whose prompt is empty or just its name is now refused off a terminal
   (`system_prompt_required`, exit 3) and asked for on one. `--system-prompt TEXT|@FILE` writes it
-  to the app before the run; `--no-system-prompt` runs without it, on the record. The MCP
+  to the app before the run; `--no-system-prompt` runs without it, on the record. Under CI (`CI`,
+  `TF_BUILD` or `JENKINS_URL` set) it only warns, so existing pipelines keep running. The MCP
   `ascend_assess_run` tool and the onboard-target / run-assessment skills tell an agent to ask the
   user for it before starting.
 

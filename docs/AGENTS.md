@@ -57,7 +57,9 @@ against the app's `system_prompt`, which otherwise defaults to the app name; aut
 recovers the real one, so a leaked prompt scores as a pass. `assess run` refuses an app with no
 real prompt (`system_prompt_required`, exit 3) — the fix is to ask, then pass
 `--system-prompt @prompt.txt` to `target add` or `assess run`. `--no-system-prompt` exists for when
-the user confirms it cannot be obtained; an agent should not choose it on its own.
+the user confirms it cannot be obtained; an agent should not choose it on its own. Under CI (`CI`,
+`TF_BUILD` or `JENKINS_URL` set) the check only warns, so existing pipelines are not broken — pass
+`--system-prompt` there too if leak results matter.
 
 ```bash
 ascend status --json                                    # 1. read state

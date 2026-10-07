@@ -46,6 +46,8 @@ class _Client:
 @pytest.fixture
 def no_tty(monkeypatch):
     monkeypatch.setattr(ascend, "_stdio_is_tty", lambda: False)
+    for k in ("CI", "TF_BUILD", "JENKINS_URL"):
+        monkeypatch.delenv(k, raising=False)
 
 
 def _refused(c, args, ref="Bot"):
@@ -152,3 +154,30 @@ class TestCallSites:
         a = ascend.build_parser().parse_args(["assess", "run", "--app", "X", "--name", "r",
                           "--system-prompt", "@p.txt", "--no-system-prompt"])
         assert a.system_prompt == "@p.txt" and a.no_system_prompt
+
+
+class TestUnderCIItOnlyWarns:
+    """Existing CI pipelines ran on the placeholder before the check existed; there is nobody to ask."""
+
+    @pytest.mark.parametrize("env", [{"CI": "true"}, {"CI": "1"}, {"TF_BUILD": "True"},
+                                     {"JENKINS_URL": "https://jenkins.example"}])
+    def test_placeholder_warns_and_runs(self, no_tty, monkeypatch, env):
+        for k, v in env.items():
+            monkeypatch.setenv(k, v)
+        c = _Client({"name": "Bot", "system_prompt": "Bot"})
+        note = ascend._ensure_system_prompt(c, "aapp_1", "Bot", _Args())
+        assert note.startswith("warning:") and "CI" in note
+        assert not c.patches
+
+    @pytest.mark.parametrize("v", ["false", "0", ""])
+    def test_ci_switched_off_still_refuses(self, no_tty, monkeypatch, v):
+        monkeypatch.setenv("CI", v)
+        c = _Client({"name": "Bot", "system_prompt": "Bot"})
+        assert _refused(c, _Args()) == ascend.EXIT_USAGE
+
+    def test_a_supplied_prompt_is_still_written_under_ci(self, no_tty, monkeypatch):
+        monkeypatch.setenv("CI", "true")
+        c = _Client({"name": "Bot", "system_prompt": "Bot"})
+        a = _Args(); a.system_prompt = "You are Anna."
+        ascend._ensure_system_prompt(c, "aapp_1", "Bot", a)
+        assert c.patches == [{"system_prompt": "You are Anna."}]

@@ -52,9 +52,17 @@ exactly once). `assess pause`/`resume` are already safe to repeat.
 
 ## The standard loop
 
+**Before step 2, ask the user for the target agent's system prompt.** Leak controls are scored
+against the app's `system_prompt`, which otherwise defaults to the app name; auto recon rarely
+recovers the real one, so a leaked prompt scores as a pass. `assess run` refuses an app with no
+real prompt (`system_prompt_required`, exit 3) — the fix is to ask, then pass
+`--system-prompt @prompt.txt` to `target add` or `assess run`. `--no-system-prompt` exists for when
+the user confirms it cannot be obtained; an agent should not choose it on its own.
+
 ```bash
 ascend status --json                                    # 1. read state
-ascend target add "$URL" --bearer "$TOK" --name Bot --json   # 2. onboard: adapter + app + key,
+ascend target add "$URL" --bearer "$TOK" --name Bot \
+  --system-prompt "$(cat prompt.txt)" --json            # 2. onboard: adapter + app + key,
                                                         #    validated. Pass a URL, a cURL/HAR
                                                         #    file, or a config name — it detects
                                                         #    which; do not pre-classify it.

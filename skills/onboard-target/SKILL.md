@@ -26,6 +26,14 @@ reach the target.
 - You have captured evidence of one answered turn from the target (HAR, in-page
   capture, or a proxied send). If not, run **recon** first.
 - Rules of engagement agreed: target allowlist, QPM cap, side-effect budget.
+- **Ask the user for the target agent's system prompt before anything else.** Stop and
+  ask, in so many words: *"Can you paste the target agent's system prompt (or give me a
+  file path to it)? It is what leak controls are scored against."* Save it to a file
+  (e.g. `./prompt.txt`, never committed). Auto recon rarely recovers it, and the app
+  otherwise carries only its name — so a response that recites the whole prompt matches
+  nothing and scores as a **false pass**. `assess run` refuses such an app
+  (`system_prompt_required`, exit 3). Only if the user confirms it cannot be obtained, note
+  that in the engagement record and pass `--no-system-prompt` at launch.
 
 ## Workflow
 
@@ -106,7 +114,7 @@ Registration is part of `target add`: the validated config, the application reco
 stored bridge key are written together, under one name.
 ```
 ascend target add <url|curl|har> --save-as mybot --name "<display name>" \
-  --controls <validated,ids> --qpm <roe_cap>
+  --controls <validated,ids> --qpm <roe_cap> --system-prompt "$(cat ./prompt.txt)"
 ascend target show "<display name>"        # app id, adapter, endpoint, masked key
 ```
 The bridge key (`tc-...`) is stored for you (`ascend keys list`); `assess run` resolves it
@@ -182,7 +190,12 @@ measured nothing.
   the real target answer through the bridge; thin app registered; first assessment
   running against a non-zero-probe control selection.
 
-## Two gates that are not optional
+## Three gates that are not optional
+
+**Before the run — the target's real system prompt is on the app.** Ask the user for it
+(see Preconditions). An app whose system prompt is empty or just its name is refused by
+`assess run` with `system_prompt_required`; supply it with `--system-prompt @prompt.txt`,
+or — only on the user's explicit say-so — `--no-system-prompt`.
 
 **Before the run — credentials must resolve where the relay will run.** If the config
 authenticates by `env:` reference, export the variable in the shell that starts the relay.

@@ -96,7 +96,9 @@ TOOLS: list[dict[str, Any]] = [
                        "a URL, a path to a cURL/HAR file, or an existing config name"},
             "name": {"type": "string", "description": "application name (default: derived from the URL)"},
             "system_prompt": {"type": "string", "description":
-                              "what the target is — steers which probes are relevant"},
+                              "the target's REAL system prompt, scored against to detect a leak. "
+                              "Ask the user for it before onboarding; without it the app carries "
+                              "only its name and ascend_assess_run will refuse to start"},
             "controls": {"type": "string", "description":
                          "comma-separated control ids (default: the full non-deprecated catalog)"},
             "bearer": {"type": "string", "description": "bearer token for the target"},
@@ -155,7 +157,9 @@ TOOLS: list[dict[str, Any]] = [
         },
         "schema": {
             "name": {"type": "string", "description": "application display name"},
-            "system_prompt": {"type": "string", "description": "system prompt / description (defaults to name)"},
+            "system_prompt": {"type": "string", "description":
+                              "the target's REAL system prompt — ask the user for it (defaults to "
+                              "the name, which ascend_assess_run refuses to score against)"},
             "controls": {"type": "string", "description": "comma-separated control ids (validated first)"},
             "size": {"type": "string", "enum": ["small", "medium", "large"], "description": "assessment size"},
             "qpm": {"type": "integer", "description": "queries per minute cap"},
@@ -196,7 +200,10 @@ TOOLS: list[dict[str, Any]] = [
         "name": "ascend_assess_run",
         "description": (
             "Create -> pause -> resume -> poll an assessment for an app (id or name). "
-            "Blocks until terminal unless no_wait is set."
+            "Blocks until terminal unless no_wait is set. BEFORE calling this, ask the user for "
+            "the target agent's system prompt and pass it as system_prompt: auto recon rarely "
+            "recovers it, and leak controls scored against a placeholder report false passes. "
+            "A run on an app with no real prompt fails with error code system_prompt_required."
         ),
         "cli": ["assess", "run"],
         "params": {
@@ -207,6 +214,8 @@ TOOLS: list[dict[str, Any]] = [
             "interval": {"kind": "option", "flag": "--interval"},
             "timeout": {"kind": "option", "flag": "--timeout"},
             "force": {"kind": "flag", "flag": "--force"},
+            "system_prompt": {"kind": "option", "flag": "--system-prompt"},
+            "no_system_prompt": {"kind": "flag", "flag": "--no-system-prompt"},
         },
         "schema": {
             "app": {"type": "string", "description": "app id (aapp_...) or name"},
@@ -216,6 +225,11 @@ TOOLS: list[dict[str, Any]] = [
             "interval": {"type": "integer", "description": "poll interval seconds (default 20)"},
             "timeout": {"type": "integer", "description": "poll timeout seconds (default 7200)"},
             "force": {"type": "boolean", "description": "run even if the selection generates zero probes"},
+            "system_prompt": {"type": "string", "description":
+                              "the target's real system prompt, obtained from the user (inline or "
+                              "@path); written to the app before the run"},
+            "no_system_prompt": {"type": "boolean", "description":
+                                 "run without it — only when the user confirms it cannot be obtained"},
         },
         "required": ["app", "name"],
     },

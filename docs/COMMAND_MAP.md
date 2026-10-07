@@ -331,6 +331,8 @@ create->pause->resume->poll an assessment
 | `--interval` | `INTERVAL` | `20` | seconds between status polls |
 | `--timeout` | `TIMEOUT` | `7200` | max seconds to wait for completion |
 | `--force` | — | — | run even if the selected controls would generate zero probes |
+| `--system-prompt` | `TEXT|@FILE` | — | the target's real system prompt, written to the app before the run — leak controls are scored against it. Required when the app has only its name. |
+| `--no-system-prompt` | — | — | run without the target's system prompt (leak results are unreliable) |
 | `--with-recon` | — | — | run reconnaissance first (to completion), then the assessment |
 | `--recon-only` | — | — | run reconnaissance only — no attack probes (same as `ascend recon run`) |
 | `--recon-controls` | `IDS` | — | recon control ids for --with-recon/--recon-only (default: the whole recon catalog; see `ascend recon controls`) |

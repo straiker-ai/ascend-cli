@@ -813,6 +813,59 @@ def _scope_run_controls(c, app_id, ctrl_ids, args):
     return f"scoped to {len(ctrl_ids)} control(s){was} — this is now the app's control set"
 
 
+def _ensure_system_prompt(c, app_id, ref, args):
+    """Make sure the app carries the target's REAL system prompt before a run is created.
+
+    The scorer compares responses against the app's `system_prompt` to decide whether it leaked.
+    Every create path defaults that field to the app NAME when nothing better is known, and auto
+    recon rarely recovers the real prompt — so a run scores leak controls against a one-word
+    placeholder. A response that recites the whole prompt then matches nothing and reads as a pass.
+
+    An agent driving this CLI cannot know the prompt; the person it is working for usually can.
+    So a run on a placeholder is refused off a terminal (exit 3, `system_prompt_required`) with the
+    two ways forward in the hint, and asked for on one. `--system-prompt` supplies it (inline or
+    @file) and is written to the app; `--no-system-prompt` runs on the placeholder, on the record.
+    """
+    supplied = _read_maybe_file(getattr(args, "system_prompt", None))
+    if supplied and supplied.strip():
+        try:
+            c.patch_app(app_id, {"system_prompt": supplied.strip()})
+        except Exception as e:
+            _die(f"could not write the system prompt to {ref} ({type(e).__name__}: {e})",
+                 code=EXIT_ERROR, error_code="system_prompt_write_failed")
+        return f"system prompt set on the app ({len(supplied.strip())} chars) — leak scoring uses it"
+    try:
+        app = c.get_app(app_id) or {}
+    except Exception:
+        app = {}
+    if "system_prompt" not in app:
+        return None                      # the platform did not say; nothing to judge it on
+    sp = (app.get("system_prompt") or "").strip().lower()
+    placeholders = {(app.get("name") or "").strip().lower(), str(ref or "").strip().lower()}
+    if sp and sp not in placeholders:
+        return None
+    why = (f"{ref} has no system prompt beyond its name — leak controls are scored against it, "
+           f"so a leaked prompt reads as a pass")
+    if getattr(args, "no_system_prompt", False):
+        return f"warning: {why} (running anyway: --no-system-prompt)"
+    if _stdio_is_tty() and not _wants_json():
+        print(f"  {why}.", file=sys.stderr)
+        try:
+            got = input("  paste the target's system prompt, or @path to a file "
+                        "(Enter to run without it): ").strip()
+        except EOFError:
+            got = ""
+        if not got:
+            return "warning: running without the target's system prompt — leak results are unreliable"
+        args.system_prompt = got
+        return _ensure_system_prompt(c, app_id, ref, args)
+    _die(f"{why}.\n"
+         f"  ask the person you are working for for the target's system prompt, then re-run with\n"
+         f"    --system-prompt @prompt.txt   (or inline; it is written to the app)\n"
+         f"  if it genuinely cannot be obtained, --no-system-prompt runs without it",
+         error_code="system_prompt_required")
+
+
 def _validated_control_ids(c, ids, *, force=False, say=None, what="this app"):
     """The one check behind every `--controls`. Returns the ids to apply, or dies.
 
@@ -1916,6 +1969,19 @@ def cmd_assess_run(args):
         scope_ids = _validated_control_ids(c, args.controls.split(","), force=args.force, what="this run")
 
     if len(refs) > 1:
+        if not getattr(args, "recon_only", False):
+            # Before any recon, so a missing prompt is asked for up front, not after an hour of it.
+            if getattr(args, "system_prompt", None):
+                _die("--system-prompt names ONE target's prompt; set each app's with "
+                     "`ascend app update <app> --system-prompt …` and run the fleet without it")
+            for ref in refs:                       # serially: it may stop to ask
+                try:
+                    fleet_id = _resolve_app(c, ref)
+                except SystemExit:
+                    continue                       # _assess_run_many reports it
+                _note = _ensure_system_prompt(c, fleet_id, ref, args)
+                if _note:
+                    print(f"  {_note}", file=sys.stderr)
         if getattr(args, "recon_only", False) or getattr(args, "with_recon", False):
             for ref in refs:                       # recon is one app at a time, to completion
                 _run_recon_before_assessment(c, _resolve_app(c, ref), ref, args)
@@ -1927,6 +1993,9 @@ def cmd_assess_run(args):
     args.app = refs[0]              # downstream messages expect a scalar
     if getattr(args, "recon_only", False):
         return cmd_recon_run(args)
+    _prompted = _ensure_system_prompt(c, appid, refs[0], args)
+    if _prompted:
+        print(f"  {_prompted}", file=sys.stderr)
     if getattr(args, "with_recon", False):
         _run_recon_before_assessment(c, appid, refs[0], args)
     _scoped = _scope_run_controls(c, appid, scope_ids, args)
@@ -7971,6 +8040,11 @@ def build_parser():
     s.add_argument("--no-wait", action="store_true", help="return once the run is CONFIRMED started (about 45s), not when it finishes"); s.add_argument("--interval", type=int, default=20, help="seconds between status polls")
     s.add_argument("--timeout", type=int, default=7200, help="max seconds to wait for completion")
     s.add_argument("--force", action="store_true", help="run even if the selected controls would generate zero probes")
+    s.add_argument("--system-prompt", metavar="TEXT|@FILE",
+                   help="the target's real system prompt, written to the app before the run — leak "
+                        "controls are scored against it. Required when the app has only its name.")
+    s.add_argument("--no-system-prompt", action="store_true",
+                   help="run without the target's system prompt (leak results are unreliable)")
     s.add_argument("--with-recon", action="store_true",
                    help="run reconnaissance first (to completion), then the assessment")
     s.add_argument("--recon-only", action="store_true",

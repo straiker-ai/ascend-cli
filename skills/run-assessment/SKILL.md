@@ -27,6 +27,20 @@ monitor, and read results.
 
 ## Workflow
 
+### 0. Get the target's system prompt from the user
+Before anything else, **ask the user** for the target agent's system prompt — do not
+guess it and do not rely on recon to find it. The scorer compares responses against the
+app's `system_prompt` to detect a leak; an app carrying only its name (the default) scores
+a leaked prompt as a pass. `assess run` checks this and, off a terminal, refuses with
+`{"ok": false, "error": {"code": "system_prompt_required", ...}}` (exit 3). When you see
+that, stop and ask the user — do not reach for `--no-system-prompt` on your own.
+```
+ascend --json assess run --app <app> --name "<label>" --system-prompt @prompt.txt
+```
+`--system-prompt` (inline or `@file`) is written to the app before the run is created, so
+later runs inherit it. `--no-system-prompt` runs on the placeholder; use it only when the
+user confirms the prompt cannot be obtained, and say so in the results.
+
 ### 1. Choose controls
 Start from the attack surface (use **recon** to map surface → controls). List the
 catalog, filter to what is relevant, and prefer agentic controls when the target
@@ -140,6 +154,8 @@ ascend --json assess list --app <app_or_name>
 ```
 
 ## Definition of done
+- The target's real system prompt was obtained from the user and is on the app (or the
+  user explicitly confirmed it is unavailable and the run used `--no-system-prompt`).
 - Control selection **validated** (non-zero probes, no dead ids).
 - Assessment reached a terminal status; results pulled.
 - Raw results handed to **triage-findings** — not reported directly.

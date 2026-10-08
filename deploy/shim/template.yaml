@@ -1,0 +1,26 @@
+# AWS SAM template: the shim as a Lambda with a function URL. Build from the bundle folder:
+#   sam build && sam deploy --guided     (CodeUri is this folder; handler = shim/lambda_handler.handler)
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Resources:
+  AdapterShim:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: python3.12
+      Handler: shim/lambda_handler.handler
+      CodeUri: ../
+      MemorySize: 512
+      Timeout: 120
+      Environment:
+        Variables:
+          ADAPTER_CONFIG: /var/task/adapter.json
+          SHIM_KEY: !Ref ShimKey
+      FunctionUrlConfig:
+        AuthType: NONE          # the shim checks X-Shim-Key itself
+Parameters:
+  ShimKey:
+    Type: String
+    NoEcho: true
+Outputs:
+  ShimUrl:
+    Value: !GetAtt AdapterShimUrl.FunctionUrl

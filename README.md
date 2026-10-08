@@ -107,7 +107,7 @@ flowchart TB
     subgraph adapters["Adapter framework (15)"]
         A1["direct_api · sse_stream<br/>websocket_direct"]
         A2["session_api · session_poll<br/>sentinel_stream"]
-        A3["agentforce · copilot_studio<br/>vertex_ai · slack_direct<br/>amazon_connect · scrt2_direct<br/>bedrock · browser · custom"]
+        A3["agentforce · copilot_studio<br/>vertex_ai · slack_direct<br/>amazon_connect · scrt2_direct<br/>openai_compatible · dialogflow_cx<br/>bedrock · browser · custom"]
     end
     CLI --> core
     SK --> CLI

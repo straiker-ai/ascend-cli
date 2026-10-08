@@ -135,28 +135,38 @@ def _wants_json() -> bool:
     return "--json" in sys.argv
 
 
-def _err_json(message, *, code="error", exit_code=EXIT_ERROR, hint=""):
+def _err_json(message, *, code="error", exit_code=EXIT_ERROR, hint="", diagnosis=None):
     """The machine-readable error envelope.
 
     Every failure used to be plain prose on stderr, so an agent driving `--json` could parse
     success but never failure — it had to regex English. Now stdout always carries a parseable
-    object and the human text stays on stderr.
+    object and the human text stays on stderr. `diagnosis` is the structured reason when the
+    code knows it — {reason, detail, next}: what happened, the evidence, and the one thing to do
+    next. MEASURED: given "No response frames collected" as prose, an agent blamed a bot wall and
+    spent ten minutes on manual capture; given the reason it changes one setting.
     """
     payload = {"ok": False, "error": {"code": code, "message": str(message),
                                       "hint": hint or None, "exit_code": exit_code}}
+    if isinstance(diagnosis, dict) and diagnosis:
+        payload["diagnosis"] = diagnosis
+        payload["error"]["diagnosis"] = diagnosis
     try:
         print(json.dumps(payload, default=str))
     except Exception:
         pass
 
 
-def _die(msg, code=EXIT_USAGE, *, error_code=None, hint=""):
+def _die(msg, code=EXIT_USAGE, *, error_code=None, hint="", diagnosis=None):
     text = str(msg)
     if _wants_json():
         # split a trailing hint block off the human message so the JSON stays tidy
         head = text.split("\n", 1)
         _err_json(head[0], code=error_code or ("usage" if code == EXIT_USAGE else "error"),
-                  exit_code=code, hint=hint or (head[1].strip() if len(head) > 1 else ""))
+                  exit_code=code, hint=hint or (head[1].strip() if len(head) > 1 else ""),
+                  diagnosis=diagnosis)
+    elif isinstance(diagnosis, dict) and diagnosis.get("next"):
+        print(f"  why: {diagnosis.get('reason', '')} — {diagnosis.get('detail', '')}", file=sys.stderr)
+        print(f"  next: {diagnosis['next']}", file=sys.stderr)
     print(f"error: {text}", file=sys.stderr)
     raise SystemExit(code)
 
@@ -547,6 +557,24 @@ def _lift_api_key(cfg) -> str:
     return "none"
 
 
+# Headers a browser adds for its own sake, never for the target's: client hints and fetch
+# metadata (`Sec-*`), the user agent, language/encoding negotiation, cache and connection
+# management. A capture copies them into the config faithfully — right for replaying from this
+# machine, wrong for a direct app: MEASURED 2026-09-30, the platform rejected the create with the
+# full captured set ("rejected by the upstream service", naming nothing) and accepted the same
+# spec without them. The target never needed them; the credential and content headers stay.
+_BROWSER_ONLY_HEADERS = {
+    "user-agent", "accept-language", "accept-encoding", "connection", "host", "content-length",
+    "cache-control", "pragma", "priority", "dnt", "te", "upgrade-insecure-requests",
+}
+
+
+def _target_relevant_headers(headers):
+    """Drop browser-only headers from a direct app's spec; keep what the target may check."""
+    return {k: v for k, v in (headers or {}).items()
+            if k.lower() not in _BROWSER_ONLY_HEADERS and not k.lower().startswith("sec-")}
+
+
 def _api_contract(cfg):
     """A proven adapter config as the fields a direct (`api`) application is made of."""
     out = {}
@@ -554,6 +582,14 @@ def _api_contract(cfg):
     if url:
         out["url"] = url
     headers = dict(cfg.get("headers") or {})
+    auth_block = cfg.get("auth")
+    if isinstance(auth_block, dict) and auth_block.get("type") not in (None, "none"):
+        try:
+            from dispatch import merge_auth   # the same seam validate and the relay both use
+            headers.update(merge_auth(dict(cfg)).get("headers") or {})
+        except Exception:                     # noqa: BLE001 - reported by the gate, not here
+            pass
+    headers = _target_relevant_headers(headers)   # after the merge: it re-adds the config's own set
     headers.setdefault("Content-Type", "application/json")
     out["headers"] = headers
     body = cfg.get("body") or cfg.get("request_body")
@@ -811,6 +847,39 @@ def _scope_run_controls(c, app_id, ctrl_ids, args):
              error_code="control_scope_failed")
     was = f" (was {len(before)})" if before else ""
     return f"scoped to {len(ctrl_ids)} control(s){was} — this is now the app's control set"
+
+
+def _deleted_custom_controls(c, app_id):
+    """The custom control ids in the app's registered set that no longer exist.
+
+    `assess run` without --controls runs the app's stored set. A custom control deleted since
+    the app was set up is skipped by the platform without a word, so it scores clean without
+    ever being tested — the false-pass shape again — and only the client can see it coming.
+    Under control_type "all" or a compliance standard the stored ids are not what runs, so they
+    are not checked. Returns [] when there is nothing to check against.
+    """
+    try:
+        app = c.get_app(app_id) or {}
+    except Exception:
+        return []                        # the run itself reports an app it cannot reach
+    ctype = str(app.get("control_type") or "")
+    if ctype == "all" or ctype.startswith("compliance-"):
+        return []
+    wanted = [i for i in app.get("control_ids") or [] if str(i).startswith("custom-")]
+    if not wanted:
+        return []
+    known = c.custom_control_ids()
+    if known is None:
+        return []                        # the platform cannot list them
+    return [i for i in wanted if i not in known]
+
+
+def _deleted_custom_controls_msg(missing):
+    return (f"the app's control set names custom control(s) that no longer exist: "
+            f"{', '.join(missing)}\n"
+            f"  they would be skipped and score clean without being tested\n"
+            f"  fix the set:  ascend app update <app> --controls <ids>\n"
+            f"  (--force to run anyway)")
 
 
 def _validated_control_ids(c, ids, *, force=False, say=None, what="this app"):
@@ -1141,15 +1210,33 @@ def cmd_assess_diff(args):
 
     Promotes the baseline-diff already used by `ci` into a human command — for a before/after
     readout of a fix, or two runs of the same app.
+
+    The client is built LAZILY, on the first input that actually needs the network. `ci --file`
+    and `export --file` are the documented offline path — gate and export a saved payload on a
+    runner that holds no credential — and this command is the third member of that family, but it
+    called `_client()` on line one. So the pure-file form:
+
+        ascend assess diff --baseline-file old.json --current-file new.json
+
+    exited 3 with "no token: pass --token, or export STRAIKER_PAT", having been asked to compare
+    two files it had already been handed. Measured on 1.1.4 before this change. The same rule that
+    `_resolve_assessment`'s docstring names — fix a shared rule at every call site, not one — is
+    the reason this is the constructor moving rather than a fourth copy of the file branch.
     """
     from reporting import ci as CI
-    c = _client(args)
+    client = {}
+
+    def _c():
+        if "c" not in client:
+            client["c"] = _client(args)
+        return client["c"]
 
     def _load(app, aid, filearg):
         if filearg:
             return json.loads(Path(filearg).read_text())
         if not (app and aid):
             _die("give two runs: --app X --baseline <aid> --current <aid>, or the -file forms")
+        c = _c()
         return c.get_assessment(_resolve_app(c, app), aid)
 
     base = _load(args.app, args.baseline, getattr(args, "baseline_file", None))
@@ -1159,13 +1246,20 @@ def cmd_assess_diff(args):
         _out({"ok": True, "data": diff}, args)
         return
     nf, rs, rg = diff["new_findings"], diff["resolved"], diff["regressions"]
+    nr = diff["not_retested"]
     print(f"  NEW findings   {len(nf)}")
     for f in nf: print(f"    + {f['control_id']:32} {f['severity']}")
     print(f"  RESOLVED       {len(rs)}")
     for f in rs: print(f"    - {f['control_id']:32} {f.get('severity','')}")
+    # Printed as its own bucket, never folded into RESOLVED. These controls failed in the baseline
+    # and the current run did not exercise them, so nothing about them was measured twice. Listing
+    # them under RESOLVED (which it did) reads as "fixed" and is the one wrong answer here.
+    print(f"  NOT RE-TESTED  {len(nr)}")
+    for f in nr: print(f"    ? {f['control_id']:32} {f.get('severity','')}  "
+                       f"failed in baseline, not in this run's scope — unproven")
     print(f"  REGRESSED      {len(rg)}")
     for r in rg: print(f"    ! {r['control_id']:32} {r['from_severity']} -> {r['to_severity']}")
-    if not (nf or rs or rg):
+    if not (nf or rs or rg or nr):
         print("  no change between the two runs.")
 
 
@@ -1214,6 +1308,21 @@ def cmd_controls_list(args):
     cat = c.list_controls()
     controls = _unwrap_list(cat, "controls")
     categories = _unwrap_list(cat, "categories") if isinstance(cat, dict) else []
+    # Custom controls are not in the built-in catalog; they have their own list. Show them here
+    # under a `custom` category so this command names every id --controls accepts. A platform
+    # without the list, or a failure reading it, leaves the built-in catalog as it is.
+    try:
+        custom = c.list_custom_controls()
+    except Exception as e:
+        _warn(f"custom controls could not be listed ({type(e).__name__}); showing built-in "
+              f"controls only")
+        custom = None
+    custom_ids = [r.get("id") for r in custom or [] if r.get("id")]
+    if custom_ids:
+        controls = controls + [{"id": r.get("id"), "name": r.get("name"), "category_id": "custom",
+                                "custom": True} for r in custom if r.get("id")]
+        categories = categories + [{"id": "custom", "name": "Custom", "tag": "Custom",
+                                    "control_ids": custom_ids}]
     meta = {g.get("id"): g for g in categories}
 
     if args.categories:
@@ -1259,8 +1368,10 @@ def cmd_controls_list(args):
         if x.get("agentic"):
             flags.append("agentic")
         g = meta.get(x.get("category_id"), {})
+        # A custom control's own name says more than its category, which is just "Custom".
+        label = x.get("name") if x.get("custom") else (g.get("name") or x.get("category_id"))
         line = (f"  {x.get('id'):34} {(g.get('tag') or ''):9} "
-                f"{(g.get('name') or x.get('category_id') or ''):26}")
+                f"{(label or '')[:26]:26}")
         if x.get("prefix"):
             line += f" {x['prefix']}"
         print(line.rstrip() + (("  [" + ", ".join(flags) + "]") if flags else ""))
@@ -1337,6 +1448,10 @@ def _assess_run_many(args, c, refs, scope_ids=None):
         try:
             # Scope BEFORE the bridge and the run: the control set is read at create time.
             _scope_run_controls(c, appid, scope_ids, args)
+            if scope_ids is None and not args.force:
+                missing = _deleted_custom_controls(c, appid)
+                if missing:
+                    return {"app": ref, "error": _deleted_custom_controls_msg(missing)}
             # Auto-lifecycle: ensure a bridge per bridge-type app before the run is scheduled.
             ensure = _ensure_bridge(c, appid, args=args)
             # AscendAPI.create_assessment already verifies against the server when the response
@@ -1932,6 +2047,12 @@ def cmd_assess_run(args):
     _scoped = _scope_run_controls(c, appid, scope_ids, args)
     if _scoped:
         print(f"  {_scoped}", file=sys.stderr)
+    if scope_ids is None:
+        missing = _deleted_custom_controls(c, appid)
+        if missing and not args.force:
+            _die(_deleted_custom_controls_msg(missing), error_code="unknown_control")
+        if missing:
+            _warn(f"running with deleted custom control(s) {', '.join(missing)} (--force)")
     # Auto-lifecycle: a bridge-type app needs a live relay BEFORE probes are scheduled, or the very
     # first probes go unanswered (a false pass). Ensure it up front; it self-stops when the run ends.
     ensure = _ensure_bridge(c, appid, args=args)
@@ -3021,6 +3142,20 @@ def _finalize_target_auth(cfg, args):
         cfg["auth"] = blocks[0] if len(blocks) == 1 else blocks
     inline = (cfg.get("_probe") or {}).get("inline_secret_headers") or []
     still = [h for h in inline if any(k.lower() == h.lower() for k in (cfg.get("headers") or {}))]
+    # ...unless the credential store is about to take them, which it is on every `target add`.
+    # MEASURED: this printed "stored in plaintext in the config: Authorization" and the very next
+    # line printed "credential(s) you supplied are in the store, not the config: Authorization".
+    # Two contradictory sentences about the operator's secret, the alarming one first. Only warn
+    # about a header that will still be in the file when this command finishes.
+    if still:
+        blk = cfg.get("auth")
+        secured = set()
+        for b in (blk if isinstance(blk, list) else [blk] if isinstance(blk, dict) else []):
+            if isinstance(b, dict) and b.get("mode") == "headers":
+                secured |= {k.lower() for k in (b.get("headers") or {})}
+            elif isinstance(b, dict) and b.get("name"):
+                secured.add(str(b["name"]).lower())
+        still = [h for h in still if h.lower() not in secured]
     if still:
         _warn(f"credential-shaped header(s) stored in plaintext in the config: {', '.join(still)}\n"
               f"    keep secrets out of files with an env: reference, e.g.\n"
@@ -3075,15 +3210,21 @@ def _login_for_token(args):
     import requests
     url = args.login_url
     body, form = _parse_login_body(args.login_body)
-    body = _resolve_login_refs(body, "--login-body")
-    form = _resolve_login_refs(form, "--login-body")
+    # The RAW bodies are kept. Resolving in place destroyed the very thing an `env:` reference
+    # is for: the recipe below is built by looking for values that still start with `env:`, so
+    # once they had been replaced by their plaintext nothing matched, `inputs` came out empty,
+    # and the resolved SECRET was written into the adapter config — by the exact form the tool
+    # tells operators to use to keep it out. MEASURED: `--login-body
+    # '{"password":"env:BOT_PASS"}'` put the password in the file in cleartext.
+    live_body = _resolve_login_refs(body, "--login-body")
+    live_form = _resolve_login_refs(form, "--login-body")
     print(f"[build] logging in at {url} ...", file=sys.stderr)
     try:
         method = (getattr(args, "login_method", None) or "POST").upper()
         # A GET bootstrap carries no body — sending one makes some servers 400, and there is
         # nothing to send anyway: the point of the GET is the Set-Cookie or the embedded token.
         kw = {} if method == "GET" else (
-            {"data": form} if form is not None else {"json": body})
+            {"data": live_form} if form is not None else {"json": live_body})
         r = requests.request(method, url, timeout=args.timeout,
                              verify=not getattr(args, "insecure", False),
                              allow_redirects=True, **kw)
@@ -3358,6 +3499,171 @@ def _prepare_target_auth(args):
     return _target_auth(args)
 
 
+def _replace_everywhere(obj, value, ref):
+    """Replace a secret with its reference anywhere in a nested structure.
+
+    Substring, not just whole-value: a credential turns up inside a composed header, a curl
+    line in a debug record, a URL. Exact-match-only scrubbing is how a value survives in the
+    one place nobody enumerated.
+    """
+    if not value:
+        return obj
+    if isinstance(obj, str):
+        return obj.replace(value, ref)
+    if isinstance(obj, dict):
+        return {k: _replace_everywhere(v, value, ref) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_replace_everywhere(v, value, ref) for v in obj]
+    return obj
+
+
+def _secure_operator_credentials(cfg, args):
+    """Credentials the OPERATOR handed over go to the store too, not into the config file.
+
+    `--basic USER:PASS`, `--bearer`, `--api-key`, `--header 'X-Key: v'` and
+    `ASCEND_TARGET_AUTH_FILE` all arrive through `_target_auth`, which folds them into
+    `cfg["headers"]` — and `cfg["headers"]` is written to disk. So handing the tool a password
+    wrote it into a JSON file in plain sight: `--basic` becomes `Authorization: Basic <base64>`,
+    and base64 is an encoding, not encryption. A capture was careful with credentials and the
+    path where somebody types one was not, which is the wrong way round.
+
+    Same treatment either way now: the value goes to the 0600 store, the config keeps an `env:`
+    reference, and `merge_auth` puts it back on the wire for validation and for the relay. One
+    store and one reference shape, whether the credential was watched or typed.
+
+    A live mechanism (`oauth2`/`csrf`/`derived_multihop`) is left alone — it re-authenticates,
+    which is better than anything frozen here.
+    """
+    if not isinstance(cfg, dict) or not cfg.get("headers"):
+        return cfg
+    try:
+        import target_secrets as TS
+        from runtime.discovery import classify as C
+    except Exception:                                   # noqa: BLE001
+        return cfg
+
+    existing = cfg.get("auth") if isinstance(cfg.get("auth"), dict) else None
+    if existing and existing.get("type") in ("oauth2", "csrf", "derived_multihop"):
+        return cfg
+
+    headers = dict(cfg["headers"])
+    url = cfg.get("endpoint") or cfg.get("url") or ""
+    found = {k: v for k, v in headers.items()
+             if isinstance(v, str) and v.strip() and C._looks_secret_header(k.lower(), v)}
+    if not found:
+        return cfg
+
+    refs = dict((existing or {}).get("headers") or {}) if (existing or {}).get("mode") == "headers" else {}
+    host = ""
+    try:
+        from urllib.parse import urlparse
+        host = urlparse(url).hostname or ""
+    except Exception:                                   # noqa: BLE001
+        pass
+    moved = []
+    for name, value in sorted(found.items()):
+        var = C.secret_var_name(url, name)
+        try:
+            TS.record(var, value, host=host, header=name, source="operator")
+        except Exception as exc:                        # noqa: BLE001
+            _warn(f"could not store {name}: {exc}")
+            continue
+        os.environ[var] = value
+        refs[name] = f"env:{var}"
+        headers.pop(name, None)                         # out of the config, into the store
+        moved.append(name)
+    if not moved:
+        return cfg
+    cfg["headers"] = headers
+    cfg["auth"] = {"type": "static", "mode": "headers", "headers": refs}
+    # AND EVERY OTHER COPY. Taking it out of `cfg["headers"]` is not the same as taking it out of
+    # the config: the probe keeps a record of the request it made, so `cfg["_probe"]["headers"]`
+    # held the credential too and it went to disk from there. Caught by a test that looked at the
+    # whole file rather than at the key I had in mind. A second copy is the normal way a
+    # credential survives being removed, so this replaces the value wherever it appears.
+    for name, value in sorted(found.items()):
+        ref = refs.get(name)
+        if ref and name in moved:
+            cfg = _replace_everywhere(cfg, value, ref)
+    _ok(f"credential(s) you supplied are in the store, not the config: {', '.join(moved)}")
+    if getattr(args, "basic", None):
+        # Worth saying once. This is the flag's own shape, not something this function can fix.
+        _warn("  --basic puts USER:PASS on the command line, where `ps` can read it for as "
+                    "long as the command runs. Prefer ASCEND_TARGET_AUTH_FILE, or let the agent "
+                    "collect it.")
+    return cfg
+
+
+def _store_captured_credentials(secrets, cfg, args):
+    """Put the credentials a capture SAW into the 0600 store, so its `env:` refs resolve.
+
+    This is the half that was missing for the life of the product. `classify_auth` has always
+    emitted `"value_ref": "env:DISCOVERED_TOKEN"` for a captured bearer — and `DISCOVERED_TOKEN`
+    is set by nothing, anywhere in this repository. The capture watched a signed-in human, held
+    the exact credential the target requires, wrote a reference to a variable that does not
+    exist, and threw the value away. Every target behind any authentication was therefore
+    registered in a state where it could not answer: measured at 10 leased, 10 delivered, 0
+    answered, with the endpoint rejecting each request for a header nobody had put back.
+
+    The config still never holds a secret. It holds a reference; the value goes here, 0600 and
+    tenant-scoped, and `layers.auth.resolve_secret_ref` reads it back at materialize time. Also
+    exported into THIS process, so the validation gate a few lines below proves the same
+    credentials the relay will later send.
+    """
+    if not secrets or not isinstance(cfg, dict):
+        return
+    import target_secrets as TS
+    host = ""
+    try:
+        from urllib.parse import urlparse
+        host = urlparse(cfg.get("endpoint") or cfg.get("url") or "").hostname or ""
+    except Exception:
+        pass
+    stored = []
+    for name, value in sorted(secrets.items()):
+        try:
+            TS.record(name, value, host=host, header=name, source="browser-capture")
+            os.environ[name] = value     # so step 2 validates the real contract, not a stub
+            stored.append(name)
+        except Exception as exc:         # noqa: BLE001 - one bad entry must not lose the rest
+            _warn(f"could not store {name}: {exc}")
+    if stored:
+        _ok(f"captured {len(stored)} credential(s) from the session and stored them "
+            f"({TS.store_path()}, 0600) — the config holds references, never values")
+
+
+def _report_credentials(cfg, args):
+    """Say what the capture did with the credentials it saw.
+
+    The previous message here told the operator to go and re-supply the header by hand, which
+    was the only honest thing to say while the value was being discarded. It is now wrong in the
+    direction that matters: an instruction to do work the tool has already done.
+    """
+    if not isinstance(cfg, dict):
+        return
+    # NO bare `except: pass` here, and that is deliberate. The code this replaced was wrapped in
+    # one, and it passed `args` as a first positional to a `_warn` that takes a single argument —
+    # so every withheld-credential warning it ever "printed" raised TypeError and was swallowed.
+    # The operator was told nothing, which is how a target could be registered unable to
+    # authenticate and give no sign of it until the run came back 0 answered.
+    if True:
+        _held = cfg.pop("_withheld_headers", None)
+        _have = cfg.pop("_captured_credentials", None)
+        _unused = cfg.pop("_captured_credentials_unused", None)
+        if _have:
+            _ok(f"authenticating as the captured session: {', '.join(sorted(_have))}")
+            # Said every time, because it is the failure this cannot fix and the one an operator
+            # will otherwise diagnose as a tool bug halfway through a long run.
+            _warn("  these are SESSION credentials — they expire. If a long run starts "
+                        "failing partway, re-capture the target.")
+        elif _held:
+            _warn(f"withheld from the config (credential-shaped): {', '.join(_held)}")
+            _warn("  re-supply with --header 'Name: value' or --bearer / --api-key; "
+                        "the names are recorded, never the values.")
+        if _unused:
+            _warn(f"  {_unused.get('why')}")
+
+
 def _apply_login_auth(cfg, args):
     """Attach the repeatable login recipe recorded by `_login_for_token` to a built config.
 
@@ -3479,6 +3785,8 @@ def _finish_discovery(cfg, args, *, source, browser_recipe=None, response_sample
     cfg = _stamp_cdp(cfg, args)
     auth_headers, auth_query = _target_auth(args)
     _bake_auth(cfg, auth_headers, auth_query)
+    # ...and straight back out of the config into the 0600 store.
+    cfg = _secure_operator_credentials(cfg, args)
     _bake_body_fields(cfg, _body_fields(args))   # body-carried key/tenant must persist too
     cfg = _finalize_target_auth(cfg, args)
     # Attach the REPEATABLE login recipe, not just the one token the exchange happened to mint.
@@ -3520,13 +3828,27 @@ def _finish_discovery(cfg, args, *, source, browser_recipe=None, response_sample
         # the caller IS a live browser (TLS fingerprint, JS challenge, connection state). The error
         # body can even say "Authorization header not found"; that is the vendor's misleading
         # phrasing, not the real cause. The honest fix is to drive a real browser per probe.
-        if forbidden and browser_recipe:
+        # ANY replay failure, not just 403. MEASURED on a large telco's support widget: it binds
+        # `conversationID`, `encryptionKey` and `idempotencyKey` to one live browser session,
+        # each minted once and consumed once, so a byte-identical replay comes back **400 Bad
+        # Request** — not 403. The fallback was keyed to 403/Forbidden, so the one target that
+        # most needed a browser adapter never got offered one: the run registered a direct_api
+        # config and measured 10 delivered, 0 answered.
+        #
+        # The reasoning does not depend on the status code. We drove a real browser during
+        # capture and it ANSWERED; the replay of that same exchange does not. Whatever the code,
+        # the thing that works is the browser, so build the adapter that uses one. A 401 is the
+        # exception and stays out: that really can be a missing credential, and there is a
+        # credential path for it that does not cost a browser per probe.
+        if browser_recipe and not unauth:
+            why = "anti-automation" if forbidden else f"replay refused ({err.strip()[:60]})"
+            print(f"[build] HTTP replay failed — {why}", file=sys.stderr)
             # We already drove a real browser during capture and it worked — so instead of telling
             # the operator "use the browser adapter", BUILD it from what the capture did, and prove
             # it live. This is the whole point: a --url target that refuses HTTP replay still gets a
             # working adapter, automatically.
-            print("[build] HTTP replay refused (anti-automation) — building a BROWSER adapter from "
-                  "the capture and proving it live ...", file=sys.stderr)
+            print("[build] building a BROWSER adapter from the capture and proving it live ...",
+                  file=sys.stderr)
             return _finish_browser_adapter(browser_recipe, args, source, V)
         if forbidden and source in ("url", "har", "curl"):
             hint = ("\n  This target ACCEPTED the request from your browser but REFUSES it replayed\n"
@@ -4009,6 +4331,30 @@ def _free_config_name(base, cfg=None):
     return f"{base}-{int(time.time())}"
 
 
+def _curl_text(value: str) -> str:
+    """The curl command itself, whether it arrived as a file, on stdin, or inline.
+
+    `--curl` read a PATH and nothing else, while the probe's own failure hint told the operator
+    to "Send one working request example — `--curl 'curl -X POST … -d {…}'`" — inline. Following
+    the tool's own advice produced `could not tell what 'curl -X POST https://… -H "Cont…' is`.
+
+    MEASURED with the agent driving: handed a target whose shape could not be derived, it did the
+    natural thing and passed the exact request as a curl string, twice, and was refused both
+    times. The affordance the error recommends has to exist, so a value that plainly IS a curl
+    command is taken as one.
+    """
+    raw = (value or "").strip()
+    if raw == "-":
+        return sys.stdin.read()
+    if raw.startswith("curl ") or ("curl " in raw[:200] and "\n" in raw):
+        return raw
+    try:
+        return Path(os.path.expanduser(raw)).read_text()
+    except OSError as exc:
+        _die(f"--curl: {raw[:60]!r} is neither a readable file nor a curl command ({exc})",
+             hint="pass a path, '-' for stdin, or the command itself: --curl 'curl -X POST ...'")
+
+
 def _write_named_config(cfg, cfg_name, *, exact=False, quiet=False):
     """Write a discovered config and return (path, name) — the name may differ from the one asked
     for, so callers MUST use what comes back.
@@ -4216,6 +4562,134 @@ def _response_path_from_replay(cfg, args):
         return None
 
 
+# ----------------------------------------------------------------------------- cloud runtimes
+# A managed cloud runtime has no URL to probe and no browser traffic to capture: it is addressed
+# by a resource identifier and reached through a signed SDK call. The adapters for both were
+# already written, registered and tested -- `bedrock` in agentcore mode
+# (runtime/adapters/bedrock.py, boto3 doing the SigV4 signing and the eventstream decoding) and
+# `vertex_ai` (runtime/adapters/vertex_ai.py, ADC token per request against :streamQuery). What
+# was missing was the one link: nothing could DERIVE either config, so the identifier the
+# operator's own console shows them died on arrival:
+#
+#     ascend target add arn:aws:bedrock-agentcore:us-east-1:123:runtime/saige
+#       -> exit 2, "is not a URL, a file, or a known config"
+#
+# That is the same gap this repo already closed for WebSockets (tests/test_ws_onboarding.py):
+# an adapter with no way in is an adapter nobody can use.
+#
+# Neither identifier is parsed for decoration. The ARN carries its REGION and the Vertex resource
+# name carries its LOCATION, so neither is ever asked for -- asking for a value the input already
+# contains is the question this whole flow exists to stop asking.
+_AGENTCORE_ARN_RE = re.compile(
+    r"^arn:(?P<partition>aws[a-z0-9-]*):bedrock-agentcore:"
+    r"(?P<region>[a-z]{2}(?:-[a-z]+)+-\d+):(?P<account>\d{1,12}):"
+    r"runtime/(?P<name>[A-Za-z0-9_.-]+)"
+    r"(?:/runtime-endpoint/(?P<qualifier>[A-Za-z0-9_.-]+))?$", re.IGNORECASE)
+
+# `projects/<p>/locations/<loc>/reasoningEngines/<id>`, on its own or inside the :streamQuery URL
+# a console copies. Matched anywhere in the string so both spellings reach the same config.
+_VERTEX_RESOURCE_RE = re.compile(
+    r"(?P<resource>projects/(?P<project>[^/\s]+)/locations/(?P<location>[a-z0-9-]+)"
+    r"/reasoningEngines/(?P<engine>[^/:\s?#]+))", re.IGNORECASE)
+
+
+def _parse_agentcore_arn(thing):
+    """Split a Bedrock AgentCore runtime ARN into the fields the adapter takes, or None.
+
+    An AgentCore endpoint ARN may carry the qualifier as a suffix
+    (`.../runtime/<name>/runtime-endpoint/<qualifier>`). `invoke_agent_runtime` takes the runtime
+    ARN and the qualifier as SEPARATE arguments, so the suffix is split off here rather than
+    passed through whole.
+    """
+    m = _AGENTCORE_ARN_RE.match(str(thing or "").strip())
+    if not m:
+        return None
+    g = m.groupdict()
+    return {"partition": g["partition"], "region": g["region"].lower(), "account": g["account"],
+            "name": g["name"], "qualifier": g.get("qualifier"),
+            "runtime_arn": (f"arn:{g['partition']}:bedrock-agentcore:{g['region'].lower()}"
+                            f":{g['account']}:runtime/{g['name']}")}
+
+
+def _parse_vertex_resource(thing):
+    """Split a Vertex AI Agent Engine reference into its parts plus a :streamQuery endpoint, or None.
+
+    Accepts the bare resource name or any URL containing it. A URL's own scheme, host and API
+    version are KEPT -- a target pinned to `v1beta1` stays there -- and only the method suffix is
+    normalised to `:streamQuery`, which is the one ADK agents on Agent Engine expose (`:query`
+    exists but is not what the adapter reads).
+    """
+    s = str(thing or "").strip()
+    m = _VERTEX_RESOURCE_RE.search(s)
+    if not m:
+        return None
+    g = m.groupdict()
+    prefix = s[:m.start()]
+    if prefix:
+        # Only a URL may carry a prefix; anything else is a path that happens to read like one.
+        if not prefix.lower().startswith(("http://", "https://")):
+            return None
+        base = prefix
+    else:
+        if s != g["resource"]:                       # trailing junk after the resource name
+            return None
+        base = f"https://{g['location'].lower()}-aiplatform.googleapis.com/v1/"
+    return {"project": g["project"], "location": g["location"].lower(), "engine": g["engine"],
+            "resource": g["resource"], "endpoint": f"{base}{g['resource']}:streamQuery"}
+
+
+def _config_from_agentcore_arn(arn, *, qualifier=None, response_path=None):
+    """The `bedrock` agentcore config for this ARN — the one runtime/adapters/bedrock.py runs.
+
+    No AWS credential is written here and none is sent to Straiker. boto3 signs each call from
+    the standard chain (env AWS_* / profile / instance role) in whatever process runs the
+    adapter, which for this adapter is always the local relay.
+    """
+    parts = _parse_agentcore_arn(arn)
+    if not parts:
+        raise ValueError(
+            f"{str(arn)!r} is not a Bedrock AgentCore runtime ARN. Expected "
+            f"arn:aws:bedrock-agentcore:<region>:<account>:runtime/<name>"
+            f"[/runtime-endpoint/<qualifier>]")
+    cfg = {
+        "_comment": ("AWS Bedrock AgentCore runtime, derived from its ARN. The relay signs every "
+                     "call (SigV4, via boto3) with the AWS credentials in ITS OWN environment — "
+                     "env AWS_* / profile / instance role. Nothing secret is stored in this file."),
+        "adapter": "bedrock",
+        "mode": "agentcore",
+        "region": parts["region"],
+        "runtime_arn": parts["runtime_arn"],
+        # An explicit qualifier beats the one embedded in an endpoint ARN, which beats the
+        # adapter's DEFAULT. A flag that does not win over the value it exists to override is
+        # indistinguishable from a flag that was dropped.
+        "qualifier": qualifier or parts["qualifier"] or "DEFAULT",
+    }
+    if response_path:
+        cfg["response_path"] = response_path
+    return cfg
+
+
+def _config_from_vertex_resource(ref):
+    """The `vertex_ai` config for an Agent Engine resource name or its URL.
+
+    Auth is Application Default Credentials in the relay's own environment (`gcloud auth
+    application-default login`, or a service account on the host). Nothing is written here.
+    """
+    parts = _parse_vertex_resource(ref)
+    if not parts:
+        raise ValueError(
+            f"{str(ref)!r} is not a Vertex AI Agent Engine reference. Expected "
+            f"projects/<project>/locations/<location>/reasoningEngines/<id>, or the "
+            f":streamQuery URL that contains it")
+    return {
+        "_comment": ("Vertex AI Agent Engine (ADK) via :streamQuery. The relay authenticates with "
+                     "the Google credentials in ITS OWN environment (gcloud ADC, or sa_key_file "
+                     "set by hand). Nothing secret is stored in this file."),
+        "adapter": "vertex_ai",
+        "endpoint": parts["endpoint"],
+    }
+
+
 def cmd_onboard(args):
     """Zero to a running assessment in one command.
 
@@ -4233,6 +4707,12 @@ def cmd_onboard(args):
         name = Path(args.har).stem            # was omitted: two --har runs both became "target"
     elif getattr(args, "curl", None):
         name = Path(args.curl).stem if args.curl != "-" else "target"
+    elif getattr(args, "arn", None):
+        # The runtime's own name, not "target": two AgentCore runtimes onboarded from one machine
+        # must not both derive the same config name and silently overwrite each other.
+        name = (_parse_agentcore_arn(args.arn) or {}).get("name") or "agentcore"
+    elif getattr(args, "vertex", None):
+        name = "agent-engine-" + ((_parse_vertex_resource(args.vertex) or {}).get("engine") or "x")
     else:
         name = ((getattr(args, "api", None) or getattr(args, "ws", None) or args.url
                  or args.config or "target")
@@ -4261,7 +4741,35 @@ def cmd_onboard(args):
                           f"  edit send_prompt() to talk to your target, then:\n"
                           f"    ascend target add --module {path} --name '<your target>'"))
         return
-    if getattr(args, "module", None):
+    if getattr(args, "arn", None):
+        # A managed runtime states its own address completely. There is nothing to probe and
+        # nothing to capture: the config is derived from the ARN and proven in step 2 like any
+        # other, by calling the real runtime.
+        _step(1, total, "wiring the Bedrock AgentCore runtime from its ARN")
+        try:
+            cfg = _config_from_agentcore_arn(
+                args.arn, qualifier=getattr(args, "qualifier", None),
+                response_path=getattr(args, "response_path", None))
+        except ValueError as e:
+            _die(str(e), error_code="unknown_source",
+                 hint="ascend target add arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/my_agent")
+        _ok(f"bedrock agentcore · {cfg['runtime_arn'].rsplit('/', 1)[-1]} · region {cfg['region']} "
+            f"(read from the ARN) · qualifier {cfg['qualifier']}")
+        _ok("probes are signed locally by the relay with the AWS credentials in ITS environment; "
+            "none are written to the config or sent to Straiker")
+        cfg_path, cfg_name = _write_named_config(cfg, cfg_name, exact=named_exactly)
+    elif getattr(args, "vertex", None):
+        _step(1, total, "wiring the Vertex AI Agent Engine from its resource name")
+        try:
+            cfg = _config_from_vertex_resource(args.vertex)
+        except ValueError as e:
+            _die(str(e), error_code="unknown_source",
+                 hint="ascend target add projects/<project>/locations/us-central1/reasoningEngines/<id>")
+        _ok(f"vertex_ai · {cfg['endpoint']} (location read from the resource name)")
+        _ok("the relay authenticates with ITS OWN Google credentials (gcloud ADC); "
+            "none are written to the config or sent to Straiker")
+        cfg_path, cfg_name = _write_named_config(cfg, cfg_name, exact=named_exactly)
+    elif getattr(args, "module", None):
         _step(1, total, f"loading the custom adapter {args.module}")
         cfg = _config_from_module(args.module, timeout_ms=getattr(args, "timeout_ms", None),
                                   target_hint=getattr(args, "api", None) or args.url)
@@ -4278,14 +4786,16 @@ def cmd_onboard(args):
         _step(1, total, f"{prof.label} host — reading the contract it publishes")
         auth_headers, _q = _target_auth(args)
         try:
+            import inspect as _inspect
+            _extra = {"url": args.api} if "url" in _inspect.signature(prof.build).parameters else {}
             cfg, facts = prof.build(P.origin_of(args.api), workspace=getattr(args, "workspace", None),
                                     headers=auth_headers or {}, body_fields=_body_fields(args) or {},
                                     bearer=getattr(args, "bearer", None),
-                                    verify=not getattr(args, "insecure", False))
+                                    verify=not getattr(args, "insecure", False), **_extra)
         except ValueError as exc:
             _die(str(exc), error_code="target_needs_input",
                  hint=f"ascend target inspect {args.api}")
-        _ok(f"workspace {facts['workspace']} · {len(facts['tools'])} tools · answer at message")
+        _ok(f"workspace {facts['workspace']} · {len(facts['tools'])} tools · adapter {cfg.get('adapter')}")
         # What the target says about itself beats anything typed from memory.
         if not args.name and not chosen:
             args.name = facts["name"]
@@ -4340,7 +4850,7 @@ def cmd_onboard(args):
     elif getattr(args, "curl", None):
         _step(1, total, f"reading the request from {args.curl}")
         from runtime.discovery.importers import from_curl, CurlParseError
-        text = sys.stdin.read() if args.curl == "-" else Path(args.curl).read_text()
+        text = _curl_text(args.curl)
         try:
             cfg = from_curl(text, prompt_hint=args.prompt_hint)
         except CurlParseError as e:
@@ -4361,7 +4871,7 @@ def cmd_onboard(args):
         _step(1, total, f"capturing the contract from {args.url or args.har}")
         if args.url:
             _guard_egress(args.url, args)
-            from runtime.discovery.capture import capture_url
+            from runtime.discovery.capture import capture_url, capture_diagnosis
             ev = capture_url(args.url, prompt=args.prompt, headless=args.headless,
                              settle_s=args.settle, manual=args.manual,
                              cdp=getattr(args, "cdp", None))
@@ -4384,7 +4894,8 @@ def cmd_onboard(args):
                      f"  the raw capture is saved at {_saved_capture} — inspect it or pass it "
                      "back with --har\n"
                      "  try:  --settle 15 | --manual | --har <file> | copy configs/example-*.json",
-                     code=EXIT_ERROR)
+                     code=EXIT_ERROR, error_code="capture_no_prompt",
+                     diagnosis=ev.get("diagnosis") or capture_diagnosis(ev, args.url))
         else:
             ev = C.load_har(args.har, prompt_sent=args.prompt)
         res = C.classify_evidence(ev)
@@ -4394,22 +4905,70 @@ def cmd_onboard(args):
         _ok(f"transport {t.get('value')} (confidence {t.get('confidence')})")
         if res.get("unresolved"):
             _ok(f"unresolved layers: {res['unresolved']}")
+        # OFFLINE SELF-CHECK, before anything spends a live probe: does the derived answer field
+        # reproduce the reply the capture shows? Reported, never fatal — a wiring that works today
+        # is never second-guessed; one whose field reads a status line is named here instead of
+        # scoring every probe against the wrong text.
+        try:
+            from runtime.discovery.verify import verify_config
+            _cc = verify_config(cfg, ev)
+        except Exception:  # noqa: BLE001
+            _cc = {"ok": True, "checked": False}
+        if _cc.get("checked"):
+            if _cc.get("ok"):
+                _ok(f"answer field {_cc.get('field')!r} reproduces the captured reply (overlap {_cc.get('overlap')})")
+            else:
+                _ok(f"WARNING answer field check: {_cc.get('detail')}")
+                _ok(f"   next: {_cc.get('next')}")
+        setattr(args, "_capture_check", _cc if _cc.get("checked") else None)
+        # ADVISORY: what the response envelope looks like and where its reply usually sits. Never
+        # mutates the config — a note the operator and the model can use, and a patch suggestion
+        # when derivation found no response path at all.
+        try:
+            from runtime.discovery.frameworks import recognize
+            _fw = recognize(ev)
+        except Exception:  # noqa: BLE001
+            _fw = {"framework": None}
+        if _fw.get("framework"):
+            _ok(f"looks like a {_fw['framework']} — reply usually at {_fw.get('response_path')!r} "
+                f"(confidence {_fw.get('confidence')})")
+            setattr(args, "_framework", _fw)
+        # THE HINT BECOMES A FIX WHEN THE CAPTURE PROVES IT. A derived answer field that failed its
+        # self-check is replaced by the shape's path only when replaying that path over the
+        # captured reply reproduces it; otherwise the path is offered as a patch, never applied.
+        try:
+            from runtime.discovery.verify import shape_fix
+            _sf = shape_fix(cfg, ev, _cc, _fw)
+        except Exception:  # noqa: BLE001
+            _sf = {"config": cfg, "fix": None, "suggestion": None}
+        if _sf.get("fix"):
+            cfg = _sf["config"]
+            _ok(f"answer field corrected from the envelope shape: {_sf['fix']['to']!r} reproduces the captured "
+                f"reply (overlap {_sf['fix']['overlap']}); derivation had {_sf['fix']['from']!r}")
+            setattr(args, "_capture_check", _sf["fix"].get("check"))
+            setattr(args, "_shape_fix", {k: v for k, v in _sf["fix"].items() if k != "check"})
+        elif _sf.get("suggestion"):
+            _ok(f"suggested patch: response_path={_sf['suggestion']['set']['response_path']!r} — {_sf['suggestion']['why']}")
+            setattr(args, "_suggested_patch", _sf["suggestion"])
+        # BEFORE the config is written and before anything validates: the config carries `env:`
+        # references and this is what they resolve against.
+        _store_captured_credentials(res.get("secrets") or {}, cfg, args)
         cfg_path, cfg_name = _write_named_config(cfg, cfg_name, exact=named_exactly)
 
     # Credentials are deliberately NOT baked into a config on disk, so say which ones were
     # withheld. Dropping a header the target requires and staying quiet about it just moves the
     # confusion: the config then 401s for no visible reason, which reads like a tool bug.
     try:
-        _held = cfg.pop("_withheld_headers", None)
-        if _held:
-            _warn(f"withheld from the config (credential-shaped): {', '.join(_held)}")
-            _warn("  re-supply with --header 'Name: value' or --bearer / --api-key, "
-                        "or set the value in the config yourself; the names are recorded, "
-                        "never the values.")
+        pass
     except Exception:
         pass
-
+    # Operator-supplied credentials go to the store too, not into the file. This sits INSIDE
+    # the compared window below: the re-write only fires when the config changed, and with the
+    # securing outside it a `--basic` target (no login recipe, so nothing else changes) kept the
+    # base64 of the password on disk. Encoded is not protected.
     _before_login = json.dumps(cfg, sort_keys=True, default=str)
+    cfg = _secure_operator_credentials(cfg, args)
+    _report_credentials(cfg, args)
     cfg = _apply_login_auth(cfg, args)
     if json.dumps(cfg, sort_keys=True, default=str) != _before_login and cfg_path:
         # Every source branch above writes the config as soon as it derives one, and this call
@@ -4583,6 +5142,10 @@ def cmd_onboard(args):
         _out({"target": label, "app_id": app_id, "config": cfg_name, "adapter": adapter,
               "path": str(cfg_path),
               "validated": True, "transport": via, "transport_reason": via_why,
+              **({"capture_check": getattr(args, "_capture_check", None)} if getattr(args, "_capture_check", None) else {}),
+              **({"framework_hint": getattr(args, "_framework", None)} if getattr(args, "_framework", None) else {}),
+              **({"shape_fix": getattr(args, "_shape_fix", None)} if getattr(args, "_shape_fix", None) else {}),
+              **({"suggested_patch": getattr(args, "_suggested_patch", None)} if getattr(args, "_suggested_patch", None) else {}),
               "reused": reused, "needs_bridge": via == "bridge",
               "key_stored": via == "bridge"}, args,
              human=(f"\ntarget '{label}' is ready\n"
@@ -4653,6 +5216,28 @@ def _detect_source(thing):
     if s == "-":
         return "curl", s                                  # a request piped in on stdin
     low = s.lower()
+    if low.startswith("arn:"):
+        # A managed runtime is addressed by an ARN. Only the agentcore shape can be wired from
+        # the identifier alone: a classic Bedrock Agent also needs its ALIAS id, which its ARN
+        # does not contain, so that one is NAMED as the gap rather than half-built into a config
+        # that could only fail at the first probe.
+        if _parse_agentcore_arn(s):
+            return "arn", s
+        if ":bedrock:" in low and (":agent/" in low or ":agent-alias/" in low):
+            return None, (f"{s} is a classic Bedrock Agent ARN, which does not contain the agent "
+                          f"ALIAS the InvokeAgent call needs. Write a config with adapter "
+                          f"'bedrock', mode 'agent', agent_id and agent_alias_id "
+                          f"(configs/example-bedrock.json), then: ascend target add <name>")
+        return None, (f"{s} is an ARN, but not one this can assess. The supported form is "
+                      f"arn:aws:bedrock-agentcore:<region>:<account>:runtime/<name>")
+    if _parse_vertex_resource(s):
+        # A Vertex Agent Engine resource name, or the :streamQuery URL that contains it. The URL
+        # form used to fall through to the HTTP branch and be probed like an ordinary endpoint,
+        # which builds a `direct_api` config around whatever bearer token happened to be on hand
+        # -- an ADC token expires in an hour, so that config dies part-way through a long run.
+        # classify.py has mapped `:streamquery` to `vertex_ai` for HAR evidence all along; this
+        # makes the URL path agree with it.
+        return "vertex", s
     if low.startswith(("ws://", "wss://")):
         # A socket is probeable -- connect, send a frame, read one back -- but it used to fall
         # past this check to the file test and die with "is not a URL, a file, or a known
@@ -4718,13 +5303,15 @@ def cmd_target_add(args):
                  error_code="spec_needs_build",
                  hint=(f"ascend adapter build --spec {src} --out mybot\n"
                        f"  then:  ascend target add mybot"))
-        if any(getattr(args, f, None) for f in ("api", "ws", "url", "curl", "har", "spec", "config", "module")):
+        if any(getattr(args, f, None) for f in ("api", "ws", "url", "curl", "har", "spec",
+                                                "config", "module", "arn", "vertex")):
             _die("give either a source argument or an explicit source flag, not both")
         setattr(args, flag, value)
         _say(args, f"detected {flag} source: {value}")
-    elif not any(getattr(args, f, None) for f in ("api", "ws", "url", "curl", "har", "spec", "config", "module", "scaffold")):
-        _die("nothing to onboard: pass a URL, a cURL/HAR file, or a saved config",
-             hint="ascend target add https://host/chat")
+    elif not any(getattr(args, f, None) for f in ("api", "ws", "url", "curl", "har", "spec",
+                                                  "config", "module", "scaffold", "arn", "vertex")):
+        _die("nothing to onboard: pass a URL, a cURL/HAR file, a cloud-runtime identifier, or a "
+             "saved config", hint="ascend target add https://host/chat")
     # `--run` continues into the assessment; otherwise stop once the target is registered.
     args.stop_after_register = not getattr(args, "run", False)
     return cmd_onboard(args)
@@ -5878,6 +6465,49 @@ def cmd_relay_stop(args):
         for r in out))
 
 
+def cmd_bridge_grade(args):
+    """What the platform's score cannot see: whether the probes were answered, and what the
+    target actually said. Reads the relay's recording on this machine (bridge start records by
+    default). Numbers only; the exchanges themselves are `bridge logs` / the recording file."""
+    from runtime import evidence_grade as G
+    from runtime import supervisor as S
+    who = str(args.app or "").strip()
+    path = Path(os.path.expanduser(who))
+    if not path.is_file():
+        st = S.paths_for(who)["status"]
+        rec = {}
+        try:
+            rec = json.loads(st.read_text())
+        except (OSError, ValueError):
+            pass
+        cand = rec.get("capture") if isinstance(rec, dict) else None
+        path = Path(cand) if cand else S.relays_dir() / f"{S._safe(who)}.capture.jsonl"
+    if not path.is_file():
+        _die(f"no recording for {who}: a relayed app records here only while its relay ran on this machine "
+             f"(bridge start records by default); for a direct app read the Console export",
+             code=EXIT_ERROR, error_code="no_recording",
+             diagnosis={"reason": "no_recording", "detail": f"looked for {path}",
+                        "next": "start the relay from this machine (it records), or export the assessment CSV from the Console"})
+    sp = None
+    if args.system_prompt_file:
+        try:
+            sp = Path(os.path.expanduser(args.system_prompt_file)).read_text(encoding="utf-8")
+        except OSError as e:
+            _die(f"cannot read --system-prompt-file: {e}")
+    g = G.grade(path, marker=args.marker, system_prompt=sp)
+    if _wants_json():
+        print(json.dumps({"ok": True, **{k: v for k, v in g.items() if k != "per_probe"},
+                          "per_probe": g.get("per_probe", [])}, default=str))
+        return
+    _ok(f"recording {path}")
+    _ok(f"{g['answered']} of {g['probes']} probes answered; {g['failed']} failed; {g['unanswered']} without a result")
+    if g.get("failures_by_reason"):
+        for k, n in g["failures_by_reason"].items():
+            _ok(f"  {n} × {k}")
+    _ok(f"leak basis: {g['leak_basis']}; replies flagged: {g['leak_replies']}")
+    print(f"  reading: {g['reading']}")
+
+
 def cmd_relay_logs(args):
     import supervisor as S
     app_id = args.app if str(args.app).startswith("aapp_") else _resolve_app(_client(args), args.app)
@@ -6974,7 +7604,7 @@ def cmd_discover(args):
 
     if getattr(args, "curl", None):
         from runtime.discovery.importers import from_curl, CurlParseError
-        text = sys.stdin.read() if args.curl == "-" else Path(args.curl).read_text()
+        text = _curl_text(args.curl)
         try:
             cfg = from_curl(text, prompt_hint=args.prompt_hint)
         except CurlParseError as e:
@@ -7115,6 +7745,38 @@ def _describe_shape(result):
     if not out:
         out.append("Working out the request/response shape...")
     return out
+
+
+def cmd_adapter_bundle(args):
+    """Write the hand-over bundle for a config: the adapter as a reusable, hostable artifact."""
+    from bundle import write_bundle  # noqa: PLC0415  (runtime/ on sys.path)
+    path = resolve_config_path(args.config)
+    cfg = json.loads(Path(path).read_text())
+    name = Path(path).stem
+    app_id = getattr(args, "app", None) or ""
+    if not app_id:
+        try:
+            import creds as C  # noqa: PLC0415
+            for aid, rec in (C.load_all() or {}).items():
+                if (rec.get("app_name") or "") == name:
+                    app_id = aid
+                    break
+        except Exception:  # noqa: BLE001
+            app_id = ""
+    out = Path(args.out) if getattr(args, "out", None) else Path("handover") / name
+    evidence = {}
+    disc = cfg.get("_discovery") or {}
+    if isinstance(disc, dict):
+        evidence = {k: disc.get(k) for k in ("source", "captured_at", "har", "capture") if disc.get(k)}
+    manifest = write_bundle(cfg, out, app_name=name, app_id=app_id, tenant=getattr(args, "tenant_id", "") or "",
+                            evidence=evidence, vendor_runtime=not getattr(args, "no_vendor", False))
+    if getattr(args, "json", False):
+        _out({"ok": True, "path": str(out), "manifest": manifest})
+        return
+    print(f"hand-over bundle for {name}: {out}")
+    print(f"  adapter {manifest['adapter']} · hash {manifest['hash']} · secrets to supply: "
+          f"{', '.join(manifest['secrets_required']) or 'none'}")
+    print(f"  relay/ (bridge container), shim/ (POST /chat service + Lambda), vendor/ (runtime @ {manifest['runtime']['cli_commit']})")
 
 
 def cmd_adapter_validate(args):
@@ -7318,12 +7980,40 @@ def cmd_ci(args):
     # via the v3 API), but an explicit flag on the command line always wins.
     import policy as P
     pol = P.load(getattr(args, "policy", None))
+    # WHICH policy block applies is decided HERE, and it used to be decided only on the live path.
+    # `app_name` stayed None for every `--file` invocation, so `P.thresholds()` fell through to the
+    # `default` block and a per-app block was discarded in silence. Measured on one real 33-finding
+    # payload with one policy file, one minute apart:
+    #
+    #   ci --app 'POV Internal Support Agent (non-prod)' --assessment ...  -> low / True  -> exit 2
+    #   ci --file results.json                                             -> critical / False -> exit 0
+    #
+    # Same assessment, same policy, opposite verdicts -- and the offline one is the path this
+    # repo's own CI guidance tells people to gate on, because it is the one that needs no
+    # credential. Nothing in the output said a block had been skipped: the CLI printed the
+    # thresholds it chose, which read as perfectly deliberate.
+    #
+    # Offline there is no app record to read a name from -- the saved payload carries
+    # `application_id`, never the app's name -- so `--app` is the only source, and it is accepted
+    # in `--file` mode for exactly this. `--app` there selects a POLICY BLOCK; it never causes a
+    # network call (the `else` branch above is still the only thing that builds a client).
     app_name = None
-    if pol and not args.file:
-        try:
-            app_name = (c.get_app(_resolve_app(c, args.app)) or {}).get("name")
-        except Exception:
+    if pol:
+        if not args.file:
+            try:
+                app_name = (c.get_app(_resolve_app(c, args.app)) or {}).get("name")
+            except Exception:
+                app_name = args.app
+        elif args.app:
             app_name = args.app
+    # A per-app block that does not apply is now said out loud. Silence was the actual defect: a
+    # team commits `apps: {...}` to TIGHTEN the gate, and the tightening is the part that vanished.
+    _blocks = sorted((pol.get("apps") or {}).keys()) if pol else []
+    if _blocks and app_name not in _blocks:
+        _named = f"--app {app_name!r} matches no block" if app_name else "no --app was given"
+        print(f"  policy: per-app block(s) NOT applied ({', '.join(_blocks)}) — {_named}; "
+              f"gating on the 'default' block. Pass --app '<name exactly as in the policy>' "
+              f"to apply one.", file=sys.stderr)
     th = P.thresholds(pol, app_name) if pol else {}
     explicit = {a.split("=")[0] for a in sys.argv if a.startswith("--fail-on-severity")}
     fail_on_sev = args.fail_on_severity if (explicit or not th) else th["fail_on_severity"]
@@ -7344,6 +8034,9 @@ def cmd_ci(args):
         except Exception:
             pass
     res = CI.gate(cur, base, fail_on_severity=fail_on_sev, fail_on_new=fail_on_new,
+                  # A baseline finding this run never exercised is unproven, and unproven is not
+                  # fixed. Opting out is explicit because the default silence was the bug.
+                  fail_on_unproven=(not args.allow_unproven),
                   policy=pol, app_name=app_name,
                   # None means "not passed" -> use the derived floor; 0 explicitly disables.
                   min_probes=(_floor if args.min_probes is None else args.min_probes))
@@ -7564,7 +8257,12 @@ def _add_target_auth_args(s):
 
 def _add_onboard_args(s, *, require_source, cloud_sources=False):
     """Every argument the onboard flow reads. Shared by `onboard` and `target add` so the two
-    cannot drift apart — `target add` takes the same evidence, it just stops once registered."""
+    cannot drift apart — `target add` takes the same evidence, it just stops once registered.
+
+    `cloud_sources` adds the managed-runtime identifiers, and only `target add` asks for them.
+    Same rule as `--via`: the legacy `onboard` form's help text is what customers script against,
+    and tests/test_back_compat.py fails the build if a single byte of it moves.
+    """
     src = s.add_mutually_exclusive_group(required=require_source)
     src.add_argument("--api", metavar="URL",
                      help="an HTTP API endpoint (or base URL) — one probe, no browser. The "
@@ -7578,6 +8276,19 @@ def _add_onboard_args(s, *, require_source, cloud_sources=False):
     src.add_argument("--config", metavar="NAME|PATH",
                      help="a config already on disk — a name in the config dir, or a path to a "
                           ".json file anywhere (skip discovery)")
+    if cloud_sources:
+        src.add_argument("--arn", metavar="ARN",
+                         help="an AWS Bedrock AgentCore runtime: "
+                              "arn:aws:bedrock-agentcore:<region>:<account>:runtime/<name>"
+                              "[/runtime-endpoint/<qualifier>]. The region is read out of the "
+                              "ARN. Probes go through a local relay, which signs them with the "
+                              "AWS credentials in its own environment — yours, never Straiker's.")
+        src.add_argument("--vertex", metavar="RESOURCE",
+                         help="a Vertex AI Agent Engine (ADK) agent: "
+                              "projects/<p>/locations/<loc>/reasoningEngines/<id>, or the "
+                              ":streamQuery URL containing it. The location is read out of the "
+                              "resource name. Probes go through a local relay, which "
+                              "authenticates with the gcloud ADC in its own environment.")
     src.add_argument("--module", metavar="FILE.py",
                      help="a custom adapter you wrote: a Python file with "
                           "`def send_prompt(prompt: str) -> str`. Use this when the contract "
@@ -7994,8 +8705,21 @@ def build_parser():
     # assess diff — compare two runs (new / resolved / regressed findings)
     s = asp.add_parser("diff", parents=[GLOBALS], formatter_class=_Fmt,
                        help="compare two assessments: new / resolved / regressed findings",
-                       epilog="example: ascend assess diff --app 'My Bot' --base asmt_old --against asmt_new")
-    s.add_argument("--app", help="app name or aapp_ id (for --base/--against ids)")
+                       # The example is the one flag spelling a reader is most likely to copy, so
+                       # it has to be a command that runs. It named `--base`/`--against`, which
+                       # this parser does not define: `--against` is rejected outright, and
+                       # `--base` is silently swallowed by the GLOBAL API-base-URL flag, so the
+                       # copied line re-points the CLI at `https://.../asmt_old` on its way to
+                       # failing. Measured on v1.1.4 and on this tree:
+                       #   $ ascend assess diff --app x --base asmt_old --against asmt_new
+                       #   error: unrecognized arguments: --against asmt_new
+                       # The real flags are --baseline/--current (ids) and their -file forms.
+                       epilog="examples:\n"
+                              "  ascend assess diff --app 'My Bot' "
+                              "--baseline asmt_old --current asmt_new\n"
+                              "  ascend assess diff --baseline-file old.json "
+                              "--current-file new.json   # no credential needed")
+    s.add_argument("--app", help="app name or aapp_ id (for --baseline/--current ids)")
     s.add_argument("--baseline", help="baseline assessment id")
     s.add_argument("--current", help="the newer assessment id to compare")
     s.add_argument("--baseline-file", help="baseline assessment json on disk (instead of --baseline)")
@@ -8082,6 +8806,17 @@ def build_parser():
     s.add_argument("--expect", default=None, help="substring the response must contain")
     s.add_argument("--timeout", type=float, default=60.0)
     s.set_defaults(func=cmd_adapter_validate)
+    s = adp.add_parser("bundle", parents=[GLOBALS], formatter_class=_Fmt,
+                       help="write the hand-over bundle for a config: adapter.json (env: refs only), manifest, "
+                            "secrets template, relay/ container, shim/ service + Lambda, vendored runtime",
+                       description=("The adapter as a reusable artifact another team can host: in the customer's "
+                                    "network as the relay, on our side as a POST /chat shim a direct app calls, "
+                                    "or inside the engine by importing the vendored runtime. No secret is written."))
+    s.add_argument("config", help="config name in the config dir")
+    s.add_argument("--app", help="the registered application id (aapp_…) this adapter serves (default: looked up by name)")
+    s.add_argument("--out", help="folder to write (default: ./handover/<config>)")
+    s.add_argument("--no-vendor", action="store_true", help="skip vendoring runtime/ and control/ (smaller; needs the CLI tree to run)")
+    s.set_defaults(func=cmd_adapter_bundle)
 
     # discover
     # `adapter build` is the primary name — you are building an adapter, and the source is a flag.
@@ -8123,6 +8858,10 @@ def build_parser():
     s.add_argument("--baseline", default=None, help="baseline assessment json for diff")
     s.add_argument("--fail-on-severity", default="high", choices=["low", "medium", "high", "critical"])
     s.add_argument("--allow-new", action="store_true", help="do not fail on new findings")
+    s.add_argument("--allow-unproven", action="store_true",
+                   help="do not fail on baseline findings this run never re-tested. They are "
+                        "UNPROVEN, not fixed: a control dropped from the scope produces no "
+                        "evidence either way. Still listed in the diff either way.")
     s.add_argument("--junit", metavar="FILE", help="also write JUnit XML for generic CI systems")
     s.add_argument("--policy", help="policy file (default ./ascend-policy.json or $ASCEND_POLICY); flags override it")
     s.add_argument("--min-probes", type=int, default=None, metavar="N",
@@ -8181,14 +8920,20 @@ def build_parser():
                         help="add, list, inspect and re-check the targets you assess"
                         ).add_subparsers(dest="verb", required=True)
     s = tg.add_parser("add", parents=[GLOBALS], formatter_class=_Fmt,
-                      help="onboard a target from a URL, a cURL/HAR file, or a saved config",
+                      help="onboard a target from a URL, a cURL/HAR file, a cloud-runtime "
+                           "identifier, or a saved config",
                       epilog=("examples:\n"
                               "  ascend target add https://your-bot.example.com/chat\n"
                               "  ascend target add ./request.curl --name 'Support Bot'\n"
                               "  ascend target add ~/Downloads/session.har\n"
+                              "  ascend target add arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/my_agent\n"
+                              "      an AgentCore runtime — region comes from the ARN; the relay signs with YOUR AWS creds\n"
+                              "  ascend target add projects/p/locations/us-central1/reasoningEngines/123\n"
+                              "      a Vertex Agent Engine — location comes from the resource name; the relay uses gcloud ADC\n"
                               "  ascend target add mybot --run          # existing config, then assess"))
     s.add_argument("source", nargs="?",
-                   help="a URL, a cURL/HAR file, or a saved config name — detected for you")
+                   help="a URL, a cURL/HAR file, a Bedrock AgentCore ARN, a Vertex Agent Engine "
+                        "resource name, or a saved config name — detected for you")
     _add_onboard_args(s, require_source=False, cloud_sources=True)
     s.add_argument("--run", action="store_true",
                    help="continue into an assessment once the target is registered")
@@ -8367,6 +9112,14 @@ def build_parser():
     s.add_argument("app", help="app name or aapp_ id")
     s.add_argument("--follow", "-f", action="store_true", help="tail live")
     s.set_defaults(func=cmd_relay_logs)
+    s = rp.add_parser("grade", parents=[GLOBALS], formatter_class=_Fmt,
+                      help="grade a run from the relay's own recording: answered or not, and what the replies gave away")
+    s.add_argument("app", help="app name, aapp_ id, or a path to a *.capture.jsonl recording")
+    s.add_argument("--marker", default=None, metavar="REGEX",
+                   help="a planted value to look for in the replies (a secret the target must never say)")
+    s.add_argument("--system-prompt-file", default=None, metavar="PATH",
+                   help="the target's system prompt; a reply that quotes 8 words of it verbatim is a leak")
+    s.set_defaults(func=cmd_bridge_grade)
     s = rp.add_parser("sync", parents=[GLOBALS], formatter_class=_Fmt,
                       help="reconcile bridges to assessment state — start for running/paused apps, "
                            "stop for terminal (the fallback after a Console-side change)")

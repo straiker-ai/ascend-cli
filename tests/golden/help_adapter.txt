@@ -3,7 +3,7 @@ $ ascend adapter --help
 --- stdout
 usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] adapter
        [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE]
-       {list,show,configs,layers,validate,build} ...
+       {list,show,configs,layers,validate,bundle,build} ...
 
 Build and inspect adapter configs directly.
 
@@ -14,12 +14,15 @@ proves it against the live endpoint and stores it. These verbs
 remain for the cases that need the lower level.
 
 positional arguments:
-  {list,show,configs,layers,validate,build}
+  {list,show,configs,layers,validate,bundle,build}
     list                list registered adapter types
     show                print a saved adapter config (secrets masked)
     configs             list adapter configs on disk (incl. shipped examples)
     layers              ==SUPPRESS==
     validate            HARD GATE: run one prompt through a config against the live target
+    bundle              write the hand-over bundle for a config: adapter.json (env: refs only),
+                        manifest, secrets template, relay/ container, shim/ service + Lambda,
+                        vendored runtime
     build               build a validated adapter from a URL / HAR / curl / API / spec
 
 options:

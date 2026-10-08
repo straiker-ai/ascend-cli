@@ -2,7 +2,7 @@
 
 *Generated from the CLI's argparse tree by `scripts/gen_command_map.py`. A test fails if this file is stale, so every flag here is a flag that exists.*
 
-22 command groups · 61 commands. Sections follow `ascend --help`.
+22 command groups · 63 commands. Sections follow `ascend --help`.
 
 ## Flags every command accepts
 
@@ -82,6 +82,19 @@ ascend adapter build --url https://site/support --manual --out mybot.json
 ```
 
 > see docs/BUILD_ADAPTER.md for the full walkthrough and the HAR export steps.
+
+### `ascend adapter bundle`
+
+The adapter as a reusable artifact another team can host: in the customer's network as the relay, on our side as a POST /chat shim a direct app calls, or inside the engine by importing the vendored runtime. No secret is written.
+
+- **`config`** (required) — config name in the config dir
+
+
+| Flag | Value | Default | What it does |
+|---|---|---|---|
+| `--app` | `APP` | — | the registered application id (aapp_…) this adapter serves (default: looked up by name) |
+| `--out` | `OUT` | — | folder to write (default: ./handover/<config>) |
+| `--no-vendor` | — | — | skip vendoring runtime/ and control/ (smaller; needs the CLI tree to run) |
 
 ### `ascend adapter configs`
 
@@ -265,13 +278,16 @@ compare two assessments: new / resolved / regressed findings
 
 | Flag | Value | Default | What it does |
 |---|---|---|---|
-| `--app` | `APP` | — | app name or aapp_ id (for --base/--against ids) |
+| `--app` | `APP` | — | app name or aapp_ id (for --baseline/--current ids) |
 | `--baseline` | `BASELINE` | — | baseline assessment id |
 | `--current` | `CURRENT` | — | the newer assessment id to compare |
 | `--baseline-file` | `BASELINE_FILE` | — | baseline assessment json on disk (instead of --baseline) |
 | `--current-file` | `CURRENT_FILE` | — | current assessment json on disk (instead of --current) |
 
-> example: ascend assess diff --app 'My Bot' --base asmt_old --against asmt_new
+```bash
+ascend assess diff --app 'My Bot' --baseline asmt_old --current asmt_new
+ascend assess diff --baseline-file old.json --current-file new.json   # no credential needed
+```
 
 ### `ascend assess list`
 
@@ -377,6 +393,18 @@ ascend assess watch --app 'My Bot' --assessment asmt_x --detail
 ## `ascend bridge`
 
 *Aliases: `relay`*
+
+### `ascend bridge grade`
+
+grade a run from the relay's own recording: answered or not, and what the replies gave away
+
+- **`app`** (required) — app name, aapp_ id, or a path to a *.capture.jsonl recording
+
+
+| Flag | Value | Default | What it does |
+|---|---|---|---|
+| `--marker` | `REGEX` | — | a planted value to look for in the replies (a secret the target must never say) |
+| `--system-prompt-file` | `PATH` | — | the target's system prompt; a reply that quotes 8 words of it verbatim is a leak |
 
 ### `ascend bridge logs`
 
@@ -488,6 +516,7 @@ CI gate: nonzero exit on new findings / severity breach
 | `--baseline` | `BASELINE` | — | baseline assessment json for diff |
 | `--fail-on-severity` | `low|medium|high|critical` | `high` | — |
 | `--allow-new` | — | — | do not fail on new findings |
+| `--allow-unproven` | — | — | do not fail on baseline findings this run never re-tested. They are UNPROVEN, not fixed: a control dropped from the scope produces no evidence either way. Still listed in the diff either way. |
 | `--junit` | `FILE` | — | also write JUnit XML for generic CI systems |
 | `--policy` | `POLICY` | — | policy file (default ./ascend-policy.json or $ASCEND_POLICY); flags override it |
 | `--min-probes` | `N` | — | refuse to pass a CLEAN run with fewer than N probes — that is what a bridge which was not running produces, and it exits 1 (cannot trust the results), never 0. Use 0 for runs that are genuinely this small. (default: 5) |
@@ -944,9 +973,9 @@ add, list, inspect and re-check the targets you assess
 
 ### `ascend target add`
 
-onboard a target from a URL, a cURL/HAR file, or a saved config
+onboard a target from a URL, a cURL/HAR file, a cloud-runtime identifier, or a saved config
 
-- **`source`** (optional) — a URL, a cURL/HAR file, or a saved config name — detected for you
+- **`source`** (optional) — a URL, a cURL/HAR file, a Bedrock AgentCore ARN, a Vertex Agent Engine resource name, or a saved config name — detected for you
 
 
 | Flag | Value | Default | What it does |
@@ -957,6 +986,8 @@ onboard a target from a URL, a cURL/HAR file, or a saved config
 | `--curl` | `FILE` | — | a curl command in a file (or '-' for stdin) |
 | `--har` | `HAR` | — | HAR file exported from your own browser (no browser needed here) |
 | `--config` | `NAME|PATH` | — | a config already on disk — a name in the config dir, or a path to a .json file anywhere (skip discovery) |
+| `--arn` | `ARN` | — | an AWS Bedrock AgentCore runtime: arn:aws:bedrock-agentcore:<region>:<account>:runtime/<name>[/runtime-endpoint/<qualifier>]. The region is read out of the ARN. Probes go through a local relay, which signs them with the AWS credentials in its own environment — yours, never Straiker's. |
+| `--vertex` | `RESOURCE` | — | a Vertex AI Agent Engine (ADK) agent: projects/<p>/locations/<loc>/reasoningEngines/<id>, or the :streamQuery URL containing it. The location is read out of the resource name. Probes go through a local relay, which authenticates with the gcloud ADC in its own environment. |
 | `--module` | `FILE.py` | — | a custom adapter you wrote: a Python file with `def send_prompt(prompt: str) -> str`. Use this when the contract cannot be derived — signed requests, a multi-step handshake, an async poll. It is proven against the live target like any other. |
 | `--scaffold` | `FILE.py` | — | write a working custom-adapter stub to this path and stop. Edit it, then re-run with --module to onboard it. |
 | `--name` | `NAME` | — | application name in Ascend (default: derived from the URL) |
@@ -1014,6 +1045,10 @@ onboard a target from a URL, a cURL/HAR file, or a saved config
 ascend target add https://your-bot.example.com/chat
 ascend target add ./request.curl --name 'Support Bot'
 ascend target add ~/Downloads/session.har
+ascend target add arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/my_agent
+      an AgentCore runtime — region comes from the ARN; the relay signs with YOUR AWS creds
+ascend target add projects/p/locations/us-central1/reasoningEngines/123
+      a Vertex Agent Engine — location comes from the resource name; the relay uses gcloud ADC
 ascend target add mybot --run          # existing config, then assess
 ```
 

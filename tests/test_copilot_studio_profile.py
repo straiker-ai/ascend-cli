@@ -59,7 +59,7 @@ def open_agent(fake):
     """A published agent whose Security is 'No authentication' (Family A)."""
     srv, base = fake.serve_in_thread()
     yield base
-    srv.shutdown()
+    fake.stop(srv)
 
 
 @pytest.fixture
@@ -67,7 +67,7 @@ def gated_agent(fake):
     """An Entra-gated agent: the anonymous token endpoint 401s (Family B)."""
     srv, base = fake.serve_in_thread(entra=True)
     yield base
-    srv.shutdown()
+    fake.stop(srv)
 
 
 # --------------------------------------------------------------- the address is derived
@@ -292,6 +292,39 @@ class TestTheContractActuallyWorks:
                          "bot_settle_ms": 150}, probe)
         assert not out["response"].startswith(probe)
 
+    def test_a_second_connection_is_served_while_the_first_is_still_open(self, open_agent):
+        """The stand-in must be threaded, and nothing else here would notice if it were not.
+
+        Measured: with a single-threaded server and HTTP/1.1 keep-alive, a client that
+        opens a second connection before releasing the first deadlocks. Seen in the
+        kernel socket table as an ESTABLISHED client socket with no matching server-side
+        descriptor — accepted by the backlog, never accept()ed by the process. It hangs
+        until something kills it, and nothing about the failure looks like the server's
+        fault, which is why it cost an afternoon.
+
+        Sequential bare `requests` calls close their connections and never reproduce it.
+        A Session holds one open, so this is the shape that catches it.
+        """
+        import requests
+        held = requests.Session()
+        try:
+            # stream=True leaves the body unread, so the socket stays checked out and
+            # open. That is the state the server was stuck serving.
+            r1 = held.get(CS.token_url(open_agent), timeout=5, stream=True)
+            assert r1.status_code == 200
+            assert r1.raw.isclosed() is False, "the first connection must still be open"
+            # A second, concurrent connection. On a single-threaded server this blocks
+            # forever; the timeout turns that hang into a failure instead of a hung run.
+            second = requests.Session()
+            try:
+                r2 = second.get(CS.token_url(open_agent), timeout=5)
+                assert r2.status_code == 200
+                assert r2.json()["token"] != r1.json()["token"]
+            finally:
+                second.close()
+        finally:
+            held.close()
+
     def test_the_minted_token_cannot_post_and_that_is_reported_not_swallowed(self, open_agent):
         """Direct Line issues a second token at start-conversation; using the first gets a
         502. An adapter that carried the wrong one would fail every probe silently."""
@@ -328,7 +361,7 @@ class TestTheContractActuallyWorks:
             assert out["response"] == fake.QUOTA_MESSAGE
             assert "CPS-REF-00042" not in out["response"], "nothing was asked of the agent"
         finally:
-            srv.shutdown()
+            fake.stop(srv)
 
     def test_the_undocumented_status_code_path_is_still_reported(self, fake):
         """Some environments may answer 429. Microsoft does not document it, so it is
@@ -341,7 +374,7 @@ class TestTheContractActuallyWorks:
             assert out["success"] is False
             assert "429" in out["error"]
         finally:
-            srv.shutdown()
+            fake.stop(srv)
 
 
 # --------------------------------------------------------------- where it has to run

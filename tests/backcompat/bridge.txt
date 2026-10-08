@@ -3,7 +3,7 @@ $ ascend bridge --help
 --- stdout
 usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] bridge
        [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE]
-       {start,ls,stop,logs,sync} ...
+       {start,ls,stop,logs,grade,sync} ...
 
 Manage the CLI's built-in bridge for bridge-type apps.
 
@@ -14,11 +14,13 @@ are not findings — that run finishes looking CLEAN having
 measured nothing.
 
 positional arguments:
-  {start,ls,stop,logs,sync}
+  {start,ls,stop,logs,grade,sync}
     start               start a detached bridge per app (key comes from the local store)
     ls                  list bridges + flag live assessments with NO bridge
     stop                stop bridges
     logs                show a bridge's log
+    grade               grade a run from the relay's own recording: answered or not, and what the
+                        replies gave away
     sync                reconcile bridges to assessment state — start for running/paused apps,
                         stop for terminal (the fallback after a Console-side change)
 

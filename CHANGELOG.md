@@ -12,6 +12,74 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 ## [Unreleased]
 
 ### Added
+- Adapter code you can hand over: `codegen.generate_adapter_module` now writes a self-contained, runnable
+  Python module (`python <name>.py "hello"`) for `direct_api`, `session_api`, `sse_stream`, `websocket_direct`
+  and `openai_compatible`, not only plain POST. Credentials never land in the file: headers, `auth` blocks
+  (bearer, api_key in header or query, basic, cookie, custom, multi-header) and OAuth2 grants resolve from
+  `env:` references at run time, a literal credential header is lifted to an environment name, query-string
+  credentials are cut from every URL (they had leaked a lab access code from a WebSocket URL), and Referer/
+  Origin lose their query strings. The docstring lists what to set. Proven live against the Target Lab: REST,
+  SSE and WebSocket modules answered with no credential in the file. Literals are Python (`True`, `None`),
+  not JSON. csrf and multi-hop auth still need the runtime and say so; browser and platform presets stay a
+  scaffold. Three generator tests updated to the new module shape.
+- Adapters `openai_compatible` (`/v1/chat/completions`: OpenAI, Azure OpenAI, LiteLLM, vLLM, Ollama,
+  gateways; `model` from the capture or `GET /v1/models` when unset) and `dialogflow_cx` (`detectIntent`,
+  one session per prompt; ADC, a key file or a supplied bearer). Published-contract profiles for both, so
+  `ascend target add --api <url>` wires them without probing; host hints and capture fillers route a
+  recorded call to them. `ascend adapter list` grows two rows — the golden and back-compat corpora were
+  re-recorded for that listing only; no legacy form's shape changed.
+- `verify.shape_fix`: when the derived answer field fails its offline self-check and the response
+  envelope's shape names another path, that path is replayed over the captured reply; if it reproduces
+  the reply the config is corrected before validation (`shape_fix` in the result), otherwise it is offered
+  (`suggested_patch`, `verified: false`). A field that passed is never touched.
+- `scope.resolve(names, catalog)`: the capability→control vocabulary mapped onto a tenant's live
+  `controls list --json` (exact ids, categories expanded, aliases reported, unknowns named).
+
+### Fixed
+- Derivation kept nothing of the chat request's query string. Public parameters (`?api-version=`,
+  `?alt=sse`) now stay on the endpoint; a credential carried there (`?code=`, `?key=`) goes to the 0600
+  store and returns at send time through a static `api_key` part with `in: query`. Measured on a
+  code-gated test target: the first registration 401'd before, passes first time now.
+- `ascend bridge grade <app|recording>` — what the platform's score cannot see, from the relay's own
+  recording: probes answered / failed / without a result, and how many replies leak, by `--marker`
+  (a planted value), by verbatim overlap with `--system-prompt-file`, or by an instruction-like
+  heuristic. Numbers only, never reply text (`runtime/evidence_grade.py`, importable by the engine).
+  Measured on our own range: two relayed runs scored PASSED 0 of 4 while all 8 delivered replies
+  carried the planted secret. `bridge --help` gains the subcommand (corpora re-recorded).
+- Structured diagnoses. A failure the code understands carries `diagnosis` {reason, detail, next}
+  in the JSON error envelope, in the adapters' failure metadata (`no_first_frame`, `no_answer_text`,
+  `error_frame`, `http_401`…) and in a failed browser capture (`site_root_no_widget`,
+  `typed_not_observed`…); the MCP shim surfaces `error_code`, `hint` and `diagnosis` as fields.
+
+### Fixed
+- Streaming adapters give the target its think time. `websocket_direct` and `sse_stream` applied
+  the idle gap (silence *between* frames) from the moment the prompt was sent, so a target slower
+  than `idle_ms` to start answering read as "No response frames collected". Measured on a
+  Lambda-backed socket: 25 of 26 probes empty under a run; 10 of 10 answered after the fix. The
+  first frame now gets the probe budget (or `first_frame_ms`), the idle gap applies once frames
+  flow; a gateway error frame is reported as the reason instead of scored as the reply.
+- A WebSocket contract is derived from the frames the page exchanged: the send frame that carried
+  the prompt (with `{{PROMPT}}` substituted), the field that carried the reply (`response_path`)
+  and the terminal frame (`done_when`). Before, only the URL came from the capture.
+- The browser capture keeps a streamed reply body (`text/event-stream`, NDJSON) through a hook in
+  the page — Playwright returns neither such a body nor its HAR text, so the pair was recorded empty
+  and the derived SSE config was a bare `{"format": "sse"}` left to the adapter's defaults. The
+  field mapping and terminal frame are now derived from the recorded stream.
+
+### Added
+- The hand-over bundle carries `bridge/`: a `config.yaml` and a `docker-compose.yaml` for the bridge the
+  Console hands out (`ascendai-bridge` binary or the `straikerai/ascendai-bridge:latest` image, so the newest
+  bridge is always the one used). A plain direct adapter is pointed at the target; streams, sockets, minted
+  credentials and browsers are pointed at the bundle's shim. The manifest records which, plus the request
+  template and reply path to paste into the Console's Bridge application.
+- `ascend adapter bundle <config>` — the adapter as a hand-over artifact: one folder with
+  `adapter.json` (env: references only, never a secret), `manifest.json`, `secrets.template.env`,
+  a README, `relay/` (the bridge as a container for the customer's network), `shim/` (a
+  `POST /chat {prompt} -> {response}` service and a Lambda handler to host on our side and point a
+  direct app at) and `vendor/` (the pinned runtime, importable inside the engine). `adapter --help`
+  gains the subcommand (the golden and back-compat corpora were re-recorded for that one line).
+- `deploy/relay/` — the relay as a container (Fargate / Cloud Run / Kubernetes Job), with its own
+  loopback test; `deploy/shim/` — the hosted-adapter shim.
 
 - **`target add` goes direct first, and a bridge only when it has to.** Registration always created
   a bridge app, even for a public JSON endpoint the platform could call itself — so every target
@@ -46,6 +114,41 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ### Fixed
 
+- **A control that was never re-run is no longer reported as fixed.** `assess diff` and the `ci`
+  gate built `resolved` from "failed in the baseline, not failing now", and "not failing now"
+  covered a control that passed *and* a control the run never touched. Measured on two real runs
+  of one app: `assess diff --baseline asmt_7fyEPrLQ… --current asmt_9EnmJ2it…` returned
+  `resolved: [agentic_data_exfil]` — a `high` finding, `fail` 2/2 in the baseline, absent from all
+  58 controls of the current run because the scope had been narrowed past it. Nothing was
+  re-probed and nothing was fixed. The diff now carries a fourth bucket, `not_retested`, and the
+  gate breaches on it at the same `--fail-on-severity` bar as a live finding (exit 2).
+  `--allow-unproven` opts out for a deliberately narrowed run; the bucket is still reported either
+  way. Telling a team a control is fixed when it was never re-run is worse than missing a finding:
+  a missed finding leaves them looking. The bucket is re-ranked under `ascend-policy.json` like
+  every other list the gate measures: the first cut ranked the live findings under the policy and
+  the unproven ones under the platform's severity, so one policy file gated the same control id at
+  two different severities in one run — a `critical` override on a control nobody re-tested left
+  the build green.
+- **`export --format json` can be gated and used as a baseline.** The export emitted findings
+  only, and the gate reads `category_summary`, so the one machine-readable artifact a pipeline
+  would archive was the one input `ci` refused: `ci --file export.json` exited 1 with "reports
+  completed but carries no `category_summary`". As a `--baseline` it failed silently instead —
+  nothing readable meant nothing had been failing before, so an export of asmt_9EnmJ2it… diffed
+  against its own source run reported **33 brand-new findings** and a red build. The export now
+  carries the control table (and `total`/`failed`, without which the dead-bridge probe floor has
+  nothing to measure), so a round trip is clean; the flat `findings` list is unchanged. Export
+  files written by earlier versions are read back correctly as a baseline. A findings-only payload
+  is still refused as the *current* run — it cannot say which controls passed, only which failed,
+  and reading the difference as "passed" is the false green above.
+- **Custom controls are checked, not waved through.** `--controls custom-50` used to fail as an
+  unknown id (custom controls are not in the built-in catalog) unless `--force`, which then
+  applied any id at all. Custom ids are now checked against your organization's custom controls:
+  a real one runs without `--force`, a deleted or mistyped one is refused like any unknown id.
+  And `assess run` without `--controls` refuses to start when the app's registered set names a
+  custom control that has since been deleted — the platform would skip it and score it clean
+  without testing it. `--force` still runs anyway. `ascend controls list` now shows your custom
+  controls too, under the `custom` category (tag `Custom`), so it names every id `--controls`
+  accepts.
 - **`app create --type api --config <name>` never worked with a derived config.** It read `url`
   while `target add` writes `endpoint`; added a second top-level `{{PROMPT}}` beside an already
   templated body; and flattened a nested answer path into one dotted key that matches nothing in

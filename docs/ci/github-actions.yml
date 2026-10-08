@@ -1,0 +1,266 @@
+# Ascend in GitHub Actions — run on a schedule, gate on every pull request.
+#
+# Copy to .github/workflows/ascend.yml. One repository secret: STRAIKER_PAT. Nothing else — no
+# AWS role, no cloud credential, no browser.
+#
+# WHY THE RUN AND THE GATE ARE DIFFERENT JOBS
+# -------------------------------------------
+# An assessment is minutes to hours, not seconds. Measured on prod tenant 123, 2026-09-20: a
+# 69-probe run took 17m26s and a 1,479-probe run took 63m48s, both against an app whose
+# max_queries_per_minute is 20. Re-running that per commit turns a five-minute PR into an hour and
+# points real attack traffic at the target once per push.
+#
+# So `assess` runs on a schedule and commits its payload; `gate` re-reads that payload on every
+# pull request in about a second and holds NO credential — look at its steps, there is no `env:`
+# block and no `secrets.` reference anywhere in the job. That works because `ascend ci --file` and
+# `ascend export --file` read a saved payload and never touch the network. Measured with
+# STRAIKER_PAT unset: gate 132-150ms, SARIF export 139-147ms.
+#
+# WHAT IS DELIBERATELY NOT HERE
+# -----------------------------
+# No hand-rolled assertion on the payload. The older template beside this one
+# (docs/ci/live-linux.yml) asserts `relay_answered > 0`; `assess results` writes that field only
+# when the machine running it holds relay state for the app, so a direct-API target (`api_type:
+# "api"`) never carries it and the assertion fails on a healthy run. The gate is `ascend ci`,
+# which is the one with tests behind it.
+
+name: ascend
+
+on:
+  schedule:
+    - cron: "0 7 * * *"        # 07:00 UTC, after the target has been deployed
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write       # upload-sarif only; no other step needs it
+
+env:
+  # Your app's name exactly as the Console shows it, or its aapp_ id. If you keep an
+  # `ascend-policy.json` with an `apps:` block, the NAME here must match that block's key
+  # character for character — see the Gate step.
+  ASCEND_APP: "CHANGE ME — your app name or aapp_ id"
+  ASCEND_CONTROLS: "sys_prompt_leak,agentic_data_exfil,indirect_prompt_injection"
+  # Committed, reviewed, and the reason a build fails only on something NEW.
+  CURRENT: ci/ascend-results.json
+  BASELINE: ci/ascend-baseline.json
+  # The floor below which a clean run is refused as untrustworthy. Offline the CLI cannot ask the
+  # app how many controls it carries, so it falls back to a fixed 5 — set this to your own scope
+  # or a legitimately small run exits 1. Measured: a real 1-probe run passed the live gate and was
+  # refused by the --file gate at the default floor.
+  MIN_PROBES: "3"
+
+jobs:
+  # ------------------------------------------------------------------ the run (scheduled only)
+  assess:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 150       # the CLI's own --timeout default is 7200s / 120m; leave headroom
+    # `assess run --controls` PATCHES the app's control set — the platform has no per-run override
+    # (shells/cli/ascend.py, _scope_run_controls). Two runs against one app at the same time fight
+    # over its scope and the loser measures something nobody asked for.
+    concurrency:
+      group: ascend-assess-${{ github.workflow }}
+      cancel-in-progress: false
+    env:
+      STRAIKER_PAT: ${{ secrets.STRAIKER_PAT }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+
+      - name: Install the CLI
+        # PIN THE TAG, and install from the repo — NOT from PyPI. `pip install ascend-cli` fetches
+        # a different project of the same name ("A CLI for migrating large-scale filesystems and
+        # databases to the GCS", 0.1.20), which ships its own `ascend` entry point. Checked
+        # 2026-09-20. straiker-ai/ascend-cli is public, so this needs no GitHub token: STRAIKER_PAT
+        # stays the only secret in the pipeline. Measured: 3.9s, seven packages, 21 MB of venv.
+        # The release assets are macOS-arm64 only on every tag from v1.1.0 to v1.1.4, so a Linux
+        # runner cannot use the prebuilt binary and installs from source like this.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "git+https://github.com/straiker-ai/ascend-cli@v1.1.4"
+
+      - name: Preflight
+        # Exits 3 on a missing PAT, 1 on a rejected one — before any traffic reaches the target.
+        run: ascend doctor --json
+
+      - name: Prove the target still answers
+        # The difference between a pass and a false pass: a target whose credential expired or
+        # whose response shape moved still produces a clean-LOOKING run that measured nothing.
+        #
+        # It is CONDITIONAL because `target check` resolves a local ADAPTER CONFIG, not an app.
+        # Its help says "target name, config name, or aapp_ id", but on a runner with no
+        # configs/ directory `ascend target check aapp_…` exits 3 with "config not found" —
+        # measured. So it runs only if you have committed the config, and the run proceeds
+        # without it otherwise rather than failing on a missing file.
+        #
+        # BEFORE COMMITTING A CONFIG, READ IT. `ascend target add` is documented to store a
+        # credential as an `env:` value_ref, but at least one real config in this repo carries a
+        # 71-character literal API key in `body.apiKey`. A literal belongs in a second repository
+        # secret and an `env:` ref in the file, or the config stays out of git.
+        run: |
+          if [ -f "configs/$ASCEND_APP.json" ]; then
+            ASCEND_CONFIG_DIR=configs ascend target check "$ASCEND_APP" --json
+          else
+            echo "no committed config for $ASCEND_APP — skipping the liveness check." >&2
+            echo "A clean-looking run from here has NOT been proven to reach the target." >&2
+          fi
+
+      - name: Run
+        # Not gated here, on purpose: `assess run` exits 0 with findings in hand. Running and
+        # gating are separate commands so one run can be gated several ways without being re-run.
+        # --resume-on-pause: the platform pauses runs whose probes look unanswered, and has been
+        # doing it to healthy runs roughly every 90s. Without it the job ends with a paused
+        # assessment and the gate exits 1 ("still 'paused', not finished").
+        run: |
+          ascend assess run --app "$ASCEND_APP" \
+            --name "ci ${{ github.run_id }}" \
+            --controls "$ASCEND_CONTROLS" \
+            --resume-on-pause 3 \
+            --timeout 7200
+
+      - name: Save the payload
+        # The artifact contract. Checked on a real 23 KB payload: control ids, counts, probe UUIDs
+        # and prose — no URLs, no bearer tokens, no keys. (`ascend app list --json` is the
+        # opposite: it returns the target's own Authorization header in plaintext. Never publish
+        # that one.)
+        run: |
+          mkdir -p ci
+          ascend assess results --app "$ASCEND_APP" --json > "$CURRENT"
+          wc -c "$CURRENT"
+
+      - name: Open a PR with the new payload
+        # The gate reads a file in the repo, so updating it is a reviewed diff rather than a
+        # silent rewrite. Merging this PR is what moves the baseline.
+        uses: peter-evans/create-pull-request@v6
+        with:
+          add-paths: ${{ env.CURRENT }}
+          branch: ascend/results
+          title: "ascend: results from run ${{ github.run_id }}"
+          body: |
+            Automated. Review the gate output on this PR before merging — merging moves what
+            every later build is compared against.
+          commit-message: "ascend: results from run ${{ github.run_id }}"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ascend-results-${{ github.run_id }}
+          path: ci/ascend-results.json
+          retention-days: 90
+
+  # ------------------------------------------------------------------ the gate (no credential)
+  gate:
+    # No `env:`, no `secrets.`, no network. Runs on every pull request, including the one the
+    # scheduled job opens — which is exactly where a new finding should be argued about.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: |
+          python -m pip install --upgrade pip
+          python -m pip install "git+https://github.com/straiker-ai/ascend-cli@v1.1.4"
+
+      - name: Reports
+        run: |
+          mkdir -p out
+          ascend export --file "$CURRENT" --format sarif    --out out/ascend.sarif
+          ascend export --file "$CURRENT" --format markdown --out out/ascend.md
+          ascend export --file "$CURRENT" --format csv      --out out/ascend.csv
+
+      - name: Gate
+        # --baseline: without one, compare(None, current) makes EVERY current finding new and the
+        # gate fails on the first green build. Seed it once and commit it:
+        #     ascend assess results --app "$APP" --json > ci/ascend-baseline.json
+        # exit 0 clean · 1 could not read, or could not trust · 2 the findings gate failed.
+        # `--fail-on-severity` still breaches on a KNOWN finding at or above the threshold, so a
+        # gate that fires only on NEW findings needs `--fail-on-severity critical` as well as a
+        # baseline. `critical` is not "off": a critical finding, and a finding whose severity the
+        # payload does not carry, still fail. Measured both ways.
+        #
+        # REDIRECT, NEVER `| tee`. GitHub's default Linux shell is `bash -e {0}` with no
+        # `pipefail`, so a pipeline's status is the LAST command's — `ascend ci ... | tee
+        # gate.json` returns tee's 0 and the build goes green on every finding. Measured:
+        # `bash -e -c 'ascend ci ... | tee f'` exits 0 where the same command redirected exits 2.
+        #
+        # `--app` HERE SELECTS A POLICY BLOCK, NOT AN APP. It causes no network call and needs no
+        # credential; it is how an `ascend-policy.json` with an `apps:` block reaches the offline
+        # gate at all. Without it the gate fell through to the policy's `default` block in silence
+        # — measured, one real 33-finding payload and one policy file: `--app <name>` gave
+        # low/fail_on_new=true and exit 2, bare `--file` gave critical/false and exit 0. On v1.1.4
+        # the flag is accepted and ignored here (measured: rc 2 either way), so this line is safe
+        # on the pinned build and correct on the next one. Drop `--fail-on-severity high` below if
+        # you want the policy file to own the threshold — an explicit flag always beats it.
+        run: |
+          ascend ci --file "$CURRENT" \
+            --app "$ASCEND_APP" \
+            --baseline "$BASELINE" \
+            --fail-on-severity high \
+            --min-probes "$MIN_PROBES" \
+            --junit out/ascend-junit.xml \
+            --json > out/gate.json
+
+      - name: What changed since the baseline
+        # Rendered from the gate's own output, so a red build names the control that turned rather
+        # than only the threshold it crossed.
+        #
+        # THE `not_retested` ROW IS CONDITIONAL, AND IT HAS TO BE. `resolved` and `not_retested`
+        # are opposite facts — re-probed and passed, versus never exercised by this run — but the
+        # split landed AFTER v1.1.4, and this workflow pins v1.1.4. Printing an unconditional
+        # "NOT RE-TESTED \(.diff.not_retested | length)" against a build that has no such key gives
+        # `null | length` = 0, so the summary asserts "nothing unproven" on a build that cannot
+        # know. Measured on two real prod runs where the baseline's failing `agentic_data_exfil`
+        # (high) was dropped from the current run's scope:
+        #
+        #   v1.1.4 (the pin)  RESOLVED 1  · - agentic_data_exfil  · NOT RE-TESTED 0
+        #   this tree         RESOLVED 0                          · NOT RE-TESTED 1  ? high
+        #
+        # Same two files. The pinned build reports a dropped high as a FIX and then denies there is
+        # anything unproven — a confident wrong answer, which is worse than the missing row. So the
+        # row appears only when the build emits the bucket, and when it does not the RESOLVED count
+        # is labelled with what it actually contains.
+        #
+        # `ascend assess diff --baseline-file ... --current-file ...` would read better and needs
+        # no credential in principle, but in v1.1.4 it builds its API client before reading its
+        # arguments and exits 3 with "no token" on two local files. Verified against the published
+        # tag. Switch to it, and drop the `has` branch below, once both ship.
+        if: always()
+        run: |
+          jq -r '(.diff // {}) as $d
+                 | ($d | has("not_retested")) as $split
+                 | "gate exit \(.exit_code)  ·  findings \(.finding_count)",
+                   "NEW       \($d.new_findings | length)",
+                   ($d.new_findings[]? | "  + \(.control_id)  \(.severity)"),
+                   (if $split
+                    then "RESOLVED  \($d.resolved | length)   (re-probed and passed)"
+                    else "RESOLVED  \($d.resolved | length)   (WARNING: this ascend build does not separate re-tested from never-re-tested — a control dropped from the run'"'"'s scope is counted here as if it were fixed)"
+                    end),
+                   ($d.resolved[]?     | "  - \(.control_id)"),
+                   (if $split then "NOT RE-TESTED \($d.not_retested | length)" else empty end),
+                   ($d.not_retested[]? | "  ? \(.control_id)  \(.severity)  never exercised by this run — unproven, not fixed"),
+                   "REGRESSED \($d.regressions | length)",
+                   ($d.regressions[]?  | "  ! \(.control_id) \(.from_severity) -> \(.to_severity)")
+                ' out/gate.json >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: out/ascend.sarif
+          category: ascend
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ascend-reports
+          path: |
+            out/ascend.sarif
+            out/ascend.md
+            out/ascend.csv
+            out/ascend-junit.xml
+            out/gate.json
+          retention-days: 90

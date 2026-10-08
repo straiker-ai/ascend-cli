@@ -198,6 +198,69 @@ def _strip_query(url: str) -> str:
     return url.split("?", 1)[0]
 
 
+# Query-string parameters that are credentials. Dropping the whole query string was the previous
+# behaviour, and it broke two common shapes at once: an endpoint whose query is REQUIRED and
+# public (Azure OpenAI's `?api-version=`, Vertex's `?alt=sse`) registered without it and 4xx'd on
+# every probe; and an access code or API key carried as `?code=` / `?key=` was dropped silently,
+# so the derived config 401'd for no visible reason. The rule now is the same one the headers
+# follow: a public parameter stays on the endpoint; a credential-shaped one is withheld from the
+# config, its value goes to the 0600 store, and the config carries an `env:` reference that
+# `layers/auth.py` folds back into the query string at send time (`mode: api_key, in: query`).
+_SECRET_PARAM_NAMES = frozenset({
+    "code", "key", "apikey", "api_key", "api-key", "token", "access_token", "access-token",
+    "auth", "authorization", "sig", "signature", "secret", "password", "passwd", "pwd", "jwt",
+    "bearer", "session", "sid", "session_id", "sessionid", "session-id", "client_secret",
+    "subscription-key", "subscription_key", "x-api-key", "apikey", "appkey", "app_key",
+})
+_PLAIN_PARAM_NAMES = frozenset({
+    "api-version", "api_version", "version", "v", "alt", "format", "lang", "locale", "stream",
+    "model", "deployment", "id", "page", "limit", "offset", "q", "query", "type", "mode",
+})
+
+
+def _looks_secret_param(name: str, value: str) -> bool:
+    """Would baking this query parameter into a config on disk leak a credential?
+
+    Name first (a name is deliberate), then the entropy backstop for a name we did not
+    anticipate — scoped the same way `_looks_secret_header` scopes it, so an ordinary long public
+    value (a model id, a locale) is not withheld from a config that needs it.
+    """
+    n = (name or "").strip().lower()
+    if not n or n in _PLAIN_PARAM_NAMES:
+        return False
+    if n in _SECRET_PARAM_NAMES or _SECRETISH_NAME.search(n):
+        return True
+    v = (value or "").strip()
+    if _OPAQUE_VALUE.match(v) and len(v) >= 24:
+        classes = sum(bool(re.search(p, v)) for p in (r"[a-z]", r"[A-Z0-9]", r"[_.\-=+/]"))
+        return classes >= 2
+    return False
+
+
+def _split_query(url: str) -> Tuple[List[Tuple[str, str]], Dict[str, str]]:
+    """(public parameters in order, {credential parameter: value}) of a URL's query string."""
+    from urllib.parse import urlsplit, parse_qsl
+    plain: List[Tuple[str, str]] = []
+    secret: Dict[str, str] = {}
+    try:
+        pairs = parse_qsl(urlsplit(url).query, keep_blank_values=True)
+    except (ValueError, AttributeError):
+        return [], {}
+    for k, v in pairs:
+        if _looks_secret_param(k, v):
+            secret[k] = v
+        else:
+            plain.append((k, v))
+    return plain, secret
+
+
+def _endpoint_keeping(url: str, plain: List[Tuple[str, str]]) -> str:
+    """The endpoint with only its PUBLIC query parameters, in their original order."""
+    from urllib.parse import urlencode
+    base = _strip_query(url)
+    return f"{base}?{urlencode(plain)}" if plain else base
+
+
 def _norm_entry(request: Dict[str, Any], response: Dict[str, Any],
                 started: Optional[float] = None) -> Dict[str, Any]:
     """Normalize one request/response pair into the internal shape."""
@@ -634,8 +697,9 @@ def _looks_ndjson(body: str) -> bool:
 
 
 def _http_params(req: Dict[str, Any], resp: Dict[str, Any], stream: Optional[str]) -> Dict[str, Any]:
+    plain_q, secret_q = _split_query(req["url"])
     params: Dict[str, Any] = {
-        "endpoint": _strip_query(req["url"]),
+        "endpoint": _endpoint_keeping(req["url"], plain_q),
         "method": req["method"],
         "headers": _nonsecret_headers(req["headers"]),
         "body": _body_template(req),
@@ -648,6 +712,12 @@ def _http_params(req: Dict[str, Any], resp: Dict[str, Any], stream: Optional[str
         # returns, so a caller that dumps its result cannot print a credential by accident.
         params["secret_header_values"] = captured_secret_headers(req["headers"])
         params["secret_header_url"] = req.get("url") or ""
+    if secret_q:
+        # Same arrangement for a credential in the query string (`?code=`, `?key=`): names in the
+        # layer, values lifted out by `classify_evidence`, an `env:` reference in the config.
+        params["withheld_query"] = sorted(secret_q)
+        params["secret_query_values"] = dict(secret_q)
+        params["secret_header_url"] = params.get("secret_header_url") or (req.get("url") or "")
     if stream:
         # Derive the field mapping from the captured body rather than emitting a bare
         # {"format": "sse"}. Without text_path/token_types the adapter collects no frames and
@@ -706,23 +776,117 @@ def _detect_stop_marker(body: str) -> Optional[str]:
     return None
 
 
+_WS_DONE_VALUES = {"done", "complete", "completed", "end", "finished", "final", "stop", "eos"}
+_WS_ID_FIELDS = {"id", "conversation_id", "conversationId", "session_id", "sessionId", "message_id",
+                 "messageId", "request_id", "requestId", "connectionId", "type", "event", "status",
+                 "state", "kind", "role", "timestamp", "ts"}
+
+
+def _ws_frame(raw: Any) -> Any:
+    """A captured frame as the adapter will see it: JSON when it parses, else the raw text."""
+    if isinstance(raw, (dict, list)):
+        return raw
+    if not isinstance(raw, str):
+        return raw
+    t = raw.strip()
+    if t.startswith(("{", "[")):
+        try:
+            return json.loads(t)
+        except (ValueError, TypeError):
+            return raw
+    return raw
+
+
+def _ws_done_marker(frames: List[Any]) -> Optional[Dict[str, str]]:
+    """The terminal frame the socket sends when the answer is complete, as the adapter's
+    `done_when` rule (same rule the socket-onboarding path in probe.py derives)."""
+    for frame in reversed(frames):
+        if not isinstance(frame, dict):
+            continue
+        for key in ("type", "event", "status", "state", "kind"):
+            val = frame.get(key)
+            if isinstance(val, str) and val.strip().lower() in _WS_DONE_VALUES:
+                return {"path": key, "equals": val}
+    return None
+
+
+def _ws_reply_field(frames: List[Any]) -> Optional[str]:
+    """The string field that carried the most answer text across the received frames."""
+    totals: Dict[str, int] = {}
+    for f in frames:
+        if not isinstance(f, dict):
+            continue
+        for k, v in f.items():
+            if isinstance(v, str) and v.strip() and k not in _WS_ID_FIELDS:
+                totals[k] = totals.get(k, 0) + len(v)
+            elif isinstance(v, dict):
+                for kk, vv in v.items():
+                    if isinstance(vv, str) and vv.strip() and kk not in _WS_ID_FIELDS:
+                        totals[f"{k}.{kk}"] = totals.get(f"{k}.{kk}", 0) + len(vv)
+    if not totals:
+        return None
+    return max(totals.items(), key=lambda kv: kv[1])[0]
+
+
+def _ws_send_template(sent: List[Any], prompt: str) -> Any:
+    """The frame the page sent carrying the prompt, with the prompt replaced by {{PROMPT}}.
+
+    The page's own frame IS the contract; the old fixed guess ({"type": "message", "text": …})
+    happened to work on a target that only read `text` and would send every other socket a
+    message it ignores — read back as "no frames" a probe later.
+    """
+    def _sub(obj: Any) -> Any:
+        if isinstance(obj, str):
+            return obj.replace(prompt, "{{PROMPT}}") if prompt and prompt in obj else obj
+        if isinstance(obj, dict):
+            return {k: _sub(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_sub(v) for v in obj]
+        return obj
+    if prompt:
+        for raw in sent:
+            if prompt in str(raw):
+                return _sub(_ws_frame(raw))
+    return None
+
+
 def _ws_params(ev: Dict[str, Any]) -> Dict[str, Any]:
+    """The websocket_direct contract, read off the frames the page exchanged.
+
+    Before: only the socket URL came from the capture; the send frame, the reply field and the
+    terminal frame were fixed guesses and a 1.5 s silence rule did the rest. MEASURED on a
+    Lambda-backed socket: the capture held {"type":"token","text":…} frames and a {"type":"done"}
+    terminator, the derived config carried none of it, and 25 of 26 probes came back empty.
+    """
     url = ""
-    framing = "text"
+    sent: List[Any] = []
+    received: List[Any] = []
+    prompt = (ev.get("prompt_sent") or "").strip()
     for m in ev.get("ws_messages", []):
         url = m.get("url", url)
-        data = m.get("data")
-        if isinstance(data, str) and data.strip().startswith(("{", "[")):
-            try:
-                json.loads(data)
-                framing = "json"
-            except (ValueError, TypeError):
-                pass
+        sent.extend(m.get("sent") or [])
+        received.extend(m.get("received") or [])
+        data = m.get("data")             # legacy single-frame shape
+        if isinstance(data, str):
+            received.append(data)
     if url.startswith("http"):
         url = "ws" + url[len("http"):]  # http->ws, https->wss
-    return {"ws_url": url, "framing": framing,
-            "send_template": {"type": "message", "text": "{{PROMPT}}"},
-            "idle_ms": 1500}
+    frames = [_ws_frame(r) for r in received]
+    framing = "json" if any(isinstance(f, (dict, list)) for f in frames) or \
+        any(isinstance(_ws_frame(x), (dict, list)) for x in sent) else "text"
+    params: Dict[str, Any] = {"ws_url": url, "framing": framing,
+                              "send_template": _ws_send_template(sent, prompt)
+                              or {"type": "message", "text": "{{PROMPT}}"}}
+    reply = _ws_reply_field(frames)
+    if reply:
+        params["response_path"] = reply
+    done = _ws_done_marker(frames)
+    if done:
+        params["done_when"] = done
+    # With a terminal frame the idle gap is only a fallback; without one it is the completion
+    # rule and must outlast a normal pause between tokens.
+    params["idle_ms"] = 1500 if done else 5000
+    return params
 
 
 def _guess_transcript(obj: Any) -> Dict[str, Any]:
@@ -870,6 +1034,7 @@ def classify_auth(ev: Dict[str, Any], chat_idx: Optional[int]) -> Dict[str, Any]
     req = pairs[chat_idx]["request"]
     headers = req["headers"]
     query = req["query"]
+    own = _registrable_host(req.get("url", ""))
 
     # Values produced by earlier responses (login/token/csrf), for reuse detection.
     prior_values = _collect_prior_values(pairs, chat_idx)
@@ -880,7 +1045,7 @@ def classify_auth(ev: Dict[str, Any], chat_idx: Optional[int]) -> Dict[str, Any]
         low = authz.lower()
         if low.startswith("bearer "):
             token = authz.split(" ", 1)[1]
-            origin = _reuse_origin(token, prior_values)
+            origin = _reuse_origin(token, prior_values, own_host=own)
             if origin is not None:
                 oi, ofield, ourl = origin
                 if _looks_token_endpoint(ourl) and _has_access_token(pairs[oi]["response"]["json"]):
@@ -905,7 +1070,7 @@ def classify_auth(ev: Dict[str, Any], chat_idx: Optional[int]) -> Dict[str, Any]
     # 2) CSRF header echoed from a prior bootstrap.
     for h in _CSRF_HEADERS:
         if h in headers:
-            origin = _reuse_origin(headers[h], prior_values)
+            origin = _reuse_origin(headers[h], prior_values, own_host=own)
             if origin is not None:
                 oi, ofield, ourl = origin
                 return {"value": "csrf", "confidence": 0.8,
@@ -960,7 +1125,7 @@ def classify_auth(ev: Dict[str, Any], chat_idx: Optional[int]) -> Dict[str, Any]
 
     # 5) Cookie session (possibly derived from a login).
     if "cookie" in headers:
-        origin = _reuse_origin(headers["cookie"], prior_values, substring=True)
+        origin = _reuse_origin(headers["cookie"], prior_values, substring=True, own_host=own)
         if origin is not None:
             oi, ofield, ourl = origin
             return _auth_derived(pairs, chat_idx, oi, ofield, ourl, kind_hint="cookie")
@@ -1305,6 +1470,10 @@ _PRESET_HOST_HINTS = (
     ("reasoningengines", "vertex_ai"),
     (":streamquery", "vertex_ai"),
     ("connectparticipant", "amazon_connect"),
+    ("api.openai.com", "openai_compatible"),
+    ("openai.azure.com", "openai_compatible"),
+    ("dialogflow.googleapis.com", "dialogflow_cx"),
+    (":detectintent", "dialogflow_cx"),
 )
 
 
@@ -1378,7 +1547,62 @@ def _scrt2_config_from_evidence(ev: Dict[str, Any], endpoint: str) -> Dict[str, 
 # How each preset adapter fills its own config from the capture. A preset with no filler keeps the
 # old behaviour (endpoint hint only); the ones here derive what they saw so the agent wires them
 # without asking the operator for values already in the traffic.
-_PRESET_FILLERS = {"scrt2_direct": _scrt2_config_from_evidence}
+def _chat_request_json(ev: Dict[str, Any], endpoint: str) -> Dict[str, Any]:
+    """The JSON body of the captured request to `endpoint` (or the chat pair), {} when none."""
+    pairs = ev.get("pairs") or []
+    idx = ev.get("chat_pair_index")
+    ordered = ([pairs[idx]] if isinstance(idx, int) and 0 <= idx < len(pairs) else []) + list(pairs)
+    want = _strip_query(endpoint or "")
+    for p in ordered:
+        req = p.get("request") or {}
+        if want and _strip_query(str(req.get("url") or "")) != want:
+            continue
+        body = req.get("json")
+        if body is None:
+            raw = req.get("raw_body") or req.get("body")
+            if isinstance(raw, (dict, list)):
+                body = raw
+            elif isinstance(raw, str) and raw.strip().startswith("{"):
+                try:
+                    body = json.loads(raw)
+                except ValueError:
+                    body = None
+        if isinstance(body, dict):
+            return body
+    return {}
+
+
+def _openai_config_from_evidence(ev: Dict[str, Any], endpoint: str) -> Dict[str, Any]:
+    """An OpenAI-compatible chat completions config from the capture: the endpoint, the model the
+    page used, its system message when it carried one, and max_tokens. Credentials are handled
+    by the captured-header path like any other target."""
+    body = _chat_request_json(ev, endpoint)
+    cfg: Dict[str, Any] = {"endpoint": endpoint}
+    if isinstance(body.get("model"), str) and body["model"].strip():
+        cfg["model"] = body["model"].strip()
+    msgs = body.get("messages")
+    if isinstance(msgs, list):
+        for m in msgs:
+            if isinstance(m, dict) and m.get("role") == "system" and isinstance(m.get("content"), str) and len(m["content"]) < 4000:
+                cfg["system_prompt"] = m["content"]
+                break
+    if isinstance(body.get("max_tokens"), int):
+        cfg["max_tokens"] = body["max_tokens"]
+    return cfg
+
+
+def _dialogflow_config_from_evidence(ev: Dict[str, Any], endpoint: str) -> Dict[str, Any]:
+    body = _chat_request_json(ev, endpoint)
+    cfg: Dict[str, Any] = {"endpoint": endpoint}
+    qi = body.get("queryInput") if isinstance(body.get("queryInput"), dict) else {}
+    if isinstance(qi.get("languageCode"), str):
+        cfg["language_code"] = qi["languageCode"]
+    return cfg
+
+
+_PRESET_FILLERS = {"scrt2_direct": _scrt2_config_from_evidence,
+                   "openai_compatible": _openai_config_from_evidence,
+                   "dialogflow_cx": _dialogflow_config_from_evidence}
 
 
 def compose(classified: Dict[str, Any]) -> Dict[str, Any]:
@@ -1430,6 +1654,11 @@ def compose(classified: Dict[str, Any]) -> Dict[str, Any]:
                            "idle_ms": tparams.get("idle_ms", 1500)})
             if tparams.get("framing"):
                 config["framing"] = tparams["framing"]
+            # the reply field and the terminal frame read off the captured frames
+            if tparams.get("response_path"):
+                config["response_path"] = tparams["response_path"]
+            if tparams.get("done_when"):
+                config["done_when"] = tparams["done_when"]
         elif tp == "sentinel_stream":
             adapter = "sentinel_stream"
             sess = session or {}
@@ -1545,7 +1774,22 @@ def compose(classified: Dict[str, Any]) -> Dict[str, Any]:
     _values = tparams.get("secret_header_values") or {}
     _dynamic = isinstance(config.get("auth"), dict) and \
         config["auth"].get("type") in ("oauth2", "csrf", "derived_multihop")
-    if _values and not _dynamic:
+    _pairs = (ev or {}).get("pairs") if isinstance(ev, dict) else None
+    _minted = minted_credentials(_values, _pairs or [], (ev or {}).get("chat_pair_index")
+                                 if isinstance(ev, dict) else None,
+                                 chat_url=tparams.get("secret_header_url") or endpoint or "") \
+        if _values and not _dynamic else {}
+    if _values and not _dynamic and _minted:
+        # A credential the session MINTED (its value came back from an earlier call) is re-minted
+        # before every probe; whatever else was captured stays static and rides along.
+        _url = tparams.get("secret_header_url") or endpoint or ""
+        static_refs = {name: f"env:{secret_var_name(_url, name)}" for name in sorted(_values) if name not in _minted}
+        config["auth"] = _minted_auth_block(_minted, _pairs, static_refs)
+        config["auth_lifecycle"] = {"type": "refresh_on_ttl", "ttl_s": 0}   # already stale = re-mint per probe
+        config["_captured_credentials"] = sorted(static_refs)
+        config["_minted_credentials"] = {name: {"from": _pairs[spec["pair"]]["request"].get("url", ""), "path": spec["path"]}
+                                         for name, spec in _minted.items()}
+    elif _values and not _dynamic:
         _url = tparams.get("secret_header_url") or endpoint or ""
         refs = {name: f"env:{secret_var_name(_url, name)}" for name in sorted(_values)}
         config["auth"] = {"type": "static", "mode": "headers", "headers": refs}
@@ -1560,7 +1804,33 @@ def compose(classified: Dict[str, Any]) -> Dict[str, Any]:
                     f"mechanism is kept instead."),
         }
 
-    config["auth_lifecycle"] = _lifecycle_block(lifecycle)
+    # THE CREDENTIAL THE CAPTURE SAW IN THE QUERY STRING. `?code=`, `?key=`, `?token=` — carried
+    # by the chat request itself, previously stripped with the rest of the query and never
+    # mentioned. Each becomes a static `api_key` part with `in: query`, which `layers/auth.py`
+    # folds back into the endpoint at send time, so the value lives in the store and the config
+    # holds a reference, exactly like a captured header. A live mechanism (oauth2 / csrf /
+    # multihop / minted) is left alone for the same reason as above.
+    _qvalues = tparams.get("secret_query_values") or {}
+    if _qvalues and not _dynamic and not config.get("_minted_credentials"):
+        _url = tparams.get("secret_header_url") or endpoint or ""
+        qparts = [{"type": "static", "mode": "api_key", "in": "query", "name": name,
+                   "value_ref": f"env:{secret_var_name(_url, 'query:' + name)}"}
+                  for name in sorted(_qvalues)]
+        existing = config.get("auth")
+        if isinstance(existing, list):
+            config["auth"] = [b for b in existing if _is_captured_static(b)] + qparts
+        elif _is_captured_static(existing):
+            config["auth"] = [existing] + qparts
+        else:
+            # Nothing captured beside it — including an INFERRED block whose reference nothing
+            # sets (`env:DISCOVERED_TOKEN`), which would fail the whole list at materialize time.
+            config["auth"] = qparts[0] if len(qparts) == 1 else qparts
+        config["_captured_credentials"] = sorted(set(config.get("_captured_credentials") or [])
+                                                 | {f"query:{n}" for n in _qvalues})
+    # A minted credential already set its lifecycle (re-mint before every probe); the classified
+    # lifecycle layer describes the static case and must not overwrite it.
+    if not (config.get("_minted_credentials") and config.get("auth_lifecycle")):
+        config["auth_lifecycle"] = _lifecycle_block(lifecycle)
     config["identity"] = {"mode": identity.get("params", {}).get("mode", "fixed")}
 
     # Rate / concurrency.
@@ -1653,6 +1923,32 @@ def _sse_stream_hints(body: str) -> Dict[str, Any]:
             if term in events or term in order:
                 hints["done_when"] = {"event": term}
                 break
+        return hints
+    # No named events: the frames may carry the discriminator in a `type` field instead
+    # ({"type":"token","content":…} … {"type":"done"}). Read it the same way — the type on the
+    # frames that carried the answer text, and a terminal type — so the config says what the
+    # stream does instead of leaning on the adapter's defaults. MEASURED on the SSE lab widget.
+    types_text: Dict[str, int] = {}
+    terminal = None
+    for line in str(body).splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        try:
+            obj = json.loads(line.split(":", 1)[1].strip())
+        except Exception:
+            continue
+        if not isinstance(obj, dict) or not isinstance(obj.get("type"), str):
+            continue
+        t = obj["type"]
+        if t.strip().lower() in _WS_DONE_VALUES:
+            terminal = t
+        elif isinstance(obj.get(field), str):
+            types_text[t] = types_text.get(t, 0) + len(obj[field])
+    if types_text:
+        hints["token_types"] = [max(types_text.items(), key=lambda kv: kv[1])[0]]
+    if terminal:
+        hints["done_when"] = {"path": "type", "equals": terminal}
     return hints
 
 
@@ -1851,7 +2147,12 @@ def classify_evidence(evidence: Dict[str, Any]) -> Dict[str, Any]:
         url = tp.get("secret_header_url") or ""
         secrets = {secret_var_name(url, name): value
                    for name, value in tp["secret_header_values"].items()}
+    if tp.get("secret_query_values"):
+        url = tp.get("secret_header_url") or ""
+        secrets.update({secret_var_name(url, "query:" + name): value
+                        for name, value in tp["secret_query_values"].items()})
     tp.pop("secret_header_values", None)
+    tp.pop("secret_query_values", None)
     tp.pop("secret_header_url", None)
 
     unresolved = [name for name in LAYER_NAMES
@@ -1916,6 +2217,112 @@ def captured_secret_headers(headers: Dict[str, str]) -> Dict[str, str]:
             if not k.startswith(":") and k not in _NEVER_SECRET
             and isinstance(v, str) and v.strip()
             and _looks_secret_header(k, v)}
+
+
+def _json_path_to_value(obj: Any, value: str, prefix: str = "") -> Optional[str]:
+    """Dot-path of the first string leaf equal to `value`, or None. `data.token`, `token`, `items.0.id`."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            here = f"{prefix}.{k}" if prefix else str(k)
+            if isinstance(v, str) and v == value:
+                return here
+            found = _json_path_to_value(v, value, here)
+            if found:
+                return found
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            here = f"{prefix}.{i}" if prefix else str(i)
+            if isinstance(v, str) and v == value:
+                return here
+            found = _json_path_to_value(v, value, here)
+            if found:
+                return found
+    return None
+
+
+def _registrable_host(url: str) -> str:
+    """`api.shop.example.com` -> `example.com`-ish: the last two labels, enough to tell a widget's own
+    API from a third-party challenge or identity host."""
+    from urllib.parse import urlparse  # noqa: PLC0415
+    host = (urlparse(url or "").hostname or "").lower()
+    parts = host.split(".")
+    return ".".join(parts[-2:]) if len(parts) >= 2 else host
+
+
+def minted_credentials(values: Dict[str, str], pairs: List[Dict[str, Any]],
+                       chat_idx: Optional[int], chat_url: str = "") -> Dict[str, Dict[str, Any]]:
+    """Which captured credential headers were MINTED by an earlier call in the same session.
+
+    A header whose value appears verbatim in the JSON body of a prior response (a create-conversation
+    call handing back `{"conversation_id": …, "token": …}`) is not a static credential: it was minted
+    for that conversation and a replay with it frozen works only until the conversation ends or
+    expires. MEASURED on a lab widget: a direct app registered with the captured `X-Conv-Token`
+    answered every probe through the ONE captured conversation — right answers, wrong mechanism, and
+    a false clean run on any widget whose tokens expire. Returns `{header: {"pair": i, "path": …}}`.
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    if not values or not pairs:
+        return out
+    upto = len(pairs) if chat_idx is None else max(0, chat_idx)
+    own = _registrable_host(chat_url) if chat_url else ""
+    for name, value in values.items():
+        if not isinstance(value, str) or len(value) < 8:
+            continue
+        for i in range(upto):
+            pair = pairs[i]
+            req = pair.get("request") or {}
+            # A minter is the widget's OWN API. A token handed out by a third-party host — a WAF's
+            # challenge endpoint, a CAPTCHA, an identity provider — is a challenge answer, not a
+            # conversation the adapter can re-create: MEASURED, the bot-challenge token endpoint
+            # got replayed as a "create call" and failed every time. Same registrable domain only.
+            if own and _registrable_host(req.get("url", "")) != own:
+                continue
+            # a call that SENDS the value is a consumer of it, never the minter
+            sent = " ".join(str(v) for v in (req.get("headers") or {}).values())
+            if value in sent:
+                continue
+            body = (pair.get("response") or {}).get("json")
+            path = _json_path_to_value(body, value) if body is not None else None
+            if path:
+                out[name] = {"pair": i, "path": path}
+                break
+    return out
+
+
+def _minted_auth_block(minted: Dict[str, Dict[str, Any]], pairs: List[Dict[str, Any]],
+                       static_refs: Dict[str, str]) -> Dict[str, Any]:
+    """A derived_multihop block: re-run the minting call before every probe, attach what it hands back.
+
+    One minting call (the common case; several minted headers from the same call are all extracted).
+    The static credentials the capture also saw (an access cookie, a tenant key) ride on the minting
+    call and on the probe as env: references, resolved by layers/auth at request time.
+    """
+    first = next(iter(minted.values()))["pair"]
+    create = pairs[first]["request"]
+    step: Dict[str, Any] = {"method": create.get("method", "POST"), "url": create.get("url", "")}
+    if create.get("json") is not None:
+        step["json"] = create["json"]
+    step_headers = {k: v for k, v in _nonsecret_headers(create.get("headers") or {}).items()
+                    if k.lower() in ("content-type", "accept", "origin", "referer")}
+    step_headers.update(static_refs)
+    if step_headers:
+        step["headers"] = step_headers
+    step["extract"] = [{"var": f"MINTED_{i}", "path": spec["path"]}
+                       for i, (name, spec) in enumerate(minted.items()) if spec["pair"] == first]
+    attach = {name: f"{{{{MINTED_{i}}}}}" for i, (name, spec) in enumerate(minted.items()) if spec["pair"] == first}
+    attach.update(static_refs)
+    return {"type": "derived_multihop", "steps": [step], "attach": {"headers": attach}}
+
+
+
+def _is_captured_static(block: Any) -> bool:
+    """A static auth block whose every reference points at the capture store (never a reference
+    nothing sets, like the inferred `env:DISCOVERED_TOKEN`)."""
+    if not isinstance(block, dict) or block.get("type") != "static":
+        return False
+    refs = list((block.get("headers") or {}).values()) if block.get("mode") == "headers" \
+        else [block.get("value_ref") or block.get("value")]
+    return bool(refs) and all(isinstance(r, str) and r.startswith("env:ASCEND_SECRET_") for r in refs)
 
 
 def secret_var_name(url: str, header: str) -> str:
@@ -2003,7 +2410,11 @@ def _body_template(req: Dict[str, Any]) -> Any:
     body = req.get("json")
     prompt = _request_has_prompt(req)
     if isinstance(body, (dict, list)):
-        if prompt is not None:
+        # Only a NON-EMPTY prompt can be templated by substitution. An empty one (a create call
+        # recorded with {"message": ""}) made str.replace("", "{{PROMPT}}") insert the placeholder
+        # between every character, and json.loads then failed at char 1 — reported to the operator
+        # as "the HAR parser dies on char 1", which sent an afternoon looking at the wrong file.
+        if prompt:
             replaced = json.loads(json.dumps(body).replace(json.dumps(prompt)[1:-1], "{{PROMPT}}"))
             return replaced
         return body
@@ -2341,9 +2752,19 @@ def _html_token_origin(pairs: List[Dict[str, Any]], chat_idx: int,
 
 
 def _reuse_origin(needle: str, prior: List[Tuple[int, str, str, str]],
-                  substring: bool = False) -> Optional[Tuple[int, Optional[str], str]]:
-    """Find the earliest prior response value that equals/appears-in ``needle``."""
+                  substring: bool = False, own_host: str = "") -> Optional[Tuple[int, Optional[str], str]]:
+    """Find the earliest prior response value that equals/appears-in ``needle``.
+
+    Only the widget's OWN API can be the origin of a credential the adapter re-acquires. A value
+    handed out by a third-party host — a bot challenge's token endpoint, a CAPTCHA, an identity
+    provider — is a challenge answer or a login the adapter cannot replay from a script: MEASURED,
+    the WAF's token endpoint was chained as "derived_multihop step 0" and failed every probe.
+    With ``own_host`` (the chat request's registrable domain) such origins are ignored, which leaves
+    the credential static; the browser fallback handles its expiry.
+    """
     for idx, field, val, url in prior:
+        if own_host and _registrable_host(url) != own_host:
+            continue
         if (val in needle) if substring else (val == needle or val in needle):
             return (idx, field, url)
     return None

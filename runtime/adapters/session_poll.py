@@ -87,8 +87,20 @@ class SessionPollAdapter(BotAdapter):
         create = config.get("create") or {}
         send = config.get("send") or {}
         poll = config.get("poll") or {}
-        if not create.get("url") or not send.get("url") or not poll.get("url"):
-            return self._fail("session_poll needs create.url, send.url and poll.url", start)
+        # CREATE IS OPTIONAL. The three-call shape (create a conversation, send into it, poll for
+        # the answer) is one async pattern; the other is two calls — POST the message, get a job
+        # id back, poll that job. That second one is how most async APIs work, and requiring a
+        # separate create call refused it outright.
+        #
+        # MEASURED against a target that answers POST /messages with 202 and a job_id, then
+        # serves the reply from GET /messages/{id}: derivation identified the poll transport
+        # correctly and the adapter then refused the config for want of a call the target does
+        # not have. When there is no create step, the SEND is what creates, and its id is what
+        # gets polled.
+        if not send.get("url") or not poll.get("url"):
+            return self._fail("session_poll needs at least send.url and poll.url "
+                              "(create.url too, when the target creates a conversation first)",
+                              start)
 
         def _headers(step):
             return {**shared_headers, **(step.get("headers") or {})}
@@ -111,25 +123,33 @@ class SessionPollAdapter(BotAdapter):
                                       start)
                 logger.debug("optional bootstrap step %s failed: %s", i, e)
 
-        # 1. create conversation
-        try:
-            cr = await loop.run_in_executor(None, lambda: requests.request(
-                create.get("method", "POST").upper(), create["url"],
-                headers=_headers(create), timeout=http_timeout,
-                **_encode(create, _render(create.get("body", {}), prompt, ""))))
-            cr.raise_for_status()
-            conv = _dot(cr.json(), create.get("extract", "conversation_id"))
-        except requests.RequestException as e:
-            return self._fail(f"create failed: {e}", start,
-                              status_code=getattr(getattr(e, "response", None), "status_code", None))
-        except (ValueError, KeyError) as e:
-            return self._fail(f"create response parse failed: {e}", start)
-        if not conv:
-            return self._fail(f"could not extract conversation id via '{create.get('extract','conversation_id')}'", start)
-        conv = str(conv)
+        # 1. create conversation — only when the target has such a call.
+        conv = ""
+        if create.get("url"):
+            try:
+                cr = await loop.run_in_executor(None, lambda: requests.request(
+                    create.get("method", "POST").upper(), create["url"],
+                    headers=_headers(create), timeout=http_timeout,
+                    **_encode(create, _render(create.get("body", {}), prompt, ""))))
+                cr.raise_for_status()
+                conv = _dot(cr.json(), create.get("extract", "conversation_id"))
+            except requests.RequestException as e:
+                return self._fail(f"create failed: {e}", start,
+                                  status_code=getattr(getattr(e, "response", None), "status_code", None))
+            except (ValueError, KeyError) as e:
+                return self._fail(f"create response parse failed: {e}", start)
+            if not conv:
+                return self._fail(f"could not extract conversation id via "
+                                  f"'{create.get('extract','conversation_id')}'", start)
+            conv = str(conv)
 
-        # baseline: how many bot turns already exist (watermark) so we only take NEW replies
-        baseline = await self._count_bot_turns(loop, poll, shared_headers, conv, http_timeout)
+        # baseline: how many bot turns already exist (watermark) so we only take NEW replies.
+        # Skipped when the SEND is what creates: there is nothing to watermark yet, and polling a
+        # {{CONV}} we do not have would ask the target about a job that does not exist.
+        baseline = 0
+        if conv:
+            baseline = await self._count_bot_turns(loop, poll, shared_headers, conv,
+                                                   http_timeout)
 
         # 2. send the message
         send_url = send["url"].replace("{{CONV}}", conv)
@@ -144,6 +164,25 @@ class SessionPollAdapter(BotAdapter):
             return self._fail(f"send failed: {e}", start,
                               status_code=getattr(getattr(e, "response", None), "status_code", None),
                               conv=conv)
+
+        # When the send IS the create, the thing to poll is whatever id it just handed back.
+        # `send.extract` names it; the usual answers are job_id, id or task_id, and a 202 with
+        # one of those is the signature of this whole shape.
+        if not conv:
+            try:
+                body = sr.json()
+            except ValueError:
+                body = {}
+            for field in ([send["extract"]] if send.get("extract")
+                          else ("job_id", "id", "task_id", "request_id", "message_id")):
+                got = _dot(body, field)
+                if got:
+                    conv = str(got)
+                    break
+            if not conv:
+                return self._fail(
+                    "the send returned no id to poll — name it with send.extract "
+                    f"(reply was: {str(body)[:160]})", start)
 
         # 3. poll for the new bot reply
         interval = poll.get("interval_ms", 1000) / 1000
@@ -183,7 +222,29 @@ class SessionPollAdapter(BotAdapter):
         except Exception:
             return []
         arr = _dot(data, poll.get("list_path", "messages"))
+        # A JOB endpoint answers with the reply itself, not a transcript: {"status": "done",
+        # "reply": "..."}. There is no list to walk and no role to match, and reading it as one
+        # returned nothing forever — the adapter polled a job that had been finished for
+        # twenty-nine seconds and then reported "no agent reply within 30000ms", which reads as
+        # a target that never answered.
+        #
+        # So: when the list is not there, look for the answer directly. `answer_path` says where
+        # when the operator knows; otherwise the usual names. `done_when` holds it back until the
+        # job says it is finished, so a "pending" placeholder is never taken as the reply.
         if not isinstance(arr, list):
+            done_field = poll.get("done_field", "status")
+            done_values = [str(v).lower() for v in
+                           (poll.get("done_values") or ("done", "complete", "completed",
+                                                        "succeeded", "finished", "ok"))]
+            if isinstance(data, dict) and data.get(done_field) is not None:
+                if str(data.get(done_field)).lower() not in done_values:
+                    return []                      # still working: not an answer yet
+            for field in ([poll["answer_path"]] if poll.get("answer_path")
+                          else ("reply", "response", "answer", "text", "message", "output",
+                                "result")):
+                got = _dot(data, field)
+                if isinstance(got, str) and got.strip():
+                    return [got]
             return []
         role_field = poll.get("role_field", "role")
         bot_roles = [x.lower() for x in (poll.get("bot_roles") or DEFAULT_BOT_ROLES)]

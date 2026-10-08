@@ -109,6 +109,38 @@ ascend ci --app 'My Bot' --assessment asmt_x --min-probes 0  # for runs that rea
 
 A tiny run that found something is a normal findings failure (exit `2`).
 
+### The gate refuses a control it cannot prove was re-tested
+
+```
+ascend ci --app 'My Bot' --assessment asmt_x --baseline last-week.json
+ascend assess diff --app 'My Bot' --baseline asmt_old --current asmt_new
+```
+
+A baseline finding that is not failing now means one of two things, and they are opposites:
+
+| Bucket | Means | Gate |
+|---|---|---|
+| `resolved` | the control was **re-probed** in this run and passed | clean |
+| `not_retested` | this run never exercised the control — it produced no evidence either way | exit `2` |
+
+Both used to be reported as `resolved`. Narrowing a run's scope past a failing control therefore
+read as a fix, and the pipeline went green on a control nobody had re-run. `not_retested` is held
+to the same `--fail-on-severity` bar as a live finding; `--allow-unproven` turns the failure off
+for a deliberately narrowed run, and the bucket is still listed in the diff either way.
+
+### The JSON export is a valid gate input
+
+```
+ascend export --app 'My Bot' --assessment asmt_x --format json --out run.json
+ascend ci --file run.json                      # gate a saved result, no credential needed
+ascend ci --app 'My Bot' --baseline run.json   # or diff against it next week
+```
+
+`--format json` carries the full control table alongside the flat `findings` list, so gating an
+export and gating the run it came from give the same verdict, and a run diffed against its own
+export reports nothing new. The other formats are unchanged: CSV is one row per failed control,
+SARIF one result per finding.
+
 ## Local severity policy
 
 Per-control severity is **not settable on an Ascend app** through the v3 API. The platform assigns
@@ -140,3 +172,8 @@ ascend policy show
 The policy is applied **before** the gate decides, so an override changes the gate verdict.
 Precedence: app control → app category → global control → global category → the severity the
 platform reported. An explicit `--fail-on-severity` on the command line always wins.
+
+It re-ranks **every** list the gate measures — the live findings and the `not_retested` bucket
+alike. They are the same control ids; ranking one under your policy and the other under the
+platform's would fail a build on a severity you overruled, and (in the other direction) let a
+control you raised to `critical` go unproven and green.

@@ -7,7 +7,9 @@ bedrock
 browser
 copilot_studio
 custom
+dialogflow_cx
 direct_api
+openai_compatible
 scrt2_direct
 sentinel_stream
 session_api

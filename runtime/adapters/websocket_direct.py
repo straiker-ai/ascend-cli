@@ -31,7 +31,9 @@ CONFIG KEYS
                       string under common keys (text/content/message/delta/token).
   done_when         - {"path": "...", "equals": "..."} or {"contains": "..."} — a frame
                       that signals the answer is complete. Optional.
-  idle_ms           - if no done_when, stop after this many ms of silence (default 1500).
+  idle_ms           - if no done_when, stop after this many ms of silence BETWEEN frames (default 1500).
+  first_frame_ms    - how long to wait for the FIRST frame (default: the probe budget). The idle gap
+                      never applies before the first frame: a model's think time is not silence.
   timeout_ms        - overall hard timeout in ms (optional; otherwise derived from the platform's per-probe window)
   aggregate         - "concat" (default) join collected chunks, or "last" take the last.
 """
@@ -67,6 +69,14 @@ class WebSocketAdapter(BotAdapter):
         subprotocols = config.get("subprotocols") or None
         timeout = resolve_timeout_s(config)
         idle = config.get("idle_ms", 1500) / 1000
+        # How long to wait for the FIRST frame. The idle gap is a rule about silence BETWEEN
+        # frames; applied before any frame it is a rule about the target's think time, and a
+        # 1.5 s think-time budget fails every model-backed target on a cold path. MEASURED on a
+        # Lambda-backed socket: 25 of 26 probes came back "No response frames collected" under
+        # a run while the same target answered 9 of 10 direct calls in 2.5-3.8 s. Default: the
+        # whole probe budget, less a margin so the adapter reports the timeout itself.
+        first_frame = config.get("first_frame_ms")
+        first_wait = (float(first_frame) / 1000) if first_frame else max(idle, timeout - 5.0)
         done_when = config.get("done_when")
         rpath = config.get("response_path")
         aggregate = config.get("aggregate", "concat")
@@ -74,23 +84,40 @@ class WebSocketAdapter(BotAdapter):
         send_frame = config.get("send_template", {"type": "message", "text": "{{PROMPT}}"})
         init_messages = config.get("init_messages", []) or []
 
+        seen: Dict[str, Any] = {"frames": 0, "error": None}
         try:
             resp = await asyncio.wait_for(
                 self._converse(websockets, ws_url, headers, subprotocols, init_messages,
-                               send_frame, prompt, rpath, done_when, idle, aggregate),
+                               send_frame, prompt, rpath, done_when, idle, aggregate,
+                               first_wait=first_wait, seen=seen),
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
-            return self._fail(f"WebSocket timeout after {timeout}s", start)
+            return self._fail(f"WebSocket timeout after {timeout}s", start, reason="ws_timeout",
+                              next="the whole probe budget passed: raise timeout_ms only if the target is known to be slow; otherwise check the socket answers at all")
         except Exception as e:  # noqa: BLE001 — surface any handshake/protocol error to Ascend
-            return self._fail(f"WebSocket error: {e}", start)
+            return self._fail(f"WebSocket error: {e}", start, reason="ws_error",
+                              next="a handshake or protocol error: confirm ws_url, subprotocols and headers against the capture")
 
         if not resp:
-            return self._fail("No response frames collected", start)
+            # Say what was seen: a gateway error frame, frames without answer text (a wrong
+            # response_path), or true silence — three different fixes.
+            if seen.get("error"):
+                return self._fail(f"Socket answered with an error frame: {seen['error']}", start, reason="error_frame",
+                                  next="the gateway or backend errored, not the adapter: read the target's logs; the send frame may be wrong for it")
+            if seen.get("frames"):
+                return self._fail(f"{seen['frames']} frame(s) received but none carried answer text "
+                                  "(check response_path)", start, reason="no_answer_text",
+                                  next="set response_path to the field that carries the reply in the received frames")
+            return self._fail(f"No response frames collected within {first_wait:.0f}s", start, reason="no_first_frame",
+                              next="nothing arrived in the think-time wait: check the send frame matches what the page sends, or raise first_frame_ms")
         return self._ok(resp.strip(), start, adapter="websocket_direct")
 
     async def _converse(self, websockets, ws_url, headers, subprotocols, init_messages,
-                        send_frame, prompt, rpath, done_when, idle, aggregate) -> str:
+                        send_frame, prompt, rpath, done_when, idle, aggregate,
+                        first_wait: Optional[float] = None, seen: Optional[Dict[str, Any]] = None) -> str:
+        seen = seen if seen is not None else {}
+        first_wait = idle if first_wait is None else first_wait
         # `additional_headers` (websockets>=13) vs `extra_headers` (older) — try both.
         connect_kw = {"subprotocols": subprotocols, "open_timeout": 10, "max_size": 10 * 1024 * 1024}
         try:
@@ -105,13 +132,20 @@ class WebSocketAdapter(BotAdapter):
 
             chunks: List[str] = []
             while True:
+                # first frame: the target's think time; later frames: the idle gap between them
+                wait = first_wait if not seen.get("frames") else idle
                 try:
-                    raw = await asyncio.wait_for(ws.recv(), timeout=idle)
+                    raw = await asyncio.wait_for(ws.recv(), timeout=wait)
                 except asyncio.TimeoutError:
-                    break  # idle gap => answer complete
+                    break  # idle gap => answer complete (or nothing ever came)
                 except Exception:
                     break  # closed
+                seen["frames"] = seen.get("frames", 0) + 1
                 frame = self._decode(raw)
+                err = self._error_frame(frame)
+                if err:
+                    seen["error"] = err
+                    continue
                 text = self._extract(frame, rpath)
                 if text:
                     chunks.append(text)
@@ -122,6 +156,18 @@ class WebSocketAdapter(BotAdapter):
             if aggregate == "last":
                 return chunks[-1] if chunks else ""
             return "".join(chunks)
+
+    @staticmethod
+    def _error_frame(frame: Any) -> Optional[str]:
+        """A gateway's error frame is not an answer. API Gateway WebSocket answers a failed
+        integration with {"message": "Internal server error", "connectionId": …, "requestId": …};
+        read as text it would score as the bot's reply, and ignored it hides the reason."""
+        if not isinstance(frame, dict):
+            return None
+        msg = frame.get("message")
+        if isinstance(msg, str) and ("requestId" in frame or "connectionId" in frame) and len(frame) <= 4:
+            return msg[:200]
+        return None
 
     # -- protocol hooks (override for binary protocols) ------------------------
     def _encode(self, frame: Any, prompt: str) -> str:

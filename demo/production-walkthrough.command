@@ -239,7 +239,7 @@ note "(Advanced: 'ascend bridge start --app' pre-starts one for remote/continuou
 # =============================================================================================
 act "ACT 7 — run the assessment"
 
-say "Hand it to Ascend. Iris generates the attacks; the bridge relays them through our adapter."
+say "Hand it to Ascend. Ascend AI generates the attacks; the bridge relays them through our adapter."
 run "./ascend assess run --app '$APP' --name 'lifecycle demo'" 4
 
 say "Watch it live — the BRIDGE column means an unanswered run cannot hide."

@@ -1,0 +1,50 @@
+{
+  "family": "ascend-relay",
+  "requiresCompatibilities": ["FARGATE"],
+  "networkMode": "awsvpc",
+  "cpu": "256",
+  "memory": "512",
+  "runtimePlatform": {
+    "operatingSystemFamily": "LINUX",
+    "cpuArchitecture": "X86_64"
+  },
+  "executionRoleArn": "arn:aws:iam::REPLACE_ACCOUNT:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::REPLACE_ACCOUNT:role/ascend-relay-task",
+  "containerDefinitions": [
+    {
+      "name": "relay",
+      "image": "REPLACE_ACCOUNT.dkr.ecr.us-east-2.amazonaws.com/ascend-relay:1.1.4",
+      "essential": true,
+      "readonlyRootFilesystem": true,
+      "stopTimeout": 120,
+      "mountPoints": [
+        { "sourceVolume": "ascend-state", "containerPath": "/var/lib/ascend/state", "readOnly": false },
+        { "sourceVolume": "ascend-work", "containerPath": "/var/lib/ascend/work", "readOnly": false }
+      ],
+      "environment": [
+        { "name": "ASCEND_RELAY_APP_ID", "value": "REPLACE_aapp_id" },
+        { "name": "ASCEND_ASSESSMENT_ID", "value": "REPLACE_assessment_id" },
+        { "name": "ASCEND_RELAY_WAIT_MS", "value": "25000" },
+        { "name": "ASCEND_RELAY_DEADLINE_S", "value": "21600" }
+      ],
+      "secrets": [
+        { "name": "STRAIKER_BRIDGE_API_KEY", "valueFrom": "arn:aws:secretsmanager:us-east-2:REPLACE_ACCOUNT:secret:ascend/relay-key" },
+        { "name": "STRAIKER_PAT", "valueFrom": "arn:aws:secretsmanager:us-east-2:REPLACE_ACCOUNT:secret:ascend/pat" },
+        { "name": "ASCEND_RELAY_CONFIG_JSON", "valueFrom": "arn:aws:secretsmanager:us-east-2:REPLACE_ACCOUNT:secret:ascend/target-config" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ascend/relay",
+          "awslogs-region": "us-east-2",
+          "awslogs-stream-prefix": "relay",
+          "awslogs-create-group": "true"
+        }
+      }
+    }
+  ],
+  "volumes": [
+    { "name": "ascend-state" },
+    { "name": "ascend-work" }
+  ]
+}

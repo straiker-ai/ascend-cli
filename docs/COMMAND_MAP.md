@@ -233,6 +233,7 @@ gate the file and write it onto the app's request_template
 | Flag | Value | Default | What it does |
 |---|---|---|---|
 | `--app` **(required)** | `NAME|aapp_id` | — | the application (platform side: a name or aapp_ id) |
+| `--endpoint` | `URL` | — | the target's address, only for an app with no URL (stored as _adaptor_endpoint; an app's own URL is its adaptor's address) |
 | `--dry-run` | — | — | gate and show the merged template; write nothing |
 
 ```bash
@@ -240,7 +241,7 @@ ascend adaptor store my_adaptor.js --app 'My Bot' --dry-run   # see the merge
 ascend adaptor store my_adaptor.js --app 'My Bot'
 ```
 
-> Gated first; refused on any violation. Only _adaptor_src changes - every other key in the template is sent back as it was - and the write is read back before it is reported.
+> Gated first; refused on any violation. Only _adaptor_src changes - every other key in the template is sent back as it was, except an endpoint key the engine would never read, which is dropped and said - and the write is read back before it is reported.
 
 ### `ascend adaptor test`
 
@@ -1394,7 +1395,8 @@ The agent's own `check`, printed line for line: the connection to Straiker throu
 | `--relay` | `WSS_URL` | — | the Straiker endpoint the agent dials (wss://…), instead of the one --env selects |
 | `--host-key` | `'TYPE BASE64'` | — | the endpoint's SSH host key to pin, when Straiker publishes it |
 | `--ca-file` | `PEM` | — | an extra CA to trust besides the system store, e.g. a TLS-inspecting proxy's |
-| `--state-dir` | `DIR` | — | where the agent keeps its key (default: $TUNNEL_STATE_DIR, else ~/.ascend/state/tunnel/agent — one identity per machine, whichever tenant is pinned). Keep it, or the agent gets a new identity |
+| `--fanout` | `N` | — | parallel links to Straiker, for throughput (1-16; the agent's default is 1). Above 10 the longest allowed host is one character shorter |
+| `--state-dir` | `DIR` | — | where the agent keeps its key (default: $TUNNEL_STATE_DIR, else ~/.ascend/state/tunnel/agent — one identity per machine, whichever tenant is pinned; a key the ascend-tunnel binary made by hand in its own default directory is used when the CLI has none). Keep it, or the agent gets a new identity |
 | `--runner` | `auto|binary|docker` | `auto` | where the agent comes from: ascend-tunnel on PATH, or the Docker image (auto: PATH first) |
 
 ```bash
@@ -1410,7 +1412,7 @@ The agent's public key, as the agent prints it, to list on each app it serves (`
 
 | Flag | Value | Default | What it does |
 |---|---|---|---|
-| `--state-dir` | `DIR` | — | where the agent keeps its key (default: $TUNNEL_STATE_DIR, else ~/.ascend/state/tunnel/agent — one identity per machine, whichever tenant is pinned). Keep it, or the agent gets a new identity |
+| `--state-dir` | `DIR` | — | where the agent keeps its key (default: $TUNNEL_STATE_DIR, else ~/.ascend/state/tunnel/agent — one identity per machine, whichever tenant is pinned; a key the ascend-tunnel binary made by hand in its own default directory is used when the CLI has none). Keep it, or the agent gets a new identity |
 | `--runner` | `auto|binary|docker` | `auto` | where the agent comes from: ascend-tunnel on PATH, or the Docker image (auto: PATH first) |
 
 ```bash
@@ -1453,7 +1455,8 @@ Run the agent for one org, allowing the targets given. Detached by default: it s
 | `--relay` | `WSS_URL` | — | the Straiker endpoint the agent dials (wss://…), instead of the one --env selects |
 | `--host-key` | `'TYPE BASE64'` | — | the endpoint's SSH host key to pin, when Straiker publishes it |
 | `--ca-file` | `PEM` | — | an extra CA to trust besides the system store, e.g. a TLS-inspecting proxy's |
-| `--state-dir` | `DIR` | — | where the agent keeps its key (default: $TUNNEL_STATE_DIR, else ~/.ascend/state/tunnel/agent — one identity per machine, whichever tenant is pinned). Keep it, or the agent gets a new identity |
+| `--fanout` | `N` | — | parallel links to Straiker, for throughput (1-16; the agent's default is 1). Above 10 the longest allowed host is one character shorter |
+| `--state-dir` | `DIR` | — | where the agent keeps its key (default: $TUNNEL_STATE_DIR, else ~/.ascend/state/tunnel/agent — one identity per machine, whichever tenant is pinned; a key the ascend-tunnel binary made by hand in its own default directory is used when the CLI has none). Keep it, or the agent gets a new identity |
 | `--runner` | `auto|binary|docker` | `auto` | where the agent comes from: ascend-tunnel on PATH, or the Docker image (auto: PATH first) |
 | `--foreground` | — | — | run in this terminal (output here, Ctrl-C stops it) instead of detaching |
 

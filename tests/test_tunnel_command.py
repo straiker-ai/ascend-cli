@@ -124,6 +124,12 @@ FAKE_AGENT = textwrap.dedent(f'''\
         if os.environ.get("FAKE_TUNNEL_FAIL"):
             print("FAIL  relay WebSocket: dial tcp: i/o timeout (allow outbound HTTPS to it; set HTTPS_PROXY if you use a proxy)")
             sys.exit(1)
+        if os.environ.get("FAKE_TUNNEL_UPGRADE"):
+            # MEASURED 2026-10-13 against prod with the 0.1.2 agent, word for word.
+            print("FAIL  relay WebSocket: relay %s: failed to WebSocket dial: expected handshake response status code 101 but got %s (allow outbound HTTPS to it; set HTTPS_PROXY if you use a proxy)" % (endpoint, os.environ["FAKE_TUNNEL_UPGRADE"]))
+            for a in allows:
+                print("PASS  target %s:%d reachable" % addr(a))
+            sys.exit(1)
         print("PASS  relay WebSocket upgraded over HTTPS")
         if flag("--host-key"):
             print("PASS  relay host key matches the pinned key")
@@ -201,8 +207,13 @@ def state(tmp_path, monkeypatch):
     monkeypatch.setenv("ASCEND_NO_CACHE", "1")
     monkeypatch.setenv("NO_COLOR", "1")
     for v in ("TUNNEL_STATE_DIR", "STRAIKER_API_BASE", "FAKE_TUNNEL_FAIL", "FAKE_TUNNEL_LISTED",
-              "FAKE_TUNNEL_DIE", "FAKE_TUNNEL_MINT", "FAKE_DOCKER_NO_IMAGE", *T.PROXY_VARS):
+              "FAKE_TUNNEL_DIE", "FAKE_TUNNEL_MINT", "FAKE_TUNNEL_UPGRADE", "FAKE_DOCKER_NO_IMAGE",
+              *T.PROXY_VARS):
         monkeypatch.delenv(v, raising=False)
+    # The binary's own default directory is the real home's (~/Library/… on macOS): never let a
+    # test read or write it. An empty stand-in means "the binary never ran here" unless a test
+    # puts a key there on purpose.
+    monkeypatch.setattr(T, "binary_default_state_dir", lambda: tmp_path / "binary-default")
     return tmp_path / "state"
 
 
@@ -309,7 +320,8 @@ def test_url_refuses_an_ip_with_an_envelope(cli):
     assert code == ascend.EXIT_USAGE
     env = json.loads(out)
     assert env["ok"] is False and env["error"]["code"] == "bad_target"
-    assert "IP address" in env["error"]["message"] and "IP address" in err
+    assert "Straiker does not route an IP-literal tunnel name" in env["error"]["message"]
+    assert "Straiker does not route an IP-literal tunnel name" in err
 
 
 def test_url_plain_output(cli):
@@ -336,6 +348,94 @@ def test_check_streams_the_agents_lines_and_wait_is_exit_0(cli, agent, state):
     assert argv[argv.index("--relay") + 1] == "wss://ascendai-bridge.dev.straiker.ai/tunnel"
     assert "--host-key" not in argv                                   # none published for dev
     assert argv[argv.index("--state-dir") + 1] == str(T.agent_state_dir())
+
+
+def test_check_passes_fanout_and_refuses_it_out_of_range(cli, agent):
+    code, out, err = cli(["tunnel", "check", "--org", "123", "--allow", "a.corp", "--fanout", "4", "--json"])
+    assert code == 0, err
+    [argv] = agent.argv()
+    assert argv[argv.index("--fanout") + 1] == "4" and argv[-2:] == ["--fanout", "4"]
+    assert json.loads(out)["data"]["fanout"] == 4
+    for bad in ("0", "17"):
+        code, out, _ = cli(["tunnel", "check", "--org", "123", "--allow", "a.corp", "--fanout", bad, "--json"])
+        assert code == ascend.EXIT_USAGE and json.loads(out)["error"]["code"] == "bad_fanout"
+        assert "fanout must be 1..16" in json.loads(out)["error"]["message"]
+    assert len(agent.argv()) == 1, "nothing spawned for a bad fanout"
+
+
+def test_check_on_stage_dials_the_real_relay_with_its_key_pinned(cli, agent):
+    code, out, err = cli(["tunnel", "check", "--org", "123", "--allow", "a.corp", "--env", "stage"])
+    assert code == 0, err
+    [argv] = agent.argv()
+    assert argv[argv.index("--relay") + 1] == "wss://ascendai-bridge.stage.straiker.ai/tunnel"
+    assert argv[argv.index("--host-key") + 1] == T.STAGE_HOST_KEY
+    assert "PASS  relay host key matches the pinned key" in out
+
+
+def test_a_prod_403_at_the_upgrade_says_the_tunnel_is_not_enabled_there(cli, agent, monkeypatch):
+    """MEASURED: prod's relay answers 403 at the WebSocket upgrade while the tunnel is off there.
+    The generic proxy hint blamed the operator's network; now the check says what it is."""
+    monkeypatch.setenv("FAKE_TUNNEL_UPGRADE", "403")
+    code, out, err = cli(["tunnel", "check", "--org", "123", "--allow", "a.corp", "--env", "prod"])
+    assert code == ascend.EXIT_ERROR
+    assert "check failed: the tunnel is not enabled on this environment yet" in out
+    assert "--env stage" in out and "Send the lines above" not in out
+    code, out, _ = cli(["tunnel", "check", "--org", "123", "--allow", "a.corp", "--env", "prod", "--json"])
+    env = json.loads(out)
+    assert env["ok"] is False and env["error"]["code"] == "tunnel_not_enabled"
+    assert "not enabled on this environment yet" in env["error"]["message"]
+    assert env["data"]["relay_status"] == 403 and env["data"]["tunnel_enabled"] is False
+
+
+@pytest.mark.parametrize("env_name,upgrade,fail", [("dev", "403", None), ("stage", "403", None),
+                                                    ("prod", "502", None), ("prod", None, "1")])
+def test_any_other_environment_or_failure_keeps_the_generic_hint(cli, agent, monkeypatch, env_name, upgrade, fail):
+    if upgrade:
+        monkeypatch.setenv("FAKE_TUNNEL_UPGRADE", upgrade)
+    if fail:
+        monkeypatch.setenv("FAKE_TUNNEL_FAIL", fail)
+    code, out, _ = cli(["tunnel", "check", "--org", "123", "--allow", "a.corp", "--env", env_name])
+    assert code == ascend.EXIT_ERROR
+    assert "Send the lines above to support@straiker.ai" in out and "not enabled" not in out
+    code, out, _ = cli(["tunnel", "check", "--org", "123", "--allow", "a.corp", "--env", env_name, "--json"])
+    env = json.loads(out)
+    assert env["error"]["code"] == "check_failed" and env["data"]["tunnel_enabled"] is True
+
+
+def test_a_key_the_binary_made_by_hand_is_the_identity_used_and_said(cli, agent, state, tmp_path):
+    """A customer ran `ascend-tunnel` per its README first: its key sits in the binary's default
+    directory and is what the app lists. The CLI used to pass its own empty directory, mint a
+    second identity, and wait forever."""
+    default = T.binary_default_state_dir()
+    default.mkdir(parents=True)
+    (default / "agent.key").write_text(PRIVATE)
+    code, out, err = cli(["tunnel", "check", "--org", "123", "--allow", "a.corp"])
+    assert code == 0, err
+    [argv] = agent.argv()
+    assert argv[argv.index("--state-dir") + 1] == str(default)
+    assert f"using the identity at {default}" in err and "run by hand" in err
+    code, out, _ = cli(["tunnel", "key", "--json"])
+    env = json.loads(out)
+    assert env["data"]["state_dir"] == str(default) and env["data"]["identity_source"] == "binary-default"
+    assert not (state / "tunnel" / "agent" / "agent.key").exists(), "no second identity was minted"
+
+
+def test_two_identities_keep_the_clis_and_name_the_other(cli, agent, state):
+    default = T.binary_default_state_dir()
+    default.mkdir(parents=True)
+    (default / "agent.key").write_text(PRIVATE)
+    cli_dir = state / "tunnel" / "agent"
+    cli_dir.mkdir(parents=True)
+    (cli_dir / "agent.key").write_text(PRIVATE)
+    code, out, err = cli(["tunnel", "check", "--org", "123", "--allow", "a.corp", "--json"])
+    assert code == 0
+    [argv] = agent.argv()
+    assert argv[argv.index("--state-dir") + 1] == str(cli_dir)
+    assert f"another identity exists at {default}" in err and f"--state-dir {default}" in err
+    assert json.loads(out)["data"]["identity_source"] == "cli"
+    code, out, err = cli(["tunnel", "check", "--org", "123", "--allow", "a.corp", "--state-dir", str(default)])
+    assert code == 0 and "another identity" not in err
+    assert agent.argv()[-1][argv.index("--state-dir") + 1] == str(default)
 
 
 def test_check_json_envelope(cli, agent):
@@ -448,7 +548,11 @@ def test_neither_binary_nor_docker_names_the_install_paths(cli, monkeypatch, sta
     assert code == ascend.EXIT_ERROR
     env = json.loads(out)
     assert env["ok"] is False and env["error"]["code"] == "no_tunnel_runner"
-    assert "brew install straiker-ai/tap/ascend-tunnel" in err and "docker pull" in err
+    assert f"docker pull {T.IMAGE}" in err and "releases" in err
+    assert "shasum -a 256 -c checksums.txt" in err and "gh attestation verify" in err
+    assert "xattr -d com.apple.quarantine" in err
+    assert err.index("ascend-tunnel_<version>_<os>_<arch>.tar.gz") < err.index("brew install")
+    assert "brew install straiker-ai/tap/ascend-tunnel        (when published)" in err
 
 
 # --------------------------------------------------------------------------- start / ls / logs / stop
@@ -484,7 +588,10 @@ def test_start_ls_logs_stop_lifecycle(cli, agent, state):
         code, out, _ = cli(["tunnel", "ls"])
         assert code == 0
         assert "serving" in out and "waiting" in out and "123" in out and "dev" in out
-        assert "no app lists this agent's key yet" in out and KEY_BLOB in out
+        assert "refused until an app lists its key AND Straiker uses that app once" in out
+        assert "Test Connection" in out and KEY_BLOB in out
+        assert "it is refused until one does" not in out
+        assert st["fanout"] is None and "--fanout" not in argv
         code, out, _ = cli(["tunnel", "ls", "--json"])
         [row] = json.loads(out)["data"]["tunnels"]
         assert row["id"] == "123-dev" and row["state"] == "serving" and row["link"] == "waiting"
@@ -507,6 +614,27 @@ def test_start_ls_logs_stop_lifecycle(cli, agent, state):
         assert not T.pid_alive(pid)
         code, out, _ = cli(["tunnel", "ls", "--json"])
         assert json.loads(out)["data"]["tunnels"] == []
+    finally:
+        _stop_all(cli)
+
+
+def test_start_passes_fanout_records_it_and_says_when_the_key_works(cli, agent, state):
+    try:
+        code, out, err = cli(["tunnel", "start", "--org", "123", "--allow", "chat.corp.internal",
+                              "--env", "dev", "--fanout", "8"])
+        assert code == 0, err
+        [argv] = agent.argv()
+        assert argv[argv.index("--fanout") + 1] == "8"
+        st = json.loads((T.tunnel_dir() / "123-dev.json").read_text())
+        assert st["fanout"] == 8
+        assert "becomes usable once the app lists it AND Straiker uses the app once" in out
+        code, out, _ = cli(["tunnel", "ls", "--json"])
+        [row] = json.loads(out)["data"]["tunnels"]
+        assert row["id"] == "123-dev"
+        code, out, _ = cli(["tunnel", "start", "--org", "124", "--allow", "chat.corp.internal",
+                            "--env", "dev", "--fanout", "99", "--json"])
+        assert code == ascend.EXIT_USAGE and json.loads(out)["error"]["code"] == "bad_fanout"
+        assert len(agent.argv()) == 1
     finally:
         _stop_all(cli)
 
@@ -675,6 +803,16 @@ def platform_factory(monkeypatch, state):
         pf.rec = install_fake_requests(monkeypatch, pf)
         return pf
     return make
+
+
+def test_no_keys_says_when_a_listed_key_starts_working(cli, platform_factory):
+    """A listed key is accepted once the app lists it AND Straiker has used the app once (Test
+    Connection, `adaptor test`, a run start) — not the moment it is listed."""
+    platform_factory(keys=[])
+    code, out, _ = cli(["app", "tunnel-keys", APP_ID])
+    assert code == 0
+    assert "refused until its key is here AND Straiker has used the app once" in out
+    assert "Test Connection" in out and "ascend adaptor test" in out
 
 
 def test_list_shows_the_keys_with_agent_ids(cli, platform_factory):

@@ -140,10 +140,38 @@ class TestDefaultIsAHostedAdaptor:
         assert via == "bridge" and adapter in why and "deprecated" in why
 
     @pytest.mark.parametrize("kind", ["oauth2", "csrf", "derived_multihop"])
-    def test_a_login_handshake_no_generator_runs_falls_to_the_bridge_with_the_way_out(self, kind):
+    def test_a_login_handshake_is_adaptor_driven_with_the_scaffold_not_a_bridge(self, kind):
+        """A handshake target defaulted to the DEPRECATED bridge, silently. It is now registered
+        adaptor-driven: the generated file is the scaffold with the login named in its header,
+        and the repair loop (`adaptor test` → finish → `adaptor store`) completes it."""
         via, why = ascend._choose_transport(self._args(), "direct_api",
                                             {"endpoint": "https://8.8.8.8/c", "auth": {"type": kind}})
-        assert via == "bridge" and kind in why and "adaptor scaffold" in why
+        assert via == "adaptor"
+        assert kind in why and "scaffold" in why and "adaptor test" in why and "adaptor store" in why
+        assert "--via bridge" in why, "the way back to the old path is named"
+
+    @pytest.mark.parametrize("kind", ["oauth2", "csrf", "derived_multihop"])
+    def test_a_handshake_target_still_takes_the_bridge_on_request(self, kind):
+        via, why = ascend._choose_transport(self._args(via="bridge"), "direct_api",
+                                            {"endpoint": "https://8.8.8.8/c", "auth": {"type": kind}})
+        assert via == "bridge" and "deprecated" in why
+
+    def test_a_handshake_target_on_a_private_address_is_still_refused(self, monkeypatch):
+        """The reachability gate comes first: the scaffold would run in the engine, which cannot
+        dial a private address either."""
+        monkeypatch.setattr(sys, "argv", ["ascend", "--json"])
+        with pytest.raises(SystemExit):
+            ascend._choose_transport(self._args(json=True), "direct_api",
+                                     {"endpoint": "http://127.0.0.1:1/c", "auth": {"type": "oauth2"}})
+
+    def test_the_handshake_kinds_are_one_list(self):
+        """The CLI and the generator decide "handshake" from the same tuple."""
+        from runtime.discovery import codegen_js as G
+        assert tuple(ascend.DYNAMIC_AUTH_KINDS) == tuple(G.DYNAMIC_AUTH_KINDS)
+        for kind in ascend.DYNAMIC_AUTH_KINDS:
+            assert G.handshake_kind({"auth": {"type": kind}}) == kind
+            assert G.handshake_kind({"auth": [{"type": "static"}, {"type": kind}]}) == kind
+        assert G.handshake_kind({"auth": {"type": "static"}}) is None and G.handshake_kind({}) is None
 
     def test_a_private_address_is_refused_before_any_app_exists(self, monkeypatch):
         """The engine cannot reach it, so a hosted adaptor would only ever fail its test; say so

@@ -36,7 +36,8 @@ point at `target add` / `assess run` / the Console.
    `--console-id <uuid>` overrides when that listing cannot be read, and the CLI explains the
    mix-up when the engine answers "could not be read". Note that `ascend target add` now
    generates, stores and verifies an adaptor by default (`<config>.adaptor.js`): this skill is
-   for finishing or replacing one.
+   for finishing or replacing one — a target with a login handshake, or a contract no generator
+   covers, is registered with the scaffold and marked `UNFINISHED`, and this loop finishes it.
 3. **The reply shape**: `ascend adaptor shape --app <app>` prints the app's `response_template`
    and the exact `return` statement to write. Read it before writing a line. An app carrying
    `v0:passthrough` is waiting for its real adaptor; an app on the retired `https://custom-adaptor`
@@ -49,8 +50,10 @@ point at `target add` / `assess run` / the Console.
    one exchange there. For a tunnel or private-link app, build every URL from
    `host.config.endpoint()`; this machine cannot reach it, `adaptor test` can.
 5. **Write it**: `ascend adaptor spec --out host.d.ts` first, then start from
-   `ascend adaptor scaffold --out my_adaptor.js`. One file, one `sendTurn`, synchronous, no
-   `fetch`/`async`/`Promise`/npm, no module state. If the target has a cheap credential check
+   `ascend adaptor scaffold --out my_adaptor.js`. One file, `sendTurn` defined, synchronous, no
+   `fetch`/`async`/`Promise`/npm, no global the isolate lacks (`atob`, `URL`, `Buffer`… are refused;
+   `console` is allowed), no `this` outside a class, no `with`, no `host[expr]`, no `__` names, no
+   TypeScript, no module state. If the target has a cheap credential check
    (`/me`, `users/authenticated`), also define `checkReachability(turn, host)` in the same file so
    preflight does not spend a real turn. Drain a greeting the bot sends when a conversation opens;
    on a 401 for a token you minted, mint again and retry once; a HAR showing no auth does not mean
@@ -59,8 +62,10 @@ point at `target add` / `assess run` / the Console.
    → read the host-call transcript → fix → repeat. One change per test; each test is a real
    conversation with a real system.
 7. **Apply**: `ascend adaptor store my_adaptor.js --app <app>` (gated first; only `_adaptor_src`
-   changes; the write is read back), then `ascend adaptor verify --app <uuid>`, which runs what is
-   **stored**. Then tell the SE it is ready, to delete the HAR, and to start a **NEW** assessment,
+   changes, except an endpoint key the engine would never read, which is dropped and said;
+   `--endpoint <url>` only for an app with no URL; the write is read back — in `--json`,
+   `template_digest` equal to `stored_digest` is the proof it landed, not the engine's `digest`),
+   then `ascend adaptor verify --app <uuid>`, which runs what is **stored**. Then tell the SE it is ready, to delete the HAR, and to start a **NEW** assessment,
    not **Rerun**: an assessment snapshots the app when it is created, and Rerun clones the previous
    assessment, so it replays the old adaptor and silently produces wrong output.
 

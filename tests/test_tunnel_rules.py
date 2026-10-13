@@ -18,6 +18,7 @@ here, before anything is spawned, in the agent's words. Pins:
 """
 import base64
 import os
+import re
 import struct
 import sys
 from pathlib import Path
@@ -105,8 +106,10 @@ class TestAllowList:
         assert T.parse_allow(["plain.corp.internal:80"])[0]["app_url"] == "http://plain.corp.internal.tun.straiker.ai"
 
     @pytest.mark.parametrize("ip", ["10.0.0.5:8080", "127.0.0.1", "[::1]:443", "fe80::1"])
-    def test_an_ip_address_is_refused(self, ip):
-        with pytest.raises(T.AllowError, match="is an IP address"):
+    def test_an_ip_literal_is_refused_as_straikers_rule(self, ip):
+        """The agent itself accepts an IPv4 literal; it is the platform that refuses the tunnel
+        name built from one, so the refusal says whose rule it is."""
+        with pytest.raises(T.AllowError, match="Straiker does not route an IP-literal tunnel name"):
             T.parse_allow([ip])
 
     def test_a_tunnel_name_is_refused_naming_the_real_host(self):
@@ -127,6 +130,33 @@ class TestAllowList:
     def test_an_empty_list_is_refused(self):
         with pytest.raises(T.AllowError, match="at least one target"):
             T.parse_allow([])
+
+    def test_the_host_cap_is_the_relays_socket_name_85_at_the_default_fanout(self):
+        """/run/t/<12 hex>/<host>~0 within sun_path's 107 bytes. MEASURED: the 0.1.2 binary
+        refuses an 86-character host; the old cap of 97 let it through to be refused there."""
+        assert T.MAX_HOST_LEN == 85 and T.max_host_len() == 85 and T.max_host_len(1) == 85
+        ok = "a" * 80 + ".corp"                                           # 85
+        assert T.parse_allow([ok])[0]["host"] == ok
+        with pytest.raises(T.AllowError, match=r"too long for the tunnel's socket name \(85 characters"):
+            T.parse_allow(["a" * 81 + ".corp"])                          # 86
+
+    def test_above_ten_links_the_cap_is_one_shorter(self):
+        """`~10` … `~15` cost one more character than `~0` … `~9`."""
+        assert [T.max_host_len(n) for n in (2, 10, 11, 16)] == [85, 85, 84, 84]
+        host84, host85 = "a" * 79 + ".corp", "a" * 80 + ".corp"
+        assert T.parse_allow([host85], fanout=10)[0]["host"] == host85
+        assert T.parse_allow([host84], fanout=16)[0]["host"] == host84
+        with pytest.raises(T.AllowError, match=r"84 characters at most with --fanout 16"):
+            T.parse_allow([host85], fanout=16)
+
+    @pytest.mark.parametrize("value,expected", [(None, None), (1, 1), ("16", 16), (8, 8)])
+    def test_fanout_in_range(self, value, expected):
+        assert T.check_fanout(value) == expected
+
+    @pytest.mark.parametrize("value", [0, 17, -1, "lots", 1.5])
+    def test_fanout_out_of_range_is_the_agents_words(self, value):
+        with pytest.raises(ValueError, match=r"fanout must be 1\.\.16"):
+            T.check_fanout(value)
 
     def test_localhost_is_a_name(self):
         assert T.parse_allow(["localhost:8080"])[0]["app_url"] == "https://localhost.tun.straiker.ai"
@@ -185,15 +215,31 @@ class TestEnvironments:
     def test_default_env_follows_the_control_plane_base(self, base, env):
         assert T.default_env(base) == env
 
-    def test_the_table_and_the_overrides(self):
-        for env in ("dev", "stage", "prod"):
-            r = T.resolve_endpoint(env)
-            assert r["endpoint"].startswith("wss://ascendai-bridge.") and r["endpoint"].endswith("/tunnel")
-            assert r["host_key"] is None and r["host_key_source"] is None    # none published yet
-        assert T.resolve_endpoint("prod")["endpoint"] == "wss://ascendai-bridge.prod.straiker.ai/tunnel"
+    def test_the_table_is_exact_per_environment(self):
+        """Exact URLs, not a prefix: the prefix test let `ascendai-bridge.staging.straiker.ai`
+        through, and that name is NXDOMAIN (MEASURED 2026-10-13); the stage relay is
+        `ascendai-bridge.stage.straiker.ai`, and its host key is published, so stage pins it."""
+        assert T.resolve_endpoint("dev") == {
+            "env": "dev", "endpoint": "wss://ascendai-bridge.dev.straiker.ai/tunnel",
+            "host_key": None, "host_key_source": None}
+        assert T.resolve_endpoint("stage") == {
+            "env": "stage", "endpoint": "wss://ascendai-bridge.stage.straiker.ai/tunnel",
+            "host_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILdbcgnXLQ0PX4mltsX+dHYu3iV5dGIrtf3qTLuwswD6",
+            "host_key_source": "built-in"}
+        assert T.resolve_endpoint("prod") == {
+            "env": "prod", "endpoint": "wss://ascendai-bridge.prod.straiker.ai/tunnel",
+            "host_key": None, "host_key_source": None}
+        assert set(T.ENVIRONMENTS) == {"dev", "stage", "prod"}
+        assert "staging" not in " ".join(e["endpoint"] for e in T.ENVIRONMENTS.values())
+        parsed = T.parse_key_line(T.STAGE_HOST_KEY)
+        assert parsed["type"] == "ssh-ed25519", "the pinned key is a key line the agent can take"
+
+    def test_the_overrides(self):
         r = T.resolve_endpoint("dev", "wss://relay.example/tunnel", "ssh-ed25519 AAAA")
         assert r == {"env": "dev", "endpoint": "wss://relay.example/tunnel",
                      "host_key": "ssh-ed25519 AAAA", "host_key_source": "flag"}
+        r = T.resolve_endpoint("stage", None, "ssh-ed25519 BBBB")
+        assert r["host_key"] == "ssh-ed25519 BBBB" and r["host_key_source"] == "flag"
 
     def test_a_non_wss_endpoint_and_a_bad_host_key_are_refused(self):
         with pytest.raises(ValueError, match="wss://"):
@@ -222,7 +268,40 @@ class TestRunner:
             ["/opt/bin/ascend-tunnel", "key", "--state-dir", "/s/agent"]
         no_pin = T.build_argv(self.BIN, "run", org="1", allow=["a.corp:443"], endpoint="wss://e",
                               state_dir="/s")
-        assert "--host-key" not in no_pin and "--ca-file" not in no_pin
+        assert "--host-key" not in no_pin and "--ca-file" not in no_pin and "--fanout" not in no_pin
+
+    def test_fanout_rides_last_on_both_runners_and_only_when_given(self):
+        argv = T.build_argv(self.BIN, "check", org="1", allow=["a.corp:443"], endpoint="wss://e",
+                            state_dir="/s", fanout=4)
+        assert argv[-2:] == ["--fanout", "4"]
+        argv = T.build_argv(self.DOCKER, "run", org="1", allow=["a.corp:443"], endpoint="wss://e",
+                            state_dir="/s", fanout=16)
+        assert argv[-2:] == ["--fanout", "16"] and argv[argv.index(T.IMAGE) + 1] == "run"
+        assert "--fanout" not in T.build_argv(self.BIN, "key", state_dir="/s", fanout=4)
+
+    def test_the_image_is_0_1_2_pinned_by_digest(self):
+        """A re-pushed tag cannot change what runs: the reference carries the index digest
+        (MEASURED with `docker buildx imagetools inspect`), and the tag stays for a human."""
+        assert T.IMAGE == f"ghcr.io/straiker-ai/ascend-tunnel:{T.IMAGE_VERSION}@{T.IMAGE_DIGEST}"
+        assert T.IMAGE_VERSION == "0.1.2"
+        assert re.fullmatch(r"sha256:[0-9a-f]{64}", T.IMAGE_DIGEST)
+        assert "0.1.0" not in T.IMAGE
+
+    def test_the_install_hints_lead_with_what_exists(self):
+        """MEASURED: the brew tap, winget manifest and scoop bucket do not exist yet; the Releases
+        archive, the Docker image and the deb/rpm do. The macOS archive is ad-hoc signed."""
+        hints = T.INSTALL_HINTS
+        text = "\n".join(hints)
+        order = [next(i for i, h in enumerate(hints) if h.lstrip().startswith(word))
+                 for word in ("archive", "Docker", "Linux", "brew", "winget", "scoop")]
+        assert order == sorted(order), "archive, Docker, deb/rpm, then the unpublished channels"
+        assert "shasum -a 256 -c checksums.txt" in text and "gh attestation verify" in text
+        assert "xattr -d com.apple.quarantine" in text and "ad-hoc signed" in text
+        assert f"docker pull {T.IMAGE}" in text
+        for word in ("brew", "winget", "scoop"):
+            line = next(h for h in hints if h.lstrip().startswith(word))
+            assert "(when published)" in line, word
+        assert T.no_runner_message(["x"]).index("archive") < T.no_runner_message(["x"]).index("brew")
 
     def test_docker_argv_mounts_state_runs_as_this_user_and_passes_proxies_only_when_set(
             self, monkeypatch, tmp_path):
@@ -302,6 +381,102 @@ WAIT  no Ascend app lists this agent's key yet: paste it into the app, then test
 PASS  target chat.corp.internal:443 reachable
 FAIL  target api.corp.internal:8080 not reachable from this machine: dial tcp: connection refused
 """
+
+
+PROD_403 = ("FAIL  relay WebSocket: relay wss://ascendai-bridge.prod.straiker.ai/tunnel: failed to "
+            "WebSocket dial: expected handshake response status code 101 but got 403 (allow outbound "
+            "HTTPS to it; set HTTPS_PROXY if you use a proxy)")
+TIMEOUT = "FAIL  relay WebSocket: dial tcp: i/o timeout (allow outbound HTTPS to it; set HTTPS_PROXY if you use a proxy)"
+
+
+class TestRelayRefusal:
+    """MEASURED 2026-10-13 with the 0.1.2 agent: prod answers 403 at the WebSocket upgrade."""
+
+    def test_the_status_is_read_off_the_measured_line(self):
+        assert T.relay_refusal([PROD_403]) == 403
+        assert T.relay_refusal(["INFO  x", PROD_403.replace("403", "502")]) == 502
+        assert T.relay_refusal([TIMEOUT]) is None
+        assert T.relay_refusal(["PASS  relay WebSocket upgraded over HTTPS"]) is None
+        assert T.relay_refusal([]) is None
+        assert T.relay_refusal(["WARN  relay WebSocket: expected handshake response status code 101 but got 403"]) is None
+
+    def test_prod_403_means_not_enabled_and_nothing_else_does(self):
+        msg = T.relay_not_enabled("prod", [PROD_403])
+        assert msg and msg.startswith("the tunnel is not enabled on this environment yet")
+        assert "--env stage" in msg and "support@straiker.ai" in msg
+        assert T.relay_not_enabled("dev", [PROD_403]) is None
+        assert T.relay_not_enabled("stage", [PROD_403]) is None
+        assert T.relay_not_enabled("prod", [TIMEOUT]) is None
+        assert T.relay_not_enabled("prod", [PROD_403.replace("403", "502")]) is None
+
+
+class TestIdentityDirectory:
+    """Which key the agent runs with. The CLI always passed its own directory; a customer who had
+    run the binary by hand had a key at the binary's default directory, listed THAT, and a tunnel
+    from the CLI ran as a second identity and stayed waiting."""
+
+    @pytest.fixture
+    def dirs(self, tmp_path, monkeypatch):
+        cli, default = tmp_path / "state" / "tunnel", tmp_path / "Library" / "ascend-tunnel"
+        monkeypatch.setattr(T, "tunnel_dir", lambda: cli)
+        monkeypatch.setattr(T, "binary_default_state_dir", lambda: default)
+        monkeypatch.delenv("TUNNEL_STATE_DIR", raising=False)
+        return cli / "agent", default
+
+    def test_nothing_anywhere_means_the_clis_own_directory(self, dirs):
+        cli, _ = dirs
+        r = T.resolve_identity()
+        assert r == {"dir": cli, "source": "cli", "other": None, "note": None}
+        assert T.agent_state_dir() == cli
+
+    def test_a_key_the_binary_made_is_adopted_and_said(self, dirs):
+        cli, default = dirs
+        default.mkdir(parents=True)
+        (default / "agent.key").write_text("k")
+        r = T.resolve_identity()
+        assert r["dir"] == default and r["source"] == "binary-default" and r["other"] is None
+        assert "using the identity at" in r["note"] and str(default) in r["note"]
+        assert T.agent_state_dir() == default
+
+    def test_two_keys_keep_the_clis_and_name_the_other(self, dirs):
+        cli, default = dirs
+        for d in (cli, default):
+            d.mkdir(parents=True)
+            (d / "agent.key").write_text("k")
+        r = T.resolve_identity()
+        assert r["dir"] == cli and r["source"] == "cli" and r["other"] == default
+        assert "another identity exists at" in r["note"] and f"--state-dir {default}" in r["note"]
+
+    def test_the_flag_and_the_agents_variable_win_silently(self, dirs, monkeypatch, tmp_path):
+        cli, default = dirs
+        default.mkdir(parents=True)
+        (default / "agent.key").write_text("k")
+        r = T.resolve_identity(str(tmp_path / "mine"))
+        assert r == {"dir": tmp_path / "mine", "source": "flag", "other": None, "note": None}
+        monkeypatch.setenv("TUNNEL_STATE_DIR", str(tmp_path / "byhand"))
+        r = T.resolve_identity()
+        assert r["dir"] == tmp_path / "byhand" and r["source"] == "env" and r["note"] is None
+
+    def test_a_directory_without_the_key_file_counts_for_nothing(self, dirs):
+        cli, default = dirs
+        default.mkdir(parents=True)                      # the directory, no agent.key
+        assert T.resolve_identity()["source"] == "cli"
+
+    def test_the_binarys_default_directory_per_platform(self, monkeypatch):
+        monkeypatch.setattr(T.os, "name", "posix")
+        monkeypatch.setattr(T.sys, "platform", "darwin")
+        monkeypatch.setenv("HOME", "/h/x")
+        assert T.binary_default_state_dir() == Path("/h/x/Library/Application Support/Straiker/ascend-tunnel")
+        monkeypatch.setattr(T.sys, "platform", "linux")
+        monkeypatch.setattr(T.os, "geteuid", lambda: 1000, raising=False)
+        monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+        assert T.binary_default_state_dir() == Path("/h/x/.local/state/ascend-tunnel")
+        monkeypatch.setenv("XDG_STATE_HOME", "/xdg")
+        assert T.binary_default_state_dir() == Path("/xdg/ascend-tunnel")
+        monkeypatch.setattr(T.os, "geteuid", lambda: 0, raising=False)
+        assert T.binary_default_state_dir() == Path("/var/lib/straiker-tunnel")
+        # Windows (%LOCALAPPDATA%\Straiker\ascend-tunnel) cannot be asserted here: pathlib refuses
+        # to build a WindowsPath on a POSIX host.
 
 
 class TestAgentOutput:

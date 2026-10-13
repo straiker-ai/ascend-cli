@@ -38,6 +38,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -48,13 +49,27 @@ import tenant as _tenant
 from supervisor import pid_alive, _safe, _startup_grace_s, _log_tail
 
 BINARY = "ascend-tunnel"
-IMAGE = "ghcr.io/straiker-ai/ascend-tunnel:0.1.0"
+# The published image, pinned by the digest of its multi-arch index (linux/amd64 + linux/arm64) so
+# a re-pushed tag cannot change what runs here. MEASURED 2026-10-13 with `docker buildx imagetools
+# inspect ghcr.io/straiker-ai/ascend-tunnel:0.1.2`; the tag stays in the reference for a human.
+IMAGE_VERSION = "0.1.2"
+IMAGE_DIGEST = "sha256:37ac60f6535d6686a2e561a9be199a9c1f6bf521d92725482f19d7822b2e141d"
+IMAGE = f"ghcr.io/straiker-ai/ascend-tunnel:{IMAGE_VERSION}@{IMAGE_DIGEST}"
 REPO_URL = "https://github.com/straiker-ai/ascend-tunnel"
 CONTAINER_STATE_DIR = "/var/lib/ascend-tunnel"       # what the published image uses
 CONTAINER_CA_FILE = "/etc/straiker/ca.pem"
 TUNNEL_SUFFIX = "tun.straiker.ai"
 DEFAULT_PORT = 443
-MAX_HOST_LEN = 97           # the agent's relay-side socket name: /run/t/ + host + ~0 within sun_path
+# The agent's relay-side socket name is /run/t/<12-hex login slug>/<host>~<link>, and sun_path
+# holds 107 bytes: 7 + 12 + 1 + len(host) + len("~N") <= 107, so 85 characters with one link
+# (links 0-9), 84 with eleven or more (links 10-15). MEASURED 2026-10-13: the 0.1.2 binary refuses
+# an 86-character host ("too long for a relay socket name"); the old cap of 97 let it through here
+# to be refused there.
+MAX_SOCKET_PATH = 107
+SOCKET_DIR_LEN = len("/run/t/") + 12 + 1
+MAX_HOST_LEN = MAX_SOCKET_PATH - SOCKET_DIR_LEN - len("~0")          # 85, at the default fanout
+MAX_FANOUT = 16
+KEY_FILE = "agent.key"      # the agent's private key, in its state directory (identity.KeyFile)
 TEMPLATE_KEY = "_tunnel_agent_keys"
 KEY_TYPES = ("ssh-ed25519", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384")
 MAX_KEYS = 20
@@ -64,22 +79,36 @@ CHECK_STATUSES = ("PASS", "FAIL", "WARN", "WAIT", "INFO")
 # The Straiker side of the tunnel, per environment. The agent itself knows only prod; dev and stage
 # are given to it as an explicit endpoint. A pinned host key is passed when one is published for
 # the environment; until then the agent warns that the key is not pinned, which `check` shows.
+#
+# MEASURED 2026-10-13: the stage relay is `ascendai-bridge.stage.straiker.ai` (the `staging` name
+# this table carried was NXDOMAIN, so every stage check failed at the dial). Its host key is the
+# one the platform's tunnel chart publishes for stage; the fingerprint matches the live relay. Prod
+# answers 403 at the WebSocket upgrade until the relay is switched on there (relay_not_enabled).
+STAGE_HOST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILdbcgnXLQ0PX4mltsX+dHYu3iV5dGIrtf3qTLuwswD6"
 ENVIRONMENTS: Dict[str, Dict[str, Optional[str]]] = {
     "dev":   {"endpoint": "wss://ascendai-bridge.dev.straiker.ai/tunnel", "host_key": None},
-    "stage": {"endpoint": "wss://ascendai-bridge.staging.straiker.ai/tunnel", "host_key": None},
+    "stage": {"endpoint": "wss://ascendai-bridge.stage.straiker.ai/tunnel", "host_key": STAGE_HOST_KEY},
     "prod":  {"endpoint": "wss://ascendai-bridge.prod.straiker.ai/tunnel", "host_key": None},
 }
 DEFAULT_ENV = "prod"
 
+# Where the agent comes from, in the order that works today. MEASURED 2026-10-13: the Homebrew tap,
+# the winget manifest and the scoop bucket do not exist yet ("Repository not found"), so they are
+# listed last and marked; the GitHub Releases archive, the Docker image and the deb/rpm do. The
+# macOS archive binary is ad-hoc signed and not notarized, so Gatekeeper quarantines a download:
+# the xattr step clears it, and Docker is the smoother path on macOS until it is notarized.
 INSTALL_HINTS = [
-    "macOS    brew install straiker-ai/tap/ascend-tunnel",
-    "Windows  winget install Straiker.AscendTunnel",
-    "         or: scoop bucket add straiker https://github.com/straiker-ai/scoop-bucket && "
-    "scoop install ascend-tunnel",
-    f"Linux    the .deb / .rpm (installs a service) or the archive from {REPO_URL}/releases",
-    "Docker   docker pull ghcr.io/straiker-ai/ascend-tunnel",
-    "verify   gh attestation verify ascend-tunnel_<version>_<os>_<arch>.tar.gz "
-    "--repo straiker-ai/ascend-tunnel",
+    f"archive  {REPO_URL}/releases — ascend-tunnel_<version>_<os>_<arch>.tar.gz (one static binary);",
+    "         verify: shasum -a 256 -c checksums.txt --ignore-missing   and   gh attestation verify "
+    "ascend-tunnel_<version>_<os>_<arch>.tar.gz --repo straiker-ai/ascend-tunnel",
+    "         macOS: the binary is ad-hoc signed (not notarized), so after extracting run "
+    "`xattr -d com.apple.quarantine ./ascend-tunnel`; prefer Docker on macOS until it is notarized",
+    f"Docker   docker pull {IMAGE}",
+    f"Linux    the .deb / .rpm from {REPO_URL}/releases (installs a systemd service)",
+    "brew     brew install straiker-ai/tap/ascend-tunnel        (when published)",
+    "winget   winget install Straiker.AscendTunnel               (when published)",
+    "scoop    scoop bucket add straiker https://github.com/straiker-ai/scoop-bucket && "
+    "scoop install ascend-tunnel   (when published)",
 ]
 
 # The URL rule, as the agent and the Console enforce it. Printed by `tunnel url`, so it is written
@@ -148,16 +177,38 @@ def split_host_port(raw: str) -> Tuple[str, str]:
     return host, port
 
 
-def parse_allow(entries) -> List[Dict[str, Any]]:
+def max_host_len(fanout: Optional[int] = None) -> int:
+    """The longest host the relay-side socket name has room for at this fanout: the link index
+    rides in the name (`~0` … `~15`), so a fanout above 10 costs one more character."""
+    links = max(int(fanout or 1), 1)
+    return MAX_SOCKET_PATH - SOCKET_DIR_LEN - len(f"~{links - 1}")
+
+
+def check_fanout(value: Any) -> Optional[int]:
+    """`--fanout` as the agent takes it (1-16), None when not given; ValueError in its words."""
+    if value is None:
+        return None
+    try:
+        n = int(str(value).strip())           # a whole number: the agent's flag is an int
+    except (TypeError, ValueError):
+        raise ValueError(f"fanout must be 1..{MAX_FANOUT}") from None
+    if not 1 <= n <= MAX_FANOUT:
+        raise ValueError(f"fanout must be 1..{MAX_FANOUT}")
+    return n
+
+
+def parse_allow(entries, fanout: Optional[int] = None) -> List[Dict[str, Any]]:
     """The agent's allow list, validated the way the agent validates it, plus the URL rule.
 
-    Refuses, in order: an empty or malformed entry, a bad port, an IP address (the host rides
-    inside the tunnel name, so it must be a name), a name that is already a tunnel name, a host
-    the agent's own regex rejects, and a host listed twice (the tunnel name carries no port, so
-    one host has one port).
+    Refuses, in order: an empty or malformed entry, a bad port, an IP literal (the host rides
+    inside the tunnel name, and Straiker does not route an IP-literal name), a name that is
+    already a tunnel name, a host the agent's own regex rejects, a host too long for the relay's
+    socket name at this fanout, and a host listed twice (the tunnel name carries no port, so one
+    host has one port).
     """
     out: List[Dict[str, Any]] = []
     seen: Dict[str, int] = {}
+    cap = max_host_len(fanout)
     for i, raw in enumerate(list(entries or [])):
         s = str(raw).strip()
         if not s:
@@ -180,10 +231,13 @@ def parse_allow(entries) -> List[Dict[str, Any]]:
         except ValueError:
             pass
         else:
-            raise AllowError(f"{host} is an IP address, and a tunnel name carries a host NAME: the "
-                             f"app's URL is https://<host>.{TUNNEL_SUFFIX}/<path> and the agent "
-                             f"dials that host. Give the target's DNS name (one this machine "
-                             f"resolves; /etc/hosts counts) and allow that name.")
+            # The agent itself would dial an IPv4 literal; the platform refuses the name built
+            # from it, so the refusal is Straiker's, said as such.
+            raise AllowError(f"Straiker does not route an IP-literal tunnel name: the app's URL would "
+                             f"be https://{host}.{TUNNEL_SUFFIX}/<path>, and the platform refuses an "
+                             f"address in it (the agent would dial {host}; the name is what Straiker "
+                             f"routes). Give the target's DNS name (one this machine resolves; "
+                             f"/etc/hosts counts) and allow that name.")
         if host.endswith("." + TUNNEL_SUFFIX):
             raise AllowError(f"{host} is already a tunnel name: allow the real host "
                              f"({host[:-len(TUNNEL_SUFFIX) - 1]}), and use the tunnel name only as "
@@ -191,8 +245,10 @@ def parse_allow(entries) -> List[Dict[str, Any]]:
         if not _HOST_RE.match(host):
             raise AllowError(f"invalid forward {host}:{p}: a host is letters, digits, dots and "
                              f"hyphens, and starts and ends with a letter or digit")
-        if len(host) > MAX_HOST_LEN:
-            raise AllowError(f"host {host!r} is too long for the tunnel ({MAX_HOST_LEN} characters at most)")
+        if len(host) > cap:
+            raise AllowError(f"host {host!r} is too long for the tunnel's socket name ({cap} characters at "
+                             f"most{f' with --fanout {fanout}' if fanout and fanout > 10 else ''}; "
+                             f"the agent refuses it too)")
         if host in seen:
             raise AllowError(f"one allow entry per host: the tunnel name carries no port, so "
                              f"{host} cannot be listed twice (ports {seen[host]} and {p})")
@@ -416,7 +472,8 @@ def docker_notes(runner: Dict[str, Any], forwards: List[Dict[str, Any]]) -> List
     return notes
 
 
-def _agent_flags(verb: str, org, allow, endpoint, host_key, state_dir, ca_file) -> List[str]:
+def _agent_flags(verb: str, org, allow, endpoint, host_key, state_dir, ca_file,
+                 fanout: Optional[int] = None) -> List[str]:
     """The agent's own flags, in a fixed order. `key` takes only its state directory."""
     if verb == "key":
         return ["--state-dir", state_dir] if state_dir else []
@@ -431,11 +488,14 @@ def _agent_flags(verb: str, org, allow, endpoint, host_key, state_dir, ca_file) 
         flags += ["--state-dir", state_dir]
     if ca_file:
         flags += ["--ca-file", ca_file]
+    if fanout:
+        flags += ["--fanout", str(int(fanout))]
     return flags
 
 
 def build_argv(runner: Dict[str, Any], verb: str, *, org=None, allow=(), endpoint=None,
-               host_key=None, state_dir=None, ca_file=None, container_name=None) -> List[str]:
+               host_key=None, state_dir=None, ca_file=None, container_name=None,
+               fanout: Optional[int] = None) -> List[str]:
     """The exact command for `verb` (run | check | key) on either runner.
 
     Docker: the state directory is the container's volume at the image's own path, the container
@@ -445,7 +505,8 @@ def build_argv(runner: Dict[str, Any], verb: str, *, org=None, allow=(), endpoin
     """
     sd = str(state_dir) if state_dir else None
     if runner["kind"] == "binary":
-        return [runner["path"], verb] + _agent_flags(verb, org, allow, endpoint, host_key, sd, ca_file)
+        return [runner["path"], verb] + _agent_flags(verb, org, allow, endpoint, host_key, sd, ca_file,
+                                                     fanout)
     argv = [runner["docker"], "run", "--rm"]
     if container_name:
         argv += ["--name", container_name]
@@ -459,7 +520,7 @@ def build_argv(runner: Dict[str, Any], verb: str, *, org=None, allow=(), endpoin
         argv += ["-v", f"{Path(ca_file).resolve()}:{CONTAINER_CA_FILE}:ro"]
     argv += [runner["image"], verb]
     return argv + _agent_flags(verb, org, allow, endpoint, host_key, CONTAINER_STATE_DIR,
-                               CONTAINER_CA_FILE if ca_file else None)
+                               CONTAINER_CA_FILE if ca_file else None, fanout)
 
 
 def run_lines(argv: List[str], *, echo=None, timeout: float = 180.0) -> Tuple[int, List[str], str]:
@@ -520,6 +581,37 @@ def parse_check_lines(lines: List[str]) -> Dict[str, Any]:
     return {"lines": rows, "counts": counts, "failed": counts["FAIL"],
             "waiting": counts["WAIT"] > 0, "listed": listed, "key": key, "agent_id": aid,
             "org": org, "app_urls": urls}
+
+
+_UPGRADE_STATUS = re.compile(r"expected handshake response status code 101 but got (\d{3})")
+
+
+def relay_refusal(lines: List[str]) -> Optional[int]:
+    """The HTTP status the relay answered the WebSocket upgrade with, read off the agent's FAIL
+    line, or None when the relay line did not fail that way (a timeout, a resolver miss, a PASS).
+    The agent's wording (internal/agent/check.go + coder/websocket):
+    `FAIL  relay WebSocket: relay wss://…: failed to WebSocket dial: expected handshake response
+    status code 101 but got 403 (…)`."""
+    for ln in lines or []:
+        if not ln.startswith("FAIL") or "relay WebSocket" not in ln:
+            continue
+        m = _UPGRADE_STATUS.search(ln)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def relay_not_enabled(env: str, lines: List[str]) -> Optional[str]:
+    """Why a prod check failed at the relay when it is not the operator's network: the tunnel is
+    not switched on in that environment yet (MEASURED 2026-10-13: prod answers 403 at the
+    upgrade; the platform's prod values have the tunnel off). None for any other env or code, so
+    a real proxy or firewall problem keeps the generic hint."""
+    if env != "prod" or relay_refusal(lines) != 403:
+        return None
+    return ("the tunnel is not enabled on this environment yet: Straiker's prod endpoint answered 403 "
+            "at the WebSocket upgrade. Nothing on this machine or network is wrong, and no proxy "
+            "setting changes it. Use --env stage (or dev) for now, or ask support@straiker.ai when "
+            "prod is switched on.")
 
 
 def key_from_output(stdout: str) -> Optional[str]:
@@ -638,12 +730,62 @@ def leftovers() -> List[Path]:
     return out
 
 
-def agent_state_dir(override: Optional[str] = None) -> Path:
-    """Where the agent keeps its key: --state-dir, else $TUNNEL_STATE_DIR (the agent's own
-    variable, so an identity made by hand is reused), else under the tunnel directory — one
-    identity per machine, whichever tenant is pinned."""
+def binary_default_state_dir() -> Optional[Path]:
+    """Where the `ascend-tunnel` BINARY keeps its key when run by hand, per its README — the
+    agent's internal/config/config.go DefaultStateDir, restated: %LOCALAPPDATA%\\Straiker\\ascend-tunnel
+    on Windows, ~/Library/Application Support/Straiker/ascend-tunnel on macOS,
+    /var/lib/straiker-tunnel for root on Linux, $XDG_STATE_HOME/ascend-tunnel, else
+    ~/.local/state/ascend-tunnel. None when the platform gives nothing to go on."""
+    if os.name == "nt":
+        d = os.environ.get("LOCALAPPDATA")
+        return Path(d) / "Straiker" / "ascend-tunnel" if d else None
+    home = os.environ.get("HOME")
+    if sys.platform == "darwin":
+        return Path(home) / "Library" / "Application Support" / "Straiker" / "ascend-tunnel" if home else None
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        return Path("/var/lib/straiker-tunnel")
+    xdg = os.environ.get("XDG_STATE_HOME")
+    if xdg:
+        return Path(xdg) / "ascend-tunnel"
+    return Path(home) / ".local" / "state" / "ascend-tunnel" if home else None
+
+
+def resolve_identity(override: Optional[str] = None) -> Dict[str, Any]:
+    """Which key the agent runs with, and why: {dir, source, other, note}.
+
+    --state-dir, else $TUNNEL_STATE_DIR (the agent's own variable), else the CLI's directory
+    under the tunnel directory — one identity per machine, whichever tenant is pinned. One more
+    case, MEASURED 2026-10-13: a customer who ran the binary by hand per its README has a key at
+    the binary's per-OS default directory, and the CLI always passed its own `--state-dir`, so a
+    tunnel started here ran under a SECOND identity no app listed and stayed `waiting`. When the
+    CLI's directory holds no key and the binary's default does, the default is used and said;
+    when both hold one, the CLI's is used and the other is named, because the CLI cannot tell
+    which of the two an app lists without asking the platform.
+    """
     raw = override or os.environ.get("TUNNEL_STATE_DIR")
-    return Path(os.path.expanduser(raw)) if raw else tunnel_dir() / AGENT_DIR
+    if raw:
+        return {"dir": Path(os.path.expanduser(raw)), "source": "flag" if override else "env",
+                "other": None, "note": None}
+    cli = tunnel_dir() / AGENT_DIR
+    default = binary_default_state_dir()
+    cli_key = (cli / KEY_FILE).is_file()
+    default_key = bool(default) and (default / KEY_FILE).is_file()
+    if default_key and not cli_key:
+        return {"dir": default, "source": "binary-default", "other": None,
+                "note": (f"using the identity at {default}: the key the ascend-tunnel binary made when "
+                         f"it was run by hand (its default directory), so an app that lists that key "
+                         f"accepts this agent. Pass --state-dir to use another.")}
+    if default_key and cli_key:
+        return {"dir": cli, "source": "cli", "other": default,
+                "note": (f"another identity exists at {default} (the ascend-tunnel binary's default "
+                         f"directory); this agent uses {cli}. If an app lists THAT key rather than "
+                         f"this agent's, pass --state-dir {default}; otherwise delete it.")}
+    return {"dir": cli, "source": "cli", "other": None, "note": None}
+
+
+def agent_state_dir(override: Optional[str] = None) -> Path:
+    """Where the agent keeps its key — resolve_identity's directory."""
+    return resolve_identity(override)["dir"]
 
 
 def tunnel_id(org: Any, env: str) -> str:
@@ -758,7 +900,8 @@ def _on_windows() -> bool:
 
 
 def start(*, org, env: str, allow: List[Dict[str, Any]], runner: Dict[str, Any], endpoint: str,
-          host_key: Optional[str], state_dir, ca_file: Optional[str] = None) -> Dict[str, Any]:
+          host_key: Optional[str], state_dir, ca_file: Optional[str] = None,
+          fanout: Optional[int] = None) -> Dict[str, Any]:
     """Spawn a detached agent. Returns {id, pid, log, identity, container} or {error}.
 
     Same contract as the bridge supervisor: pid and log under the CLI's state dir, the process in
@@ -785,7 +928,8 @@ def start(*, org, env: str, allow: List[Dict[str, Any]], runner: Dict[str, Any],
     if name:
         _docker_rm(runner, name)      # a container left by an earlier start would refuse the name
     argv = build_argv(runner, "run", org=org, allow=[f["entry"] for f in allow], endpoint=endpoint,
-                      host_key=host_key, state_dir=sd, ca_file=ca_file, container_name=name)
+                      host_key=host_key, state_dir=sd, ca_file=ca_file, container_name=name,
+                      fanout=fanout)
     log_fd = os.open(str(p["log"]), os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
     try:
         proc = subprocess.Popen(argv, stdout=log_fd, stderr=subprocess.STDOUT,
@@ -798,7 +942,7 @@ def start(*, org, env: str, allow: List[Dict[str, Any]], runner: Dict[str, Any],
     _write_pid(tid, proc.pid)
     rec = {"id": tid, "org": str(org), "env": env, "endpoint": endpoint,
            "host_key_pinned": bool(host_key), "allow": [f["entry"] for f in allow],
-           "app_urls": [f["app_url"] for f in allow], "runner": runner_public(runner),
+           "fanout": fanout, "app_urls": [f["app_url"] for f in allow], "runner": runner_public(runner),
            "container": name, "state_dir": str(sd), "pid": proc.pid, "started_at": time.time(),
            "identity": None}
     write_status(tid, rec)
@@ -890,7 +1034,8 @@ def ls() -> List[Dict[str, Any]]:
                     "link": (ev or {}).get("state") if alive else None,
                     "link_event": ev, "started_at": st.get("started_at"),
                     "endpoint": st.get("endpoint"), "host_key_pinned": st.get("host_key_pinned"),
-                    "allow": st.get("allow") or [], "app_urls": st.get("app_urls") or [],
+                    "allow": st.get("allow") or [], "fanout": st.get("fanout"),
+                    "app_urls": st.get("app_urls") or [],
                     "key": (ident or {}).get("key"), "agent_id": (ident or {}).get("agent_id"),
                     "runner": (st.get("runner") or {}).get("kind"), "container": st.get("container"),
                     "state_dir": st.get("state_dir"), "log": str(log)})

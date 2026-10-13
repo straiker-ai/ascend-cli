@@ -3,7 +3,7 @@ $ ascend adaptor store --help
 --- stdout
 usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] adaptor store
        [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE] --app NAME|aapp_id
-       [--dry-run]
+       [--endpoint URL] [--dry-run]
        file
 
 positional arguments:
@@ -18,6 +18,9 @@ options:
                         Ascend lease-service base URL (where bridges fetch probes and post
                         results) (default: https://ascendai-bridge.prod.straiker.ai)
   --app NAME|aapp_id    the application (platform side: a name or aapp_ id) (default: None)
+  --endpoint URL        the target's address, only for an app with no URL (stored as
+                        _adaptor_endpoint; an app's own URL is its adaptor's address) (default:
+                        None)
   --dry-run             gate and show the merged template; write nothing (default: False)
 
 examples:
@@ -25,5 +28,6 @@ examples:
   ascend adaptor store my_adaptor.js --app 'My Bot'
 
 Gated first; refused on any violation. Only _adaptor_src changes - every other key in the
-template is sent back as it was - and the write is read back before it is reported.
+template is sent back as it was, except an endpoint key the engine would never read,
+which is dropped and said - and the write is read back before it is reported.
 --- stderr

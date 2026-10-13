@@ -22,9 +22,12 @@ ran a scored assessment against a live target:
     scaffold          everything else: the shipped onboarding scaffold with the captured request
                       described in its header, for a person or an agent to finish
 
-Rules every generated file obeys (the gate refuses the rest): synchronous host calls only, no
-`async`/`await`/`Promise`, no `fetch`/`require`/`import`, no timers, no `console`, exactly one
-`sendTurn`. The prompt is read from the rendered payload; headers come from `turn.headers`;
+Rules every generated file obeys (the gate refuses the rest; the engine's own gate.core.js is
+the authority): synchronous host calls only, no `async`/`await`/`Promise`, no
+`fetch`/`require`/`import`, no timers, no global the isolate does not have (only the names
+host.d.ts lists — `console` IS one, routed to host.log), no `this` outside a class body, no
+`with`, no `host[expr]`, no `__`-prefixed name, plain JavaScript (not TypeScript), and `sendTurn`
+defined. The prompt is read from the rendered payload; headers come from `turn.headers`;
 credentials come only from `turn.headers` or `host.config` — never a literal in the source.
 
 The pure half: no network, no terminal. The CLI (`shells/cli/ascend.py`) gates the result
@@ -42,6 +45,18 @@ RESPONSE_TOKEN = "{{RESPONSE}}"
 # The shapes a generator exists for. Anything else gets the scaffold.
 SHAPES = ("direct_api", "sse_stream", "websocket_direct", "session_api", "session_poll")
 SCAFFOLD = "scaffold"
+# Auth kinds runtime/layers/auth.py resolves on this machine: a login, a CSRF handshake, a derived
+# multi-hop token. No generator runs one yet, so a config that authenticates this way gets the
+# SCAFFOLD — the app is adaptor-driven from the start, with the handshake named in the file's
+# header, and the repair loop (`adaptor test` → finish sendTurn → `adaptor store`) completes it.
+# The alternative, a direct_api adaptor sending static headers, 401'd on every probe.
+# shells/cli/ascend.py mirrors this tuple (a test pins the two equal).
+DYNAMIC_AUTH_KINDS = ("oauth2", "csrf", "derived_multihop")
+# Names Straiker reaches itself (runtime/discovery/egress.py ROUTED_SUFFIXES, restated here so the
+# generator stays importable on its own). A tunnel name is the real host plus the suffix; the
+# engine reaches a second host only through the same tunnel, under the same rule.
+TUNNEL_SUFFIX = ".tun.straiker.ai"
+PRIVATE_LINK_SUFFIX = ".pl.straiker.ai"
 # Placeholders a derived URL may carry; the application's URL stops before the first one and the
 # adaptor renders the rest on that origin per turn.
 _PLACEHOLDER = re.compile(r"\{\{[A-Za-z_][A-Za-z0-9_]*\}\}")
@@ -51,12 +66,40 @@ DEFAULT_RESPONSE_TEMPLATE = {"response": RESPONSE_TOKEN}
 
 
 # ----------------------------------------------------------------------------- the contract
-def shape_of(cfg: Dict[str, Any]) -> str:
-    """Which generator a config gets: its adapter when one exists, else the scaffold."""
+def handshake_kind(cfg: Dict[str, Any]) -> Optional[str]:
+    """The login handshake a config authenticates with (one of DYNAMIC_AUTH_KINDS), or None when
+    its auth is static. `auth` is one block or a list of blocks; a list is a handshake when any
+    block is one."""
+    auth = (cfg or {}).get("auth")
+    blocks = auth if isinstance(auth, list) else [auth] if isinstance(auth, dict) else []
+    for b in blocks:
+        kind = str((b or {}).get("type") or "") if isinstance(b, dict) else ""
+        if kind in DYNAMIC_AUTH_KINDS:
+            return kind
+    return None
+
+
+def transport_shape(cfg: Dict[str, Any]) -> str:
+    """The transport the config describes — its adapter, normalised — among the shapes this
+    module knows, else the scaffold. This is what decides where the address and the body come
+    from; which GENERATOR runs is `shape_of`, which can still fall to the scaffold."""
     kind = str((cfg or {}).get("adapter") or "direct_api").lower()
     if kind == "api":
         kind = "direct_api"
     return kind if kind in SHAPES else SCAFFOLD
+
+
+def shape_of(cfg: Dict[str, Any]) -> str:
+    """Which generator a config gets: its adapter when one exists AND nothing stands in the way
+    of a generated file running it, else the scaffold.
+
+    A login handshake (DYNAMIC_AUTH_KINDS) is the one thing that stands in the way today: no
+    generator mints a token or completes a CSRF dance, so the file is the scaffold with the
+    handshake named in its header, and `plan()["finished"]` is False.
+    """
+    if handshake_kind(cfg):
+        return SCAFFOLD
+    return transport_shape(cfg)
 
 # Python 3.9 forbids a backslash inside an f-string expression, so the fallback is named here.
 NO_EXTRA_HEADERS = "(none beyond the application's)"
@@ -65,7 +108,7 @@ NO_EXTRA_HEADERS = "(none beyond the application's)"
 def raw_url(cfg: Dict[str, Any]) -> str:
     """The transport's real address, placeholders included, however the adapter spells it."""
     cfg = cfg or {}
-    shape = shape_of(cfg)
+    shape = transport_shape(cfg)
     if shape == "sse_stream":
         base = str(cfg.get("base_url") or "").rstrip("/")
         path = str(cfg.get("chat_path") or "")
@@ -114,7 +157,7 @@ def path_template(cfg: Dict[str, Any]) -> Optional[str]:
 def body_template(cfg: Dict[str, Any]) -> Any:
     """The request body the shape sends, with `{{PROMPT}}` where the prompt goes."""
     cfg = cfg or {}
-    shape = shape_of(cfg)
+    shape = transport_shape(cfg)
     if shape == "sse_stream":
         return cfg.get("request_template") if cfg.get("request_template") is not None else {"message": PROMPT_TOKEN}
     if shape == "websocket_direct":
@@ -164,7 +207,7 @@ def request_template(cfg: Dict[str, Any]) -> Dict[str, Any]:
     rebuilds it per turn (a session id, a conversation id and a uuid go in there too).
     """
     body = body_template(cfg)
-    if shape_of(cfg) == "direct_api" and isinstance(body, dict):
+    if transport_shape(cfg) == "direct_api" and isinstance(body, dict):
         return dict(body)
     path = prompt_path(body)
     key = path[0] if path and not path[0].isdigit() else "message"
@@ -221,25 +264,100 @@ def _host(url: str) -> str:
         return ""
 
 
-def extra_domains(cfg: Dict[str, Any]) -> List[str]:
-    """Every host the adaptor reaches beyond the application's URL — `_adaptor_domains` on the
-    app, because the engine allowlists egress to the app's host and nothing else."""
-    cfg = cfg or {}
-    shape = shape_of(cfg)
-    urls: List[str] = []
+def routed_app(cfg: Dict[str, Any]) -> Tuple[str, str]:
+    """("tunnel" | "private-link", the app's host) when the application's URL is a name Straiker
+    routes, else ("", "")."""
+    host = _host(app_url(cfg))
+    if host.endswith(TUNNEL_SUFFIX):
+        return "tunnel", host
+    if host.endswith(PRIVATE_LINK_SUFFIX):
+        return "private-link", host
+    return "", ""
+
+
+def _second_host_slots(cfg: Dict[str, Any]) -> List[Tuple[Dict[str, Any], str]]:
+    """Every (container, key) a shape's extra URLs live under: the places a second host can be
+    named, read by the generators and by `extra_domains` alike."""
+    shape = transport_shape(cfg)
+    slots: List[Tuple[Dict[str, Any], str]] = []
     if shape == "sse_stream":
-        urls.append(str((cfg.get("create") or {}).get("url") or ""))
-        urls.append(str((cfg.get("bootstrap") or {}).get("url") or ""))
+        for step in ("create", "bootstrap"):
+            if isinstance(cfg.get(step), dict):
+                slots.append((cfg[step], "url"))
     elif shape == "session_api":
-        urls.append(str(cfg.get("session_endpoint") or ""))
+        slots.append((cfg, "session_endpoint"))
     elif shape == "session_poll":
         for step in ("create", "poll"):
-            urls.append(str((cfg.get(step) or {}).get("url") or ""))
+            if isinstance(cfg.get(step), dict):
+                slots.append((cfg[step], "url"))
         for step in cfg.get("bootstrap") or []:
-            urls.append(str((step or {}).get("url") or ""))
+            if isinstance(step, dict):
+                slots.append((step, "url"))
+    return slots
+
+
+def tunnel_url(url: str) -> Tuple[str, str]:
+    """A real URL as the engine reaches it through the customer's tunnel, plus the allow entry
+    the agent needs: `https://auth.corp.internal:8443/v1` -> (`https://auth.corp.internal.tun.straiker.ai/v1`,
+    `auth.corp.internal:8443`). The tunnel rule: the host rides inside the name, the port lives in
+    the agent's allow list, plain http(s)/ws(s) only, http/ws only on port 80."""
+    u = urlsplit(url)
+    host = (u.hostname or "").lower()
+    scheme = (u.scheme or "https").lower()
+    try:
+        port = u.port
+    except ValueError:
+        port = None
+    if port is None:
+        port = 80 if scheme in ("http", "ws") else 443
+    secure = port != 80
+    scheme = ("ws" if scheme.startswith("ws") else "http") + ("s" if secure else "")
+    path = (u.path or "") + (f"?{u.query}" if u.query else "")
+    return f"{scheme}://{host}{TUNNEL_SUFFIX}{path}", f"{host}:{port}"
+
+
+def route_second_hosts(cfg: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
+    """The config with every second host spelled the way the engine reaches it, plus one note
+    per host for the operator.
+
+    An app on a tunnel name is reached through the customer's `ascend-tunnel` agent, and so is
+    everything else inside that network: a second host the capture showed (a token mint, a
+    transcript service) is only reachable as `<host>.tun.straiker.ai`, through the same agent,
+    once that host is in the agent's allow list. The bare name in `_adaptor_domains` — and in the
+    generated file — would have the engine dial a name it cannot resolve. A private-link name is
+    opaque, so a second host behind one is left as written and the note says it must be routed.
+    Nothing changes for an app on a public name.
+    """
+    kind, _own = routed_app(cfg)
+    if not kind:
+        return cfg, []
+    out = json.loads(json.dumps(cfg or {}))        # a deep copy: the slots are rewritten in place
+    notes: List[str] = []
+    for holder, key in _second_host_slots(out):
+        url = str(holder.get(key) or "")
+        h = _host(url) if "://" in url else ""
+        if not h or h.endswith((TUNNEL_SUFFIX, PRIVATE_LINK_SUFFIX)):
+            continue
+        if kind == "tunnel":
+            routed, allow = tunnel_url(url)
+            holder[key] = routed
+            notes.append(f"{h} is reached through the tunnel as {_host(routed)}: the tunnel agent "
+                         f"must allow it (--allow {allow}), or every call to it fails from the engine")
+        else:
+            notes.append(f"{h} is a second host behind a private link: the engine reaches it only "
+                         f"if the link routes it, and _adaptor_domains lists it as written")
+    return out, notes
+
+
+def extra_domains(cfg: Dict[str, Any]) -> List[str]:
+    """Every host the adaptor reaches beyond the application's URL — `_adaptor_domains` on the
+    app, because the engine allowlists egress to the app's host and nothing else. On a tunnel
+    app each one is the host's tunnel name (route_second_hosts)."""
+    cfg, _notes = route_second_hosts(cfg or {})
     own = _host(app_url(cfg))
     out: List[str] = []
-    for u in urls:
+    for holder, key in _second_host_slots(cfg):
+        u = str(holder.get(key) or "")
         h = _host(u) if "://" in u else ""
         if h and h != own and h not in out:
             out.append(h)
@@ -1225,6 +1343,19 @@ def _adaptor_rules():
     return AD
 
 
+def unfinished_why(cfg: Dict[str, Any]) -> Optional[str]:
+    """Why a config gets the scaffold rather than a finished adaptor, in one line; None when a
+    generator covers it. The handshake comes first: a target that logs in is unfinished for that
+    reason even when its transport has a generator."""
+    kind = handshake_kind(cfg)
+    if kind:
+        return (f"no generated adaptor runs the {kind!r} handshake this target authenticates with: "
+                f"the file is the onboarding scaffold with the login named in its header")
+    if transport_shape(cfg) == SCAFFOLD:
+        return f"no generator covers the {str((cfg or {}).get('adapter'))!r} adapter"
+    return None
+
+
 def _gen_scaffold(cfg: Dict[str, Any]) -> str:
     """Everything else: the shipped onboarding scaffold, with the captured request described so a
     person (or an agent) can finish `sendTurn`. Header names and body KEYS only — never a value."""
@@ -1232,14 +1363,24 @@ def _gen_scaffold(cfg: Dict[str, Any]) -> str:
     body = body_template(cfg)
     keys = sorted(body.keys()) if isinstance(body, dict) else ["(text body)"]
     header_names = sorted((cfg.get("headers") or {}).keys())
-    note = "\n".join([
-        f"// UNFINISHED: the derived adapter is '{cfg.get('adapter')}', which no generator covers yet.",
+    kind = handshake_kind(cfg)
+    if kind:
+        first_line = (f"// UNFINISHED: this target authenticates with a '{kind}' handshake, which no "
+                      f"generated adaptor runs yet.")
+    else:
+        first_line = f"// UNFINISHED: the derived adapter is '{cfg.get('adapter')}', which no generator covers yet."
+    lines = [
+        first_line,
         "// What the capture showed, to finish sendTurn() from (docs/CUSTOM_ADAPTOR.md has the loop):",
         f"//   method   {str(cfg.get('method') or 'POST').upper()}",
         f"//   body     keys {', '.join(keys)}  (the prompt rides in {'.'.join(prompt_path(body)) or 'the body'})",
         f"//   headers  {', '.join(header_names) or NO_EXTRA_HEADERS}",
-        "//   next     ascend adaptor test <this file> --app '<app>'   then   ascend adaptor store",
-    ])
+    ]
+    if kind:
+        lines.append(f"//   auth     {kind}: run the login in sendTurn() (host.state.getOrMint keeps the "
+                     f"token per conversation; on a 401 drop it, mint again, retry once)")
+    lines.append("//   next     ascend adaptor test <this file> --app '<app>'   then   ascend adaptor store")
+    note = "\n".join(lines)
     first, rest = src.split("\n", 1) if "\n" in src else (src, "")
     return f"{first}\n{note}\n{rest}"
 
@@ -1254,8 +1395,10 @@ _GENERATORS = {
 
 
 def generate_adaptor(config: Dict[str, Any]) -> str:
-    """The adaptor source for a derived config: one file, one exported `sendTurn`."""
-    cfg = dict(config or {})
+    """The adaptor source for a derived config: one file, one exported `sendTurn`. On a tunnel
+    app every second host is spelled as its tunnel name first (route_second_hosts), so the file
+    dials what the engine can reach."""
+    cfg, _notes = route_second_hosts(dict(config or {}))
     shape = shape_of(cfg)
     rt = response_template(cfg)
     statement = reply_statement(rt)
@@ -1271,8 +1414,10 @@ def generate_adaptor(config: Dict[str, Any]) -> str:
 
 def plan(config: Dict[str, Any]) -> Dict[str, Any]:
     """Everything the CLI needs to register the adaptor app, computed once and consistently:
-    the shape, the address, both templates, the extra domains, the parameters and the source."""
-    cfg = dict(config or {})
+    the shape, the address, both templates, the extra domains (and what to tell the operator
+    about each on a tunnel app), the parameters, the source, and whether the file is finished —
+    with the reason in words when it is not."""
+    cfg, domain_notes = route_second_hosts(dict(config or {}))
     rt = response_template(cfg)
     return {
         "shape": shape_of(cfg),
@@ -1282,12 +1427,16 @@ def plan(config: Dict[str, Any]) -> Dict[str, Any]:
         "response_template": rt,
         "reply_statement": reply_statement(rt),
         "domains": extra_domains(cfg),
+        "domain_notes": domain_notes,
         "params": adaptor_params(cfg),
         "source": generate_adaptor(cfg),
         "finished": shape_of(cfg) != SCAFFOLD,
+        "unfinished_why": unfinished_why(cfg),
     }
 
 
-__all__ = ["SHAPES", "SCAFFOLD", "PROMPT_TOKEN", "shape_of", "raw_url", "app_url", "path_template",
-           "body_template", "prompt_path", "request_template", "response_template", "reply_body_js",
-           "extra_domains", "adaptor_params", "generate_adaptor", "plan"]
+__all__ = ["SHAPES", "SCAFFOLD", "PROMPT_TOKEN", "DYNAMIC_AUTH_KINDS", "handshake_kind",
+           "transport_shape", "shape_of", "raw_url", "app_url", "path_template", "body_template",
+           "prompt_path", "request_template", "response_template", "reply_body_js", "routed_app",
+           "tunnel_url", "route_second_hosts", "extra_domains", "adaptor_params", "unfinished_why",
+           "generate_adaptor", "plan"]

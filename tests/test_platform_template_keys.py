@@ -80,29 +80,91 @@ RECAPTURED = {"adapter": "direct_api", "endpoint": "https://8.8.8.8/api/chat", "
 
 
 class TestARerunOfTargetAdd:
-    """The plain template path (`--via api`): the app IS its template, so a stored adaptor the
-    capture does not set is the platform's wiring and survives."""
+    """The plain template path (`--via api`): the app IS its template. The platform's tunnel
+    keys survive; a stored ADAPTOR does not — the operator asked for a template app, and an
+    adaptor left on the record kept driving the app while the output said `transport: api`."""
 
-    def test_keeps_the_stored_adaptor_src_and_tunnel_agent_keys(self, monkeypatch, tmp_path, capsys):
-        """The whole path: an existing direct app, a fresh capture, one PATCH — and the platform's
-        keys are in it. The template arrives from GET in the wire shape (a JSON string)."""
-        platform = FakePlatform(existing=_direct_app(json.dumps(STORED)))
+    def test_via_api_drops_the_stored_adaptor_and_keeps_the_tunnel_keys(self, monkeypatch, tmp_path, capsys):
+        """The whole path: an existing direct app carrying an adaptor, a fresh capture, one
+        PATCH — the tunnel keys and the engine's own bookkeeping are in it, the adaptor wiring is
+        not, and the output says what went. The template arrives from GET in the wire shape."""
+        stored = {**STORED, "_adaptor_domains": ["ids.example.com"], "_adaptor_shop_endpoint": "https://t",
+                  "_adaptor_endpoint": "https://t"}
+        platform = FakePlatform(existing=_direct_app(json.dumps(stored)))
         run_target_add(monkeypatch, tmp_path, RECAPTURED, platform, name="Retail Bot", via="api")
         (app_id, patch), = platform.patches
         assert app_id == "aapp_retail" and platform.created == []
         sent = patch["request_template"]
-        assert sent["_adaptor_src"] == "console-capture-2026-09"
-        assert sent["_tunnel_agent_keys"] == ["tk_a", "tk_b"]
+        for k in ("_adaptor_src", "_adaptor_domains", "_adaptor_shop_endpoint", "_adaptor_endpoint"):
+            assert k not in sent, k
+        assert sent["_tunnel_agent_keys"] == ["tk_a", "tk_b"], "a path, not a driver: kept"
+        assert sent["_adapter_mode"] == "replay" and sent["_iris_run"] == 7
         assert sent["message"] == "{{PROMPT}}" and sent["workspace"] == "retail-support"
         assert "legacy_field" not in sent
-        out = json.loads(capsys.readouterr().out)
+        cap = capsys.readouterr()
+        out = json.loads(cap.out)
         assert out["reused"] is True and out["transport"] == "api"
+        assert out["adaptor_keys_dropped"] == ["_adaptor_domains", "_adaptor_endpoint",
+                                               "_adaptor_shop_endpoint", "_adaptor_src"]
+        assert "--via api: dropped the stored adaptor wiring" in cap.err
+
+    def test_via_api_on_an_app_with_no_adaptor_says_nothing_about_one(self, monkeypatch, tmp_path, capsys):
+        platform = FakePlatform(existing=_direct_app(json.dumps({"message": "{{PROMPT}}",
+                                                                  "_tunnel_agent_keys": ["tk_a"]})))
+        run_target_add(monkeypatch, tmp_path, RECAPTURED, platform, name="Retail Bot", via="api")
+        (_, patch), = platform.patches
+        assert patch["request_template"] == {"message": "{{PROMPT}}", "workspace": "retail-support",
+                                             "_tunnel_agent_keys": ["tk_a"]}
+        cap = capsys.readouterr()
+        out = json.loads(cap.out)
+        assert "adaptor_keys_dropped" not in out and "adaptor_keys_kept" not in out
+        assert "adaptor" not in cap.err.lower()
 
     def test_the_patch_is_the_captures_contract_when_nothing_was_stored(self, monkeypatch, tmp_path):
         platform = FakePlatform(existing=_direct_app({"message": "{{PROMPT}}"}))
         run_target_add(monkeypatch, tmp_path, RECAPTURED, platform, name="Retail Bot", via="api")
         (_, patch), = platform.patches
         assert patch["request_template"] == {"message": "{{PROMPT}}", "workspace": "retail-support"}
+
+    def test_a_routed_plain_request_under_the_default_keeps_a_stored_adaptor_and_says_so(
+            self, monkeypatch, tmp_path, capsys):
+        """A routed direct_api target resolves to the template path WITHOUT `--via api` being
+        asked for. An adaptor somebody stored on that app is their wiring: kept, and named, with
+        the flag that drops it."""
+        import socket
+        url = "https://chat.corp.internal.tun.straiker.ai/api/chat"
+        cfg = {**RECAPTURED, "endpoint": url}
+        platform = FakePlatform(existing={**_direct_app(json.dumps(STORED)), "url": url})
+        run_target_add(monkeypatch, tmp_path, cfg, platform, gate="poison", name="Retail Bot")
+        (_, patch), = platform.patches
+        assert patch["request_template"]["_adaptor_src"] == "console-capture-2026-09"
+        cap = capsys.readouterr()
+        out = json.loads(cap.out)
+        assert out["transport"] == "api" and out["adaptor_keys_kept"] == ["_adaptor_src"]
+        assert "Pass --via api to drop it" in cap.err
+
+
+class TestTheAdaptorWiringRule:
+    def test_what_counts_as_wiring(self):
+        for k in ("_adaptor_src", "_adaptor_domains", "_adaptor_endpoint", "_adaptor_shop_endpoint",
+                  "_adaptor_Shop_Endpoint"):
+            assert ascend._is_adaptor_wiring(k), k
+        for k in ("_adaptor_timeout_ms", "_adaptor_user_role", "_tunnel_agent_keys", "_adapter_mode",
+                  "_iris_run", "message"):
+            assert not ascend._is_adaptor_wiring(k), k
+
+    def test_strip_returns_the_keys_it_removed_in_order(self):
+        tpl = {"message": "{{PROMPT}}", "_adaptor_src": "x", "_tunnel_agent_keys": ["k"],
+               "_adaptor_domains": ["d"], "_adaptor_timeout_ms": 5}
+        out, dropped = ascend._strip_adaptor_wiring(tpl)
+        assert dropped == ["_adaptor_domains", "_adaptor_src"]
+        assert out == {"message": "{{PROMPT}}", "_tunnel_agent_keys": ["k"], "_adaptor_timeout_ms": 5}
+
+    def test_nothing_to_strip_returns_the_template_untouched(self):
+        tpl = {"message": "{{PROMPT}}", "_tunnel_agent_keys": ["k"]}
+        assert ascend._strip_adaptor_wiring(tpl) == (tpl, [])
+        assert ascend._strip_adaptor_wiring("not json") == ("not json", [])
+        assert ascend._strip_adaptor_wiring(None) == (None, [])
 
 
 class TestARerunUnderTheAdaptorDefault:
@@ -131,6 +193,52 @@ class TestARerunUnderTheAdaptorDefault:
         assert out["adaptor"]["verified"] is True and out["console_id"] == platform.console_uuid
         assert platform.gated and platform.tested[0][1] == platform.console_uuid
         assert platform.verified == [(platform.console_uuid, 120.0)]
+
+    @pytest.mark.parametrize("kind", ["oauth2", "csrf", "derived_multihop"])
+    def test_a_handshake_target_is_registered_with_the_scaffold_and_marked_unfinished(
+            self, kind, monkeypatch, tmp_path, capsys):
+        """No generated adaptor runs a login. The app is adaptor-driven from the start (not a
+        bridge app), the file is the scaffold naming the handshake, no token is minted here and
+        written onto the record, and the result says UNFINISHED with the loop that finishes it."""
+        import dispatch
+        monkeypatch.setattr(dispatch, "merge_auth", lambda cfg, **kw: (_ for _ in ()).throw(
+            AssertionError("the handshake must not be resolved on this machine")))
+        cfg = {**RECAPTURED, "auth": {"type": kind, "token_url": "https://8.8.8.8/oauth/token",
+                                       "client_id": "env:CID", "client_secret": "env:CSEC"}}
+        platform = FakePlatform(existing=None)
+        run_target_add(monkeypatch, tmp_path, cfg, platform, name="Login Bot")
+        (spec,) = platform.created
+        assert spec["api_type"] == "api" and json.loads(spec["request_template"])["_adaptor_src"] == "FRESH-ADAPTOR"
+        assert "api_key" not in spec or spec["api_key"] != "none"
+        [src] = platform.gated
+        assert f"UNFINISHED: this target authenticates with a '{kind}' handshake" in src
+        cap = capsys.readouterr()
+        out, err = json.loads(cap.out), cap.err
+        assert out["transport"] == "adaptor" and out["needs_bridge"] is False
+        assert out["adaptor"]["finished"] is False and out["adaptor"]["shape"] == "scaffold"
+        assert kind in out["adaptor"]["unfinished_why"]
+        assert f"the {kind!r} handshake is not resolved here" in err
+        assert "finish sendTurn()" in err
+
+    def test_a_static_block_beside_a_handshake_is_still_resolved_onto_the_record(
+            self, monkeypatch, tmp_path, capsys):
+        """A list of blocks: the passcode header is static and goes on the app; the oauth2
+        block is the adaptor's, and merge_auth sees only the static one."""
+        import dispatch
+        seen = {}
+
+        def fake_merge(cfg, **kw):
+            seen["auth"] = cfg.get("auth")
+            return {**cfg, "headers": {**cfg.get("headers", {}), "x-code": "resolved-code"}}
+        monkeypatch.setattr(dispatch, "merge_auth", fake_merge)
+        cfg = {**RECAPTURED, "auth": [{"type": "static", "mode": "custom", "name": "x-code", "value_ref": "env:CODE"},
+                                       {"type": "oauth2", "token_url": "https://8.8.8.8/t"}]}
+        platform = FakePlatform(existing=None)
+        run_target_add(monkeypatch, tmp_path, cfg, platform, name="Login Bot")
+        assert seen["auth"] == [{"type": "static", "mode": "custom", "name": "x-code", "value_ref": "env:CODE"}]
+        (spec,) = platform.created
+        assert {h["name"]: h["value"] for h in spec["headers"]}["x-code"] == "resolved-code"
+        assert json.loads(capsys.readouterr().out)["adaptor"]["finished"] is False
 
     def test_a_new_target_is_created_as_an_adaptor_app_and_proven(self, monkeypatch, tmp_path, capsys):
         platform = FakePlatform(existing=None)

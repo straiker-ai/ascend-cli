@@ -462,7 +462,9 @@ def _spec_from_config(args, api):
     return out
 
 
-# Auth kinds resolved locally by runtime/layers/auth.py. The platform cannot run them.
+# Auth kinds resolved locally by runtime/layers/auth.py. The platform cannot run them, and no
+# generated adaptor runs them yet, so under the default the app is adaptor-driven with the scaffold
+# and finished by hand. Mirrors runtime/discovery/codegen_js.py DYNAMIC_AUTH_KINDS (a test pins it).
 DYNAMIC_AUTH_KINDS = ("oauth2", "csrf", "derived_multihop")
 # Adapters that can only ever run on this machine: a Python module the operator wrote, and a
 # driven browser. Nothing generated can stand in for them, so they are the two shapes the (deprecated)
@@ -574,6 +576,8 @@ def _choose_transport(args, adapter, cfg):
     want = (getattr(args, "via", None) or "legacy").lower()
     shaped = {**cfg, "adapter": adapter or cfg.get("adapter") or "direct_api"}
     endpoint = _cj.raw_url(shaped) or cfg.get("endpoint") or cfg.get("url") or ""
+    handshake = _auth_type(cfg)
+    static_auth = handshake not in DYNAMIC_AUTH_KINDS
     if _routed_by_straiker(endpoint):
         # Not a choice. The name does not resolve on this machine, so a bridge here could never
         # reach it; the platform calling the target itself is the only way probes can arrive.
@@ -581,22 +585,34 @@ def _choose_transport(args, adapter, cfg):
             _die(f"--via bridge is not possible here: {_host_of(endpoint)} is {ROUTED_NOTE}",
                  error_code="bridge_not_possible",
                  hint="omit --via; the platform reaches this name itself")
-        return "api", ROUTED_NOTE
+        # What drives the app once the platform has reached the name is the contract's shape,
+        # exactly as for a public name — minus the local reachability gate, since Straiker
+        # reaches it. A plain template renders one request; a stream, a socket, a session, a poll
+        # or a login handshake needs the hosted adaptor the default generates. The old rule
+        # returned "api" for every routed name, so a streaming or session target behind a tunnel
+        # was registered as a template app that could not speak its contract.
+        shape = _cj.shape_of(shaped)
+        if shape == "direct_api":
+            return "api", ROUTED_NOTE
+        why = (f"it authenticates with a {handshake!r} handshake" if not static_auth else
+               f"its contract is a {shape}, which a plain request template cannot render")
+        if want == "api":
+            _die(f"--via api is not possible here: {why}", error_code="direct_not_possible",
+                 hint="omit --via; the platform runs a hosted adaptor against this name")
+        return "adaptor", (f"{ROUTED_NOTE}; {why}, so a hosted adaptor generated from this "
+                           f"contract drives the app")
     speaks = (adapter or "direct_api") in ("direct_api", "api")
     # A direct app carries static headers and one api_key and nothing else. A target that logs in
-    # with a handshake needs the local auth layer to run it, which only a bridge goes through.
-    handshake = _auth_type(cfg)
-    static_auth = handshake not in DYNAMIC_AUTH_KINDS
+    # with a handshake cannot be a template app: under the default it is adaptor-driven from the
+    # start (the scaffold, with the login named in its header, finished through `adaptor test`
+    # and `adaptor store`); the legacy `onboard` form still sends it through the local auth layer
+    # behind a bridge.
     if want == "bridge":
         return "bridge", f"requested with --via bridge ({BRIDGE_DEPRECATION})"
     if want == "auto":
         if (adapter or "") in LOCAL_ONLY_ADAPTERS:
             return "bridge", (f"the '{adapter}' adapter runs only on this machine, so a bridge "
                               f"carries it ({BRIDGE_DEPRECATION})")
-        if not static_auth:
-            return "bridge", (f"it authenticates with a {handshake!r} handshake, which no generated "
-                              f"adaptor runs yet; a bridge carries it ({BRIDGE_DEPRECATION}) — or "
-                              f"write the adaptor by hand: ascend adaptor scaffold")
         if not _is_public_host(endpoint):
             # The engine runs the adaptor, and it cannot dial a private address: the adaptor's
             # test would fail after the app was created. Refuse before anything exists, with the
@@ -606,6 +622,16 @@ def _choose_transport(args, adapter, cfg):
                  f"  reach it through a tunnel (a .tun.straiker.ai name), or for now:\n"
                  f"    ascend target add ... --via bridge      ({BRIDGE_DEPRECATION})",
                  error_code="adaptor_target_private")
+        if not static_auth:
+            # Previously the deprecated bridge, by default and silently. The app is now
+            # adaptor-driven: the generated file is the onboarding scaffold with the handshake
+            # named in its header, the engine's test fails on it honestly, and the repair loop
+            # (`adaptor test` → finish sendTurn → `adaptor store`) completes it. `--via bridge`
+            # still carries the target through the local auth layer for whoever needs that today.
+            return "adaptor", (f"it authenticates with a {handshake!r} handshake, which no generated "
+                               f"adaptor runs yet: the app is registered adaptor-driven with the "
+                               f"onboarding scaffold — finish sendTurn() with `ascend adaptor test`, "
+                               f"then `ascend adaptor store` (or --via bridge: {BRIDGE_DEPRECATION})")
         return "adaptor", ("a hosted adaptor generated from this contract: the platform runs it, "
                            "nothing runs on this machine")
     public = _is_public_host(endpoint)
@@ -714,6 +740,26 @@ def _keep_platform_template_keys(stored, fresh):
     return {**f, **carried} if carried else fresh
 
 
+def _is_adaptor_wiring(key) -> bool:
+    """The template keys that make an app adaptor-driven: the source, its extra egress hosts and
+    its address overrides. Not `_adaptor_timeout_ms` and the like (parameters, inert without a
+    source), and never a `_tunnel_*` key (the tunnel is a path, not a driver)."""
+    k = str(key).lower()
+    return k in ("_adaptor_src", "_adaptor_domains") or (
+        k.startswith("_adaptor_") and k.endswith("_endpoint")) or k == "_adaptor_endpoint"
+
+
+def _strip_adaptor_wiring(tpl):
+    """(`tpl` without its adaptor wiring, the keys removed). For `target add --via api` on an app
+    that carries an adaptor: the operator asked for a plain template app, so the stored
+    `_adaptor_src` must go — kept, it drove the app while the output said `transport: api`."""
+    t = _template_dict(tpl)
+    if not t:
+        return tpl, []
+    dropped = sorted(k for k in t if _is_adaptor_wiring(k))
+    return ({k: v for k, v in t.items() if k not in dropped} if dropped else tpl), dropped
+
+
 def _profile_for(args):
     """The published-contract profile for this target, looked up once per invocation."""
     if getattr(args, "no_profile", False):
@@ -787,7 +833,24 @@ def cmd_target_inspect(args):
                          "endpoint probe last."))}
     out["reachable_from_cloud"] = _is_public_host(url)
     out["routed_by_straiker"] = routed
-    out["transport"] = ("api" if out["reachable_from_cloud"] else "bridge")
+    # What `target add` would do with it under the default. A public name gets a hosted adaptor
+    # generated from its contract (`--via api` for a plain template app); a routed name is
+    # reached by Straiker and its contract decides between the two; a private name is not
+    # reachable from Straiker at all, so the way in is a tunnel (the agent beside the target,
+    # then the .tun.straiker.ai name) — or, deprecated, a bridge on this machine.
+    if routed:
+        out["transport"] = "api"
+        reach = ROUTED_NOTE + "; the contract decides between a template app and a hosted adaptor"
+    elif out["reachable_from_cloud"]:
+        out["transport"] = "adaptor"
+        reach = "reachable from Straiker: a hosted adaptor by default, --via api for a plain template app"
+    else:
+        out["transport"] = "tunnel"
+        reach = ("private — not reachable from Straiker: run the tunnel agent beside it "
+                 "(ascend tunnel start --org <id> --allow <host[:port]>) and register the "
+                 ".tun.straiker.ai name, or --via bridge (deprecated)")
+    out["transports"] = (["api", "adaptor"] if routed else ["adaptor", "api"]
+                         if out["reachable_from_cloud"] else ["tunnel", "bridge"])
     try:
         c = _client(args)
         hits = [a for a in c._rows(c.list_apps())
@@ -797,8 +860,7 @@ def cmd_target_inspect(args):
     except Exception:
         out["already_registered"] = None
     human = [f"{out.get('label') or 'unrecognised target'}  {out['origin']}",
-             f"  transport   {out['transport']}"
-             f" ({ROUTED_NOTE if routed else 'reachable from Straiker' if out['reachable_from_cloud'] else 'private — needs a bridge'})"]
+             f"  transport   {out['transport']} ({reach})"]
     for n in out.get("needs") or []:
         human.append(f"  needs       {n['name']} ({n['kind']}) — {n['why']}")
     for w in out.get("workspaces") or []:
@@ -5210,7 +5272,12 @@ def cmd_onboard(args):
     # 2. hard gate -------------------------------------------------------------
     _step(2, total, "validating the config against the live target")
     from runtime.discovery import validate as V
-    _target_url = cfg.get("endpoint") or cfg.get("url")
+    from runtime.discovery import codegen_js as _cj
+    # The address the transport really dials, however the adapter spells it: a session API has
+    # a message_endpoint and a stream a base_url, neither an `endpoint`, so a routed name there
+    # was missed and the local gate tried to validate a target it can never reach.
+    _target_url = (cfg.get("endpoint") or cfg.get("url")
+                   or _cj.raw_url({**cfg, "adapter": adapter or cfg.get("adapter") or "direct_api"}))
     routed = _routed_by_straiker(_target_url)
     if routed:
         # The gate cannot run from here: the name is terminated by the platform and does not
@@ -5274,6 +5341,7 @@ def cmd_onboard(args):
     via, via_why = _choose_transport(args, adapter, cfg)
     tc = None
     adaptor_out = None
+    adaptor_keys_dropped, adaptor_keys_kept = [], []
     if existing_ref:
         # Adopt an application that already exists in the Console instead of creating a second
         # one. This is the common shape of a stalled engagement: the app was configured in the
@@ -5306,6 +5374,23 @@ def cmd_onboard(args):
                 # PLATFORM_TEMPLATE_PREFIXES.
                 patch["request_template"] = _keep_platform_template_keys(
                     app.get("request_template"), patch["request_template"])
+                if (getattr(args, "via", None) or "").lower() == "api":
+                    # `--via api` asks for a plain template app. A stored adaptor is not platform
+                    # wiring to carry here: kept, it kept driving the app while this command
+                    # printed `transport: api`. The tunnel keys stay — a path, not a driver.
+                    patch["request_template"], adaptor_keys_dropped = _strip_adaptor_wiring(
+                        patch["request_template"])
+                    if adaptor_keys_dropped:
+                        _ok(f"--via api: dropped the stored adaptor wiring from the template "
+                            f"({', '.join(adaptor_keys_dropped)}); the platform renders the request "
+                            f"template itself from now on")
+                else:
+                    kept = _template_dict(patch["request_template"]) or {}
+                    adaptor_keys_kept = sorted(k for k in kept if _is_adaptor_wiring(k))
+                    if adaptor_keys_kept:
+                        _ok(f"note: the app carries a stored adaptor ({', '.join(adaptor_keys_kept)}), "
+                            f"kept — it drives the app. Pass --via api to drop it and run as a "
+                            f"plain template app.")
             if controls:
                 patch.update({"control_type": "custom", "control_ids": controls})
             if args.system_prompt:
@@ -5409,12 +5494,23 @@ def cmd_onboard(args):
             lines[-1] += f"   (engine uuid {adaptor_out.get('console_id') or 'unresolved'})"
             lines.append(f"  adaptor   {adaptor_out.get('shape')} · {adaptor_out.get('source')}"
                          f"   ({proof or 'unproven'})")
+            if not adaptor_out.get("finished", True):
+                lines.append(f"  UNFINISHED {adaptor_out.get('unfinished_why') or 'the scaffold'}: "
+                             f"finish sendTurn(), then `ascend adaptor test` and `ascend adaptor store`")
             lines.append("  transport adaptor — the platform runs it; nothing runs on this machine")
         else:
             lines.append(f"  adapter   {adapter}   (config '{cfg_name}', "
                          f"{ROUTED_NOTE if routed else 'proven against the live target'})")
             if via == "bridge":
                 lines.append(f"  transport bridge — {BRIDGE_DEPRECATION}")
+            if adaptor_keys_dropped:
+                result["adaptor_keys_dropped"] = adaptor_keys_dropped
+                lines.append(f"  transport api — --via api: the stored adaptor wiring was dropped "
+                             f"({', '.join(adaptor_keys_dropped)}); the platform renders the template itself")
+            elif adaptor_keys_kept:
+                result["adaptor_keys_kept"] = adaptor_keys_kept
+                lines.append(f"  note      the app still carries a stored adaptor ({', '.join(adaptor_keys_kept)}): "
+                             f"it drives the app; pass --via api to drop it and run as a plain template app")
         lines += [f"  run it    ascend assess run --app '{label}'",
                   f"  talk to it ascend chat '{label}'",
                   f"  re-check  ascend target check '{label}'"]
@@ -5502,12 +5598,25 @@ def _adaptor_app_headers(cfg, args):
     if dropped:
         _ok(f"browser fingerprint header(s) left off the record: {', '.join(dropped)}")
     moved, params = [], {}
-    if cfg.get("auth"):
+    auth = cfg.get("auth")
+    # A login handshake is the adaptor's to run, per turn, inside the engine: a token minted here
+    # and written onto the record would be a static snapshot that expires mid-assessment, and the
+    # handshake itself cannot be resolved from a machine the engine does not share. Only the
+    # static blocks (a passcode header, a bearer from the environment) are resolved onto the app.
+    handshake = _auth_type(cfg)
+    if handshake in DYNAMIC_AUTH_KINDS:
+        if isinstance(auth, list):
+            auth = [b for b in auth if isinstance(b, dict) and b.get("type") not in DYNAMIC_AUTH_KINDS] or None
+        else:
+            auth = None
+        _ok(f"the {handshake!r} handshake is not resolved here: the adaptor runs it inside the engine "
+            f"(finish sendTurn(); no token is written onto the application record)")
+    if auth:
         # Merged on the FILTERED headers. `merge_auth` returns the config's own headers plus the
         # credential, so merging the original config put every fingerprint header straight back
         # on the record after the filter above had dropped it — invisible offline (no auth block
         # in the test), measured live: three creates rejected with the filter "applied".
-        merged = merge_auth({**cfg, "headers": headers},
+        merged = merge_auth({**cfg, "headers": headers, "auth": auth},
                             timeout_s=min(float(getattr(args, "timeout", 20) or 20), 20.0),
                             verify_tls=not getattr(args, "insecure", False))
         if merged.get("_auth_error"):
@@ -5544,9 +5653,10 @@ def _register_adaptor_app(c, args, cfg, adapter, app_name, *, existing, controls
     src = plan["source"]
     js_path = _write_adaptor_file(cfg_path, cfg_name, src)
     record = {"shape": plan["shape"], "source": str(js_path) if js_path else None,
-              "finished": plan["finished"], "domains": plan["domains"], "console_id": None,
-              "gated": False, "tested": False, "stored": False, "verified": False,
-              "credentials_on_app": []}
+              "finished": plan["finished"], "unfinished_why": plan.get("unfinished_why"),
+              "domains": plan["domains"], "domain_notes": plan.get("domain_notes") or [],
+              "console_id": None, "gated": False, "tested": False, "stored": False,
+              "verified": False, "credentials_on_app": []}
     problems = AD.lint_source(src)
     if problems:
         _die("the generated adaptor would be refused by the gate:\n  " + "\n  ".join(problems)
@@ -5554,9 +5664,15 @@ def _register_adaptor_app(c, args, cfg, adapter, app_name, *, existing, controls
              code=EXIT_ERROR, error_code="adaptor_lint")
     _ok(f"adaptor {plan['shape']} generated → {js_path or '(not written)'}")
     if not plan["finished"]:
-        _warn(f"no generator covers the '{adapter}' adapter: the adaptor is the onboarding "
-              f"scaffold with the captured request in its header. Finish sendTurn() in "
-              f"{js_path}, then `ascend adaptor test` and `ascend adaptor store` it.")
+        why = plan.get("unfinished_why") or f"no generator covers the '{adapter}' adapter"
+        _warn(f"{why}. The adaptor is the onboarding scaffold with the captured request in its "
+              f"header; the engine's test below fails on it until it is finished. Finish "
+              f"sendTurn() in {js_path}, then `ascend adaptor test` and `ascend adaptor store` it.")
+    for note in plan.get("domain_notes") or []:
+        # A second host behind the customer's tunnel: the adaptor dials its tunnel name, and the
+        # agent has to allow it. Said now, because the symptom later is a failed call from the
+        # engine with nothing on this machine to show for it.
+        _warn(note)
 
     # 1. gate — static, through the engine
     gated = c.adapter_gate(src)
@@ -9496,18 +9612,33 @@ def cmd_adaptor_store(args):
         _die(f"the application's request_template is not a JSON object ({e}); fix it in the "
              f"Console before storing an adaptor into it", code=EXIT_ERROR, error_code="bad_template")
     url = str(app.get("url") or "").strip()
+    endpoint = (getattr(args, "endpoint", None) or "").strip()
+    if endpoint and url and endpoint != url:
+        _die(f"this application's URL is {url}, and an app's own URL is its adaptor's address: "
+             f"--endpoint would never be read.\n  Change the URL in the Console instead, or drop "
+             f"--endpoint.", error_code="endpoint_unread")
+    if endpoint and not url:
+        # Unprefixed deliberately: `_adaptor_<slug>_endpoint` is read only for a v0 ALIAS, whose
+        # slug comes from the alias. Inline source has no slug, so a namespaced key here would
+        # be silently ignored and the adaptor would run with no address.
+        tpl["_adaptor_endpoint"] = endpoint
     problem = AD.address_problem(url, tpl)
     if problem:
-        _die(problem, code=EXIT_ERROR, error_code="no_address")
+        _die(problem + ("" if url else "\n  Or pass --endpoint https://<the target> for an app with no URL."),
+             code=EXIT_ERROR, error_code="no_address")
     key = gated.get("templateKey") or AD.TEMPLATE_KEY
     value = gated.get("templateValue")
     if not value:
         _die("the gate passed but returned no template value to store", code=EXIT_ERROR)
     dead, why = AD.dead_endpoint_keys(tpl, url, AD.is_inline_source(src))
+    # An endpoint key the engine never reads is dead config that looks live, and the symptom is
+    # a wrong address debugged somewhere far from the key. Dropped, out loud — the canonical
+    # harness drops them too; keeping them "with a warning" left the record carrying a lie.
+    for k in dead:
+        tpl.pop(k, None)
     merged, notes = AD.merge_source(tpl, key, value)
     if dead:
-        notes.append(f"{', '.join(dead)} in the template would never be read ({why}); kept as "
-                     f"it was — remove it in the Console if it is not meant to be there")
+        notes.append(f"dropped {', '.join(dead)} from the template: {why} — it would never be used")
     for n in notes:
         _warn(n)
     from discovery import egress
@@ -9518,7 +9649,7 @@ def cmd_adaptor_store(args):
     data = {"app": {"id": app_id, "name": app.get("name"), "api_type": app.get("api_type")},
             "address": address, "routed": kind or None, "template_key": key,
             "digest": gated.get("digest"), "template_digest": AD.record_digest(value),
-            "stored_digest": None, "sizes": sizes,
+            "stored_digest": None, "sizes": sizes, "dropped": list(dead),
             "template": AD.template_for_display(merged), "reply_shape": shape, "notes": notes,
             "dry_run": bool(getattr(args, "dry_run", False)), "stored": False}
 
@@ -11226,11 +11357,15 @@ def build_parser():
                                "  ascend adaptor store my_adaptor.js --app 'My Bot' --dry-run   # see the merge\n"
                                "  ascend adaptor store my_adaptor.js --app 'My Bot'\n\n"
                                "Gated first; refused on any violation. Only _adaptor_src changes - every "
-                               "other key in the\ntemplate is sent back as it was - and the write is read "
-                               "back before it is reported."))
+                               "other key in the\ntemplate is sent back as it was, except an endpoint key "
+                               "the engine would never read,\nwhich is dropped and said - and the write is "
+                               "read back before it is reported."))
     s.add_argument("file", help="the adaptor source (.js)")
     s.add_argument("--app", required=True, metavar="NAME|aapp_id",
                    help="the application (platform side: a name or aapp_ id)")
+    s.add_argument("--endpoint", metavar="URL",
+                   help="the target's address, only for an app with no URL (stored as "
+                        "_adaptor_endpoint; an app's own URL is its adaptor's address)")
     s.add_argument("--dry-run", action="store_true",
                    help="gate and show the merged template; write nothing")
     s.set_defaults(func=cmd_adaptor_store)

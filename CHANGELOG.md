@@ -92,6 +92,73 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ### Fixed
 
+- **A routed name gets the hosted adaptor its contract needs.** `_choose_transport` answered
+  `api` for every `.tun.straiker.ai` / `.pl.straiker.ai` target before looking at the derived
+  shape, so a stream, a socket, a session API or a poll behind a tunnel was registered as a plain
+  template app that could not render its contract (audit against the engine's
+  custom-adaptor harness, 2026-10-13). The shape now decides exactly as for a public name — a `direct_api` request stays
+  a template app; anything else, and a login handshake, gets the generated adaptor — and only the
+  local reachability gate is skipped, since Straiker reaches the name. `--via api` on such a
+  contract is refused (`direct_not_possible`), `--via bridge` still is. The hard gate reads the
+  transport's real address (`codegen_js.raw_url`), so a session API or a stream whose routed name
+  sits in `message_endpoint` / `base_url` is recognised too. On a tunnel app every second host the
+  contract names (a session mint, a transcript service) is written as ITS tunnel name
+  (`auth.corp.internal` → `auth.corp.internal.tun.straiker.ai`) in `_adaptor_domains` and in the
+  generated file (`codegen_js.route_second_hosts`, `tunnel_url`), and the output says the tunnel
+  agent must `--allow host:port` it; a second host behind a private link is left as written and
+  said. `target inspect` says `adaptor` for a public name (the default; `--via api` named), `api`
+  for a routed one (the contract decides), and `tunnel` for a private host — with the agent
+  command and the deprecated bridge named — where it said "private — needs a bridge".
+  (`shells/cli/ascend.py`, `runtime/discovery/codegen_js.py`; `tests/test_routed_hosts.py`,
+  `tests/test_codegen_js.py`)
+- **A login handshake is adaptor-driven from the start, not a bridge by default.** A target whose
+  `auth` is `oauth2`, `csrf` or `derived_multihop` fell to the DEPRECATED bridge under the default,
+  silently. It now registers the direct app with the onboarding scaffold — `shape_of` returns the
+  scaffold for a handshake config, the file's header names the handshake and where to run it,
+  `plan()["finished"]` is False with `unfinished_why` — so the engine's test fails on it honestly,
+  the result says `UNFINISHED` with the loop that finishes it (`adaptor test` → finish sendTurn
+  → `adaptor store`), and no token is minted on this machine and written onto the record (a
+  static snapshot that would expire mid-assessment; static blocks beside the handshake are still
+  resolved onto the app). `--via bridge` still carries it through the local auth layer, and the
+  legacy `onboard` form keeps its rule. The two tuples of handshake kinds (CLI, generator) are
+  pinned equal. (`shells/cli/ascend.py`, `runtime/discovery/codegen_js.py`;
+  `tests/test_direct_first.py`, `tests/test_platform_template_keys.py`)
+- **`target add --via api` on an app that carries an adaptor drops it, and says so.** The
+  re-adopt path carried every platform-owned template key forward, the stored `_adaptor_src`
+  included, so the app kept being driven by the old adaptor while the command printed
+  `transport: api`. With `--via api` the adaptor wiring — `_adaptor_src`, `_adaptor_domains`,
+  `_adaptor_endpoint` and every `_adaptor_*_endpoint` — is removed from the PATCH (the `_tunnel_*`
+  keys stay: a path, not a driver), the output names what went (`adaptor_keys_dropped` in
+  `--json`); when the template path is reached without the flag (a routed plain request) a stored
+  adaptor is kept and named, with the flag that drops it (`adaptor_keys_kept`).
+  (`shells/cli/ascend.py` `_strip_adaptor_wiring`; `tests/test_platform_template_keys.py`)
+- **The offline lint mirrors the engine's gate, `console` included.** `GATE_BANNED` listed
+  `console`, which the gate ALLOWS (it routes to `host.log`), so a file the engine would pass was
+  refused here first; and the lint demanded "exactly one" `sendTurn` where the gate's rule is
+  "must define" (a second declaration is legal JavaScript and not refused). The lint now names
+  the gate's other refusals before a round trip: a global the isolate does not have (`atob`,
+  `btoa`, `URL`, `Symbol`, `Buffer`, `TextEncoder`, …), `with`, `host[expr]`, a `__`-prefixed
+  name, `this` outside a class body, and TypeScript — the structural rules read past string
+  literals and comments the way the gate's parser does, so the shipped scaffold's "finish this
+  adaptor" is text. docs/CUSTOM_ADAPTOR.md "Rules the gate enforces", the generator's docstring
+  and the build-custom-adaptor skill say the real list. (`runtime/adaptor.py`;
+  `tests/test_codegen_js.py`)
+- **`adaptor store` drops an endpoint key the engine would never read, and takes `--endpoint`.**
+  With a URL every `_adaptor_*_endpoint` is dead (the URL is the address); without one, a
+  namespaced key is read only for a `v0:` alias. `store` kept them "with a warning", so the record
+  carried config that looked live. They are now dropped and named (`dropped` in `--json`), as the
+  canonical harness does; `--endpoint URL` gives an app with no URL its address
+  (`_adaptor_endpoint`) and is refused on an app that has one. The `adaptor store --help` golden
+  screen was re-recorded for the flag; the command map was regenerated. (`shells/cli/ascend.py`;
+  `tests/test_adaptor_cli.py`)
+- **`--budget` is refused below one second locally.** The engine requires at least 1s; the check
+  said "between 1 and 240" and let 0.5 through to be refused remotely. (`runtime/adaptor.py`
+  `MIN_BUDGET_S`; `tests/test_adaptor_rules.py`)
+- **docs/CUSTOM_ADAPTOR.md says which digests compare.** `get` prints a digest of different bytes
+  than `gate`/`verify`/`store` for the same file (the engine strips before hashing on the gate;
+  the minifier appends a newline), so the Traps section says: compare `store`'s `template_digest`
+  with `stored_digest` (`get --json` carries it on the same basis) — never the engine's `digest`
+  across verbs.
 - **The tunnel agent's identity no longer moves with the tenant pin.** The tunnel directory —
   the agent's key, and the pid, log and status of every tunnel started here — lived under the
   per-tenant state dir, which exists only once a platform call has pinned the tenant; and

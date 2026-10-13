@@ -44,8 +44,9 @@ ALIAS_PREFIX = "v0:"
 # One benign prompt, the same one test-connection uses. A test must look like a user saying hello.
 DEFAULT_PROMPT = "Hi, what can you help me with?"
 DEFAULT_BUDGET_S = 120.0
-# The engine's ceiling for one test/verify run. Checked locally so the error names the limit
-# instead of coming back as a bare 422.
+# The engine's bounds for one test/verify run. Checked locally so the error names the limit
+# instead of coming back as a bare 422; the engine requires a whole second at least.
+MIN_BUDGET_S = 1.0
 MAX_BUDGET_S = 240.0
 
 _ENGINE_UUID = re.compile(
@@ -76,8 +77,10 @@ def check_budget(value: Any) -> Tuple[Optional[float], Optional[str]]:
         b = float(value)
     except (TypeError, ValueError):
         return None, f"--budget must be a number of seconds, got {value!r}"
-    if not (0 < b <= MAX_BUDGET_S):
-        return None, f"--budget must be between 1 and {MAX_BUDGET_S:g} seconds, got {b:g}"
+    # The engine's own bounds: at least one second (a fraction is a 422 on the wire), at most
+    # MAX_BUDGET_S. The message said 1 before; the check let 0.5 through to be refused remotely.
+    if not (MIN_BUDGET_S <= b <= MAX_BUDGET_S):
+        return None, f"--budget must be between {MIN_BUDGET_S:g} and {MAX_BUDGET_S:g} seconds, got {b:g}"
     return b, None
 
 
@@ -143,9 +146,9 @@ def dead_endpoint_keys(tpl: Dict[str, Any], url: str, inline: bool) -> Tuple[Lis
     `_adaptor_<slug>_endpoint` is read only for a `v0:` alias, whose slug comes from the alias;
     inline source has no slug and reads the bare `_adaptor_endpoint` only.
 
-    `store` keeps every template key it is given — it only ever adds `_adaptor_src` — so these are
-    reported, out loud, rather than dropped: dead config that looks live is how a wrong address
-    gets debugged somewhere far from the key.
+    `store` drops them, out loud (the canonical harness does the same): dead config that looks
+    live is how a wrong address gets debugged somewhere far from the key. `merge_source` itself
+    never drops anything; the caller removes what this function names and says so.
     """
     keys = [k for k in (tpl or {})
             if k.lower().endswith("_endpoint") and k.lower().startswith(("_adaptor_", "_adapter_"))]
@@ -250,20 +253,43 @@ def reply_shape(response_template: Any) -> Optional[Dict[str, str]]:
 
 
 # ----------------------------------------------------------------------------- the local lint
-# What the publish gate refuses (docs/CUSTOM_ADAPTOR.md, "Rules the gate enforces"): the host is
-# synchronous and sandboxed, so these identifiers are either a false affordance (`await` on a
-# non-promise resolves immediately) or a capability that does not exist in the isolate. Checked
-# on the source with comments stripped, because the JSDoc typedef legitimately says
-# `import("./host")`. The engine's gate is the authority; this is the free check that runs before
-# a network round trip, and the one the generated adaptors are tested against.
+# What the publish gate refuses (docs/CUSTOM_ADAPTOR.md, "Rules the gate enforces"; the authority
+# is the engine's own gate.core.js): the host is synchronous and sandboxed, so these
+# identifiers are either a false affordance (`await` on a non-promise resolves immediately) or a
+# capability that does not exist in the isolate. Checked on the source with comments stripped,
+# because the JSDoc typedef legitimately says `import("./host")`. The engine's gate is the
+# authority; this is the free check that runs before a network round trip, and the one the
+# generated adaptors are tested against.
+#
+# `console` is NOT here: the gate allows it (it routes to host.log). It was listed once, and the
+# lint refused a file the engine would have passed.
 GATE_BANNED = ("async", "await", "Promise", "fetch", "XMLHttpRequest", "require", "import",
-               "eval", "Function", "setTimeout", "setInterval", "setImmediate", "console",
+               "eval", "Function", "setTimeout", "setInterval", "setImmediate",
                "process", "globalThis", "window", "document")
+# Globals the isolate does not have. The gate refuses any identifier it cannot see declared and
+# does not list as allowed (host, JSON, Math, Date, Object, Array, String, Number, Boolean, Error,
+# RegExp, Map, Set, console, the URI codecs, parseInt/parseFloat/isNaN); these are the ones an
+# author reaches for by reflex and gets refused as `unknown-identifier`.
+GATE_UNKNOWN_GLOBALS = ("atob", "btoa", "URL", "URLSearchParams", "Symbol", "Buffer", "TextEncoder",
+                        "TextDecoder", "ArrayBuffer", "Uint8Array", "Proxy", "Reflect", "WeakMap",
+                        "WeakSet", "BigInt", "crypto", "performance", "structuredClone",
+                        "queueMicrotask")
 # Members the gate denies on any object: the prototype chain is how a sandboxed script reaches
 # what it was not given. Measured: a generated adaptor was refused for `Object.prototype.toString`.
 GATE_DENIED_MEMBERS = (".prototype", ".__proto__", ".constructor")
 _SEND_TURN = re.compile(r"\bfunction\s+sendTurn\s*\(")
 _EXPORTED = re.compile(r"^\s*(export|module\.exports)\b", re.M)
+_WITH = re.compile(r"\bwith\s*\(")
+_HOST_COMPUTED = re.compile(r"\bhost\s*\[")
+_RESERVED = re.compile(r"(?<![\w$.])__[A-Za-z0-9_$]+")
+_THIS = re.compile(r"\bthis\b")
+_CLASS = re.compile(r"\bclass\b")
+# Narrow on purpose (a regex cannot parse): a typed parameter or return on a function, or a
+# top-level `interface` / `type X =`. The gate's own TypeScript check runs only after a parse has
+# failed, where it can afford to be generous; here a generous pattern would flag `{ headers: x }`.
+_TYPESCRIPT = re.compile(r"\bfunction\s+\w+\s*\([^)]*\b\w+\s*:\s*[A-Z][\w.<>\[\]]*[,)]"
+                         r"|\)\s*:\s*[A-Z][\w.<>\[\]]*\s*\{"
+                         r"|^\s*(?:export\s+)?(?:interface\s+\w+|type\s+\w+\s*=)", re.M)
 
 
 def strip_comments(source: str) -> str:
@@ -274,27 +300,75 @@ def strip_comments(source: str) -> str:
     return re.sub(r"//[^\n]*", "", out)
 
 
+def _line_of(code: str, pos: int) -> int:
+    return code.count("\n", 0, pos) + 1
+
+
+_STRINGS = re.compile(r'"(?:[^"\\\n]|\\.)*"|\'(?:[^\'\\\n]|\\.)*\'|`(?:[^`\\]|\\.)*`', re.S)
+
+
+def strip_strings(code: str) -> str:
+    """The code with every string literal emptied (quotes kept, newlines inside a template
+    literal kept so line numbers hold). The gate reads an AST, where "this adaptor" in a message
+    is text, not a `this`; a structural rule run over the raw text has to see it the same way."""
+    return _STRINGS.sub(lambda m: m.group(0)[0] + "\n" * m.group(0).count("\n") + m.group(0)[-1], code)
+
+
 def lint_source(source: str) -> List[str]:
     """Problems the publish gate would refuse this source for, as one line each; [] when clean.
 
-    Mirrors the gate's rules on the operator's side: the banned identifiers, exactly one
-    `function sendTurn(`, and no `export`/`module.exports` (the file is one plain script).
+    Mirrors the gate's rules on the operator's side: the banned identifiers and the globals the
+    isolate does not have, the denied members, `with`, `host[expr]`, `__`-prefixed names, `this`
+    outside a class body, TypeScript, no `export`/`module.exports` (the file is one plain
+    script), and `sendTurn` defined (the gate's `contract` rule). A redeclared `sendTurn` is
+    refused too, as the parse error it is in module code — not as a contract rule.
     """
     problems: List[str] = []
     code = strip_comments(source)
+    # The structural rules read the code the way the gate's parser does: a `this` or a `with` in
+    # a message string is text. The identifier rules keep strings, as they always have — a
+    # generated file has no reason to say `fetch` anywhere.
+    text = strip_strings(code)
     for word in GATE_BANNED:
         m = re.search(rf"\b{re.escape(word)}\b", code)
         if m:
-            line = code.count("\n", 0, m.start()) + 1
-            problems.append(f"{word}: not available inside the isolate (line {line})")
+            problems.append(f"{word}: not available inside the isolate (line {_line_of(code, m.start())})")
+    for word in GATE_UNKNOWN_GLOBALS:
+        m = re.search(rf"(?<![\w$.]){re.escape(word)}\b", code)
+        if m:
+            problems.append(f"{word}: not a global the isolate has — the gate refuses it as an unknown "
+                            f"identifier; host.d.ts lists what exists (line {_line_of(code, m.start())})")
     for member in GATE_DENIED_MEMBERS:
         m = re.search(re.escape(member) + r"\b", code)
         if m:
-            line = code.count("\n", 0, m.start()) + 1
-            problems.append(f"{member}: a denied member inside the isolate (line {line})")
+            problems.append(f"{member}: a denied member inside the isolate (line {_line_of(code, m.start())})")
+    m = _WITH.search(text)
+    if m:
+        problems.append(f"with: defeats scope analysis; the gate refuses it (line {_line_of(code, m.start())})")
+    m = _HOST_COMPUTED.search(text)
+    if m:
+        problems.append(f"host[expr]: computed access to the host is refused — name the capability, "
+                        f"host.http.request (line {_line_of(code, m.start())})")
+    m = _RESERVED.search(text)
+    if m:
+        problems.append(f"{m.group(0)}: names starting with __ belong to the host (line {_line_of(code, m.start())})")
+    m = _THIS.search(text)
+    if m and not _CLASS.search(text):
+        problems.append(f"this: outside a class body `this` is the sandbox object; the gate refuses it "
+                        f"(line {_line_of(code, m.start())})")
+    m = _TYPESCRIPT.search(text)
+    if m:
+        problems.append(f"this looks like TypeScript; an adaptor is JavaScript (type annotations are "
+                        f"refused — use // @ts-check with JSDoc against host.d.ts) (line {_line_of(code, m.start())})")
     n = len(_SEND_TURN.findall(code))
-    if n != 1:
-        problems.append(f"exactly one `function sendTurn(turn, host)` is required; found {n}")
+    if n == 0:
+        problems.append("`function sendTurn(turn, host)` must be defined; none found")
+    elif n > 1:
+        # Not a contract rule: the gate parses the file as module code, where a redeclared
+        # function is a SyntaxError. MEASURED on the live gate 2026-10-13: "parse: Identifier
+        # 'sendTurn' has already been declared".
+        problems.append(f"`sendTurn` is declared {n} times: module code refuses a redeclaration "
+                        f"(the gate reports a parse error)")
     if _EXPORTED.search(code):
         problems.append("no `export` or `module.exports`: the adaptor is one plain script")
     return problems

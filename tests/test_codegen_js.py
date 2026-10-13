@@ -195,6 +195,124 @@ class TestDomains:
         assert G.plan(REST)["params"] == {}
 
 
+# --- a login handshake: the scaffold, named ---------------------------------------------------
+class TestHandshake:
+    @pytest.mark.parametrize("kind", G.DYNAMIC_AUTH_KINDS)
+    def test_a_handshake_gets_the_scaffold_whatever_the_transport(self, kind):
+        """No generator mints a token or completes a CSRF dance. A direct_api adaptor sending
+        static headers 401'd on every probe; the scaffold says what is missing instead."""
+        for base in (REST, SSE, SESSION):
+            cfg = {**base, "auth": {"type": kind}}
+            assert G.transport_shape(cfg) == base["adapter"]
+            assert G.shape_of(cfg) == G.SCAFFOLD
+            pl = G.plan(cfg)
+            assert pl["finished"] is False and kind in pl["unfinished_why"]
+            assert pl["url"] == G.app_url(base), "the address still follows the transport"
+            assert f"UNFINISHED: this target authenticates with a '{kind}' handshake" in pl["source"]
+            assert f"//   auth     {kind}:" in pl["source"]
+            assert AD.lint_source(pl["source"]) == []
+
+    def test_a_handshake_in_a_list_of_blocks_counts(self):
+        cfg = {**REST, "auth": [{"type": "static", "mode": "bearer", "value_ref": "env:T"}, {"type": "csrf"}]}
+        assert G.handshake_kind(cfg) == "csrf" and G.shape_of(cfg) == G.SCAFFOLD
+
+    def test_static_auth_keeps_its_generator(self):
+        cfg = {**REST, "auth": {"type": "static", "mode": "bearer", "value_ref": "env:T"}}
+        assert G.shape_of(cfg) == "direct_api" and G.plan(cfg)["finished"] is True
+        assert G.plan(cfg)["unfinished_why"] is None
+
+    def test_a_direct_request_keeps_its_whole_body_as_the_template(self):
+        """The scaffold forwards turn.payload whole, so a direct target's template stays the
+        whole body — what the transport needs, not what the generator chose."""
+        cfg = {**REST_NESTED, "auth": {"type": "oauth2"}}
+        assert G.plan(cfg)["request_template"] == REST_NESTED["body"]
+
+    def test_the_unfinished_reason_for_a_contract_no_generator_covers(self):
+        assert G.plan(ODD)["unfinished_why"] == "no generator covers the 'sentinel_stream' adapter"
+        assert "UNFINISHED: the derived adapter is 'sentinel_stream'" in G.plan(ODD)["source"]
+
+
+# --- a second host behind the customer's tunnel ---------------------------------------------
+TUNNELLED_SESSION = {
+    **SESSION,
+    "session_endpoint": "https://auth.corp.internal:8443/v1/sessions",
+    "message_endpoint": "https://chat.corp.internal.tun.straiker.ai/v1/messages",
+}
+TUNNELLED_POLL = {
+    "adapter": "session_poll",
+    "create": {"url": "http://ids.corp.internal:80/api/conversations", "method": "POST", "body": {},
+               "extract": "conversation_id"},
+    "send": {"url": "https://chat.corp.internal.tun.straiker.ai/api/conversations/{{CONV}}/messages",
+             "method": "POST", "body": {"message": "{{PROMPT}}"}},
+    "poll": {"url": "wss://transcripts.corp.internal/api/stream/{{CONV}}", "method": "GET",
+             "list_path": "messages", "role_field": "role", "bot_roles": ["bot"], "text_path": "text"},
+    "bootstrap": [{"url": "https://chat.corp.internal.tun.straiker.ai/warm", "method": "GET"},
+                  {"url": "https://already.tun.straiker.ai/x", "method": "GET"}],
+}
+
+
+class TestRoutedSecondHosts:
+    @pytest.mark.parametrize("url,routed,allow", [
+        ("https://auth.corp.internal:8443/v1/sessions", "https://auth.corp.internal.tun.straiker.ai/v1/sessions", "auth.corp.internal:8443"),
+        ("https://auth.corp.internal/v1", "https://auth.corp.internal.tun.straiker.ai/v1", "auth.corp.internal:443"),
+        ("http://ids.corp.internal/api?x=1", "http://ids.corp.internal.tun.straiker.ai/api?x=1", "ids.corp.internal:80"),
+        ("http://ids.corp.internal:8080/api", "https://ids.corp.internal.tun.straiker.ai/api", "ids.corp.internal:8080"),
+        ("wss://sock.corp.internal/ws", "wss://sock.corp.internal.tun.straiker.ai/ws", "sock.corp.internal:443"),
+        ("ws://sock.corp.internal/ws", "ws://sock.corp.internal.tun.straiker.ai/ws", "sock.corp.internal:80"),
+        ("HTTPS://Auth.Corp.Internal:8443/V1", "https://auth.corp.internal.tun.straiker.ai/V1", "auth.corp.internal:8443"),
+    ])
+    def test_the_tunnel_url_rule(self, url, routed, allow):
+        """The host rides inside the name, the port lives in the agent's allow list, http/ws only
+        on port 80 (runtime/tunnel.py's rule, restated for the generator)."""
+        assert G.tunnel_url(url) == (routed, allow)
+
+    def test_a_public_app_is_untouched(self):
+        for cfg in (SSE_CREATE, SESSION_IN_PATH, POLL):
+            out, notes = G.route_second_hosts(cfg)
+            assert out == cfg and notes == []
+
+    def test_a_tunnel_app_routes_its_second_hosts_everywhere_they_are_read(self):
+        out, notes = G.route_second_hosts(TUNNELLED_SESSION)
+        assert out["session_endpoint"] == "https://auth.corp.internal.tun.straiker.ai/v1/sessions"
+        assert TUNNELLED_SESSION["session_endpoint"].startswith("https://auth.corp.internal:8443"), "the input is not mutated"
+        [note] = notes
+        assert "auth.corp.internal.tun.straiker.ai" in note and "--allow auth.corp.internal:8443" in note
+        assert G.extra_domains(TUNNELLED_SESSION) == ["auth.corp.internal.tun.straiker.ai"]
+        pl = G.plan(TUNNELLED_SESSION)
+        assert pl["domains"] == ["auth.corp.internal.tun.straiker.ai"] and pl["domain_notes"] == notes
+        assert "auth.corp.internal.tun.straiker.ai" in pl["source"]
+        assert "auth.corp.internal:8443" not in AD.strip_comments(pl["source"])
+        assert pl["request_template"] == {"message": "{{PROMPT}}"}
+
+    def test_every_slot_of_a_poll_shape_is_routed_and_names_already_routed_are_left(self):
+        out, notes = G.route_second_hosts(TUNNELLED_POLL)
+        assert out["create"]["url"] == "http://ids.corp.internal.tun.straiker.ai/api/conversations"
+        assert out["poll"]["url"] == "wss://transcripts.corp.internal.tun.straiker.ai/api/stream/{{CONV}}"
+        assert out["bootstrap"][0]["url"] == TUNNELLED_POLL["bootstrap"][0]["url"]     # the app's own host
+        assert out["bootstrap"][1]["url"] == TUNNELLED_POLL["bootstrap"][1]["url"]     # already a tunnel name
+        assert sorted(G.extra_domains(TUNNELLED_POLL)) == ["already.tun.straiker.ai",
+                                                           "ids.corp.internal.tun.straiker.ai",
+                                                           "transcripts.corp.internal.tun.straiker.ai"]
+        assert [n.split(" is reached")[0] for n in notes] == ["ids.corp.internal", "transcripts.corp.internal"]
+        assert "--allow ids.corp.internal:80" in notes[0] and "--allow transcripts.corp.internal:443" in notes[1]
+        src = G.generate_adaptor(TUNNELLED_POLL)
+        assert "transcripts.corp.internal.tun.straiker.ai" in src and "wss://transcripts.corp.internal/" not in src
+        assert AD.lint_source(src) == []
+
+    def test_a_private_link_app_leaves_the_host_and_says_it_must_be_routed(self):
+        cfg = {**SESSION_IN_PATH, "message_endpoint": "https://k7f3q9x2m4ta.pl.straiker.ai/v1/sessions/{{SESSION_ID}}/messages"}
+        out, notes = G.route_second_hosts(cfg)
+        assert out == cfg
+        [note] = notes
+        assert note.startswith("auth.example.com is a second host behind a private link")
+        assert G.extra_domains(cfg) == ["auth.example.com"]
+
+    def test_routed_app(self):
+        assert G.routed_app(TUNNELLED_SESSION) == ("tunnel", "chat.corp.internal.tun.straiker.ai")
+        assert G.routed_app({**REST, "endpoint": "https://x.pl.straiker.ai/v1"}) == ("private-link", "x.pl.straiker.ai")
+        assert G.routed_app(REST) == ("", "")
+
+
 # --- what every generated source obeys ------------------------------------------------------
 class TestEveryGeneratedSource:
     @pytest.mark.parametrize("cfg", EVERY, ids=[c["adapter"] + ("-2" if c is REST_NESTED or c is SESSION_IN_PATH or c is SSE_CREATE else "") for c in EVERY])
@@ -233,8 +351,14 @@ class TestEveryGeneratedSource:
 
     def test_the_banned_words_are_the_gates(self):
         for word in ("async", "await", "Promise", "fetch", "XMLHttpRequest", "require", "import",
-                     "eval", "setTimeout", "setInterval", "console"):
+                     "eval", "setTimeout", "setInterval"):
             assert word in AD.GATE_BANNED
+
+    def test_console_is_allowed_as_the_gate_allows_it(self):
+        """The engine's gate lists `console` among its allowed globals (it routes to host.log);
+        the lint once refused it, so a file the engine would pass was refused here first."""
+        assert "console" not in AD.GATE_BANNED
+        assert AD.lint_source("function sendTurn(t, h) { console.log('hi'); return 1; }") == []
 
     def test_the_lint_itself_can_fail(self):
         bad = "function sendTurn(turn, host) { const r = fetch(x); return r; }"
@@ -245,10 +369,47 @@ class TestEveryGeneratedSource:
         assert any(".prototype" in p for p in AD.lint_source(proto))
         assert any("__proto__" in p for p in AD.lint_source("function sendTurn(t, h) { return t.__proto__; }"))
         assert any("sendTurn" in p for p in AD.lint_source("function other() {}"))
-        assert any("sendTurn" in p for p in AD.lint_source(
-            "function sendTurn(a, b) {}\nfunction sendTurn(c, d) {}"))
         assert any("export" in p for p in AD.lint_source("export function sendTurn(t, h) {}"))
         assert AD.lint_source("// fetch in a comment\nfunction sendTurn(t, h) { return 1; }") == []
+
+    def test_send_turn_must_be_defined_and_a_redeclaration_is_a_parse_error(self):
+        """The gate's contract rule is `must define sendTurn` (not "exactly one"). A second
+        declaration is still refused — MEASURED on the live gate 2026-10-13 as `parse: Identifier
+        'sendTurn' has already been declared`, module code being strict — so the lint says that,
+        and not a contract rule it never had."""
+        [problem] = AD.lint_source("function other() {}")
+        assert "must be defined" in problem
+        [problem] = AD.lint_source("function sendTurn(a, b) {}\nfunction sendTurn(c, d) {}")
+        assert "declared 2 times" in problem and "parse error" in problem and "exactly one" not in problem
+
+    @pytest.mark.parametrize("src,kind", [
+        ("function sendTurn(t, h) { return atob(t); }", "atob"),
+        ("function sendTurn(t, h) { return new URL(t); }", "URL"),
+        ("function sendTurn(t, h) { return Symbol(); }", "Symbol"),
+        ("function sendTurn(t, h) { return Buffer.from(t); }", "Buffer"),
+        ("function sendTurn(t, h) { return new TextEncoder(); }", "TextEncoder"),
+        ("function sendTurn(t, h) { with (t) { return x; } }", "with"),
+        ("function sendTurn(turn, host) { return host['http']; }", "host[expr]"),
+        ("function __tick() {}\nfunction sendTurn(t, h) {}", "__tick"),
+        ("function sendTurn(t, h) { return this; }", "this"),
+        ("function sendTurn(turn: Turn, host: Host): Reply { return 1; }", "TypeScript"),
+        ("interface X {}\nfunction sendTurn(t, h) {}", "TypeScript"),
+    ])
+    def test_the_other_rules_the_gate_enforces(self, src, kind):
+        """Unknown globals, `with`, `host[expr]`, `__`-prefixed names, `this` outside a class
+        body and TypeScript — each refused by gate.core.js, each now named here first."""
+        problems = AD.lint_source(src)
+        assert any(kind in p for p in problems), problems
+
+    def test_the_structural_rules_read_past_strings_as_the_parser_does(self):
+        """`this adaptor` in a message is text, and `this` inside a class body is the instance:
+        the shipped scaffold carries the former and a typed error the latter, and both pass."""
+        assert AD.lint_source(AD.template_js("scaffold")) == []
+        assert AD.lint_source('function sendTurn(t, h) { return { note: "finish this adaptor" }; }') == []
+        assert AD.lint_source("class E extends Error { constructor(m) { super(m); this.m = m; } }\n"
+                              "function sendTurn(t, h) { return new E('x'); }") == []
+        assert AD.lint_source("function sendTurn(turn, host) { var o = { headers: turn.headers, "
+                              "method: 'POST' }; return o; }") == []
 
 
 # --- per shape: the contract is in the file -------------------------------------------------

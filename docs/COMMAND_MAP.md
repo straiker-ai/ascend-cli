@@ -233,6 +233,7 @@ gate the file and write it onto the app's request_template
 | Flag | Value | Default | What it does |
 |---|---|---|---|
 | `--app` **(required)** | `NAME|aapp_id` | — | the application (platform side: a name or aapp_ id) |
+| `--endpoint` | `URL` | — | the target's address, only for an app with no URL (stored as _adaptor_endpoint; an app's own URL is its adaptor's address) |
 | `--dry-run` | — | — | gate and show the merged template; write nothing |
 
 ```bash
@@ -240,7 +241,7 @@ ascend adaptor store my_adaptor.js --app 'My Bot' --dry-run   # see the merge
 ascend adaptor store my_adaptor.js --app 'My Bot'
 ```
 
-> Gated first; refused on any violation. Only _adaptor_src changes - every other key in the template is sent back as it was - and the write is read back before it is reported.
+> Gated first; refused on any violation. Only _adaptor_src changes - every other key in the template is sent back as it was, except an endpoint key the engine would never read, which is dropped and said - and the write is read back before it is reported.
 
 ### `ascend adaptor test`
 

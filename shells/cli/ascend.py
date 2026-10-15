@@ -464,6 +464,14 @@ def _spec_from_config(args, api):
 
 # Auth kinds resolved locally by runtime/layers/auth.py. The platform cannot run them.
 DYNAMIC_AUTH_KINDS = ("oauth2", "csrf", "derived_multihop")
+# OAuth2 grants that put a PERSON in the loop: a browser redirect (authorization_code, implicit)
+# or a device code somebody types in (device_code). A generated adaptor running in the engine
+# cannot complete these, so a target declaring one stays on the bridge, where a human can.
+# This is the ONLY human signal in the auth model: the grants auth.py actually runs are the three
+# machine-to-machine flows (client_credentials | password | refresh, runtime/layers/auth.py), and
+# csrf / derived_multihop are automated extraction chains -- none of them need a person. Keyed on
+# the oauth2 `grant` field because the KIND alone (oauth2/csrf/derived_multihop) never does.
+HUMAN_OAUTH2_GRANTS = ("authorization_code", "device_code", "implicit")
 # Adapters that can only ever run on this machine: a Python module the operator wrote, and a
 # driven browser. Nothing generated can stand in for them, so they are the two shapes the (deprecated)
 # bridge still carries by default.
@@ -489,6 +497,24 @@ def _auth_type(cfg):
     if isinstance(auth, dict):
         return auth.get("type")
     return None
+
+
+def _login_needs_human(cfg) -> bool:
+    """Whether this target's login needs a PERSON to complete (interactive MFA/SSO).
+
+    Decided from the auth-kind data, not guessed: an oauth2 block whose `grant` is one of
+    HUMAN_OAUTH2_GRANTS (a browser redirect or a device code). Every other handshake the model
+    expresses -- oauth2 with a machine grant, csrf, derived_multihop -- a generated adaptor can
+    complete itself, so those are machine-completable and are not kept on the bridge for this
+    reason. Handles the `auth` LIST form the same way `_auth_type` does.
+    """
+    auth = (cfg or {}).get("auth")
+    blocks = auth if isinstance(auth, list) else [auth]
+    for b in blocks:
+        if isinstance(b, dict) and b.get("type") == "oauth2":
+            if str(b.get("grant", "client_credentials")) in HUMAN_OAUTH2_GRANTS:
+                return True
+    return False
 _PRIVATE_SUFFIXES = (".local", ".internal", ".lan", ".home", ".corp", ".localhost", ".test")
 
 # Names Straiker reaches itself. A tunnel or private-link host under one of these suffixes is
@@ -555,6 +581,36 @@ def _is_public_host(url: str) -> bool:
     return bool(addrs) and all(ipaddress.ip_address(a).is_global for a in addrs)
 
 
+def _self_authenticating(adapter, cfg) -> bool:
+    """True when the derived contract is a PUBLIC, machine-completable login that `target add`
+    (--via auto) routes to a HOSTED LOGIN ADAPTOR — the engine mints or echoes the credential
+    every turn, so the operator has NOTHING to supply.
+
+    This is the single predicate behind BOTH the transport choice (the `not static_auth` adaptor
+    branch of `_choose_transport`, which calls this) and the `self_authenticating` marker
+    `ascend target inspect` emits for `ascend connect`. One function, so the two can never
+    disagree: it reuses the exact signals the transport choice reads and derives nothing of its
+    own. Each `return False` matches a reason `_choose_transport` would otherwise print:
+      * routed by Straiker            -> the platform calls it; not a login the adaptor drives
+      * a local-only adapter          -> only a bridge runs custom/browser
+      * static auth (or none)         -> the operator carries the key; not self-authenticating
+      * an interactive (human) grant  -> a person must complete it; a bridge, not the engine
+      * not reachable from the cloud  -> the engine cannot dial it, so no hosted adaptor
+    """
+    from runtime.discovery import codegen_js as _cj
+    shaped = {**(cfg or {}), "adapter": adapter or (cfg or {}).get("adapter") or "direct_api"}
+    endpoint = _cj.raw_url(shaped) or (cfg or {}).get("endpoint") or (cfg or {}).get("url") or ""
+    if _routed_by_straiker(endpoint):
+        return False
+    if (adapter or "") in LOCAL_ONLY_ADAPTERS:
+        return False
+    if _auth_type(cfg) not in DYNAMIC_AUTH_KINDS:
+        return False
+    if _login_needs_human(cfg):
+        return False
+    return _is_public_host(endpoint)
+
+
 def _choose_transport(args, adapter, cfg):
     """adaptor, api or bridge, and the reason in words.
 
@@ -593,10 +649,13 @@ def _choose_transport(args, adapter, cfg):
         if (adapter or "") in LOCAL_ONLY_ADAPTERS:
             return "bridge", (f"the '{adapter}' adapter runs only on this machine, so a bridge "
                               f"carries it ({BRIDGE_DEPRECATION})")
-        if not static_auth:
-            return "bridge", (f"it authenticates with a {handshake!r} handshake, which no generated "
-                              f"adaptor runs yet; a bridge carries it ({BRIDGE_DEPRECATION}) — or "
-                              f"write the adaptor by hand: ascend adaptor scaffold")
+        if not static_auth and _login_needs_human(cfg):
+            # A login a PERSON has to complete -- an interactive OAuth2 grant (browser redirect or
+            # a device code). A generated adaptor cannot finish it inside the engine, so it stays
+            # on the bridge, where the local auth layer and the person can. Every other handshake
+            # is machine-completable and falls through to the adaptor below.
+            return "bridge", (f"its {handshake!r} login needs a person to complete (an interactive "
+                              f"grant), so a bridge carries it ({BRIDGE_DEPRECATION})")
         if not _is_public_host(endpoint):
             # The engine runs the adaptor, and it cannot dial a private address: the adaptor's
             # test would fail after the app was created. Refuse before anything exists, with the
@@ -606,6 +665,19 @@ def _choose_transport(args, adapter, cfg):
                  f"  reach it through a tunnel (a .tun.straiker.ai name), or for now:\n"
                  f"    ascend target add ... --via bridge      ({BRIDGE_DEPRECATION})",
                  error_code="adaptor_target_private")
+        if _self_authenticating(adapter, cfg):
+            # A public target whose login is a MACHINE handshake (oauth2 client_credentials/
+            # password/refresh, csrf, derived_multihop): the engine runs a login-capable adaptor
+            # generated from the contract -- `target add` emits a login scaffold whose generated
+            # JavaScript mints or echoes the credential every turn. Nothing runs on this machine.
+            # This is the fix: a dynamic-auth public target used to fall to the deprecated bridge.
+            # `_self_authenticating` is this exact condition (public + a machine login, past the
+            # routed/local/human/private guards above), equal to `not static_auth` here by
+            # construction. It is the ONE predicate `ascend target inspect` also reads to set its
+            # `self_authenticating` marker, so the transport choice and the marker never disagree.
+            return "adaptor", (f"a hosted adaptor generated from this contract, including its "
+                               f"{handshake!r} login: the platform runs it, nothing runs on this "
+                               f"machine")
         return "adaptor", ("a hosted adaptor generated from this contract: the platform runs it, "
                            "nothing runs on this machine")
     public = _is_public_host(endpoint)
@@ -788,6 +860,14 @@ def cmd_target_inspect(args):
     out["reachable_from_cloud"] = _is_public_host(url)
     out["routed_by_straiker"] = routed
     out["transport"] = ("api" if out["reachable_from_cloud"] else "bridge")
+    # A public login the hosted adaptor completes end to end — the engine mints or echoes the
+    # credential every turn — has nothing for the operator to supply, so `ascend connect` must not
+    # stop to prompt for a throwaway bearer. The SAME predicate the transport choice uses decides
+    # it, off the contract this inspect derived: set the marker on exactly the targets `target add
+    # --via auto` would route to a hosted login adaptor, and the two can never disagree. Set only
+    # when true, so a static-auth, human-login, private or contract-less target is unchanged.
+    if _self_authenticating(out.get("adapter"), out):
+        out["self_authenticating"] = True
     try:
         c = _client(args)
         hits = [a for a in c._rows(c.list_apps())
@@ -5554,9 +5634,15 @@ def _register_adaptor_app(c, args, cfg, adapter, app_name, *, existing, controls
              code=EXIT_ERROR, error_code="adaptor_lint")
     _ok(f"adaptor {plan['shape']} generated → {js_path or '(not written)'}")
     if not plan["finished"]:
-        _warn(f"no generator covers the '{adapter}' adapter: the adaptor is the onboarding "
-              f"scaffold with the captured request in its header. Finish sendTurn() in "
-              f"{js_path}, then `ascend adaptor test` and `ascend adaptor store` it.")
+        if plan["shape"] == "login":
+            _warn(f"this target logs in with a {_auth_type(cfg)!r} handshake: the adaptor is a "
+                  f"LOGIN-capable scaffold (a pure-JS PKCE helper and the mint/echo structure are "
+                  f"in place, the engine runs it). Finish the login in mintCredential() in "
+                  f"{js_path}, then `ascend adaptor test` and `ascend adaptor store` it.")
+        else:
+            _warn(f"no generator covers the '{adapter}' adapter: the adaptor is the onboarding "
+                  f"scaffold with the captured request in its header. Finish sendTurn() in "
+                  f"{js_path}, then `ascend adaptor test` and `ascend adaptor store` it.")
 
     # 1. gate — static, through the engine
     gated = c.adapter_gate(src)

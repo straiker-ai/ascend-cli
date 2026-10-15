@@ -40,7 +40,25 @@ the output says which), and whose `request_template` carries the prompt key, a F
 app's URL. It then runs `test` through the engine, confirms the store by reading the app back, and
 runs `verify`. The result says `transport: adaptor` and names the file it wrote beside the config,
 `<config>.adaptor.js` — the file to edit when the generated one is not enough, with the loop below.
-`--via api` keeps a plain template app (no adaptor); `--via bridge` is the deprecated local path.
+`--via api` keeps a plain template app (no adaptor — and on an app that already carries one, the
+stored `_adaptor_src`, `_adaptor_domains` and endpoint keys are dropped and said, so the app really
+is a template app; the `_tunnel_*` keys stay); `--via bridge` is the deprecated local path.
+
+Two cases the generator does not finish, and says so (`UNFINISHED` in the output, `finished:
+false` in `--json`, and the engine's test fails on it honestly): a target whose contract has no
+generator yet, and a target that **authenticates with a login handshake** (`oauth2`, `csrf`,
+`derived_multihop` in the config's `auth`). Both get the onboarding scaffold with what the capture
+showed in its header — the handshake named, for the second — and the app is adaptor-driven from
+the start; finish `sendTurn()` with the loop below. (A handshake target used to fall to the
+deprecated bridge by default; `--via bridge` still does that on request.)
+
+A target on a **tunnel or private-link name** is reached by Straiker, so nothing is probed from
+here and the contract comes from evidence (`--har`, a cURL, a saved config). A plain request
+(`direct_api`) registers as a template app, as before; a stream, a socket, a session, a poll or a
+handshake gets the hosted adaptor like any public target, because a template cannot render those.
+On a tunnel app every second host the contract names is written as its own tunnel name
+(`auth.corp.internal` → `auth.corp.internal.tun.straiker.ai`, in `_adaptor_domains` and in the
+generated file), and the output says the tunnel agent must `--allow` it.
 
 ## The loop
 
@@ -159,8 +177,9 @@ the name minus `.tun.straiker.ai`, and that is the host a HAR shows. `ascend ada
 - **Build every URL from `host.config.endpoint()`** plus the paths the HAR shows. Never write the
   real host into the adaptor: the engine reaches it only through the tunnel and refuses it otherwise.
 - **One host per tunnel name.** A second host the adaptor needs must be tunneled too: the customer
-  adds it to their tunnel agent's allow list, and the app lists its `.tun` name in
-  `_adaptor_domains`. Say so rather than working around it.
+  adds it to their tunnel agent's allow list (`--allow host:port`), and the app lists its `.tun`
+  name in `_adaptor_domains` (`ascend target add` writes that name for every second host it
+  derives, and says which to allow). Say so rather than working around it.
 - **`ascend adaptor test` goes through the tunnel**, from the engine, exactly as a run does. It is
   the real check and the only one that reaches the app.
 
@@ -239,14 +258,32 @@ genuinely not JSON.
 
 ### Rules the gate enforces (not style advice)
 
-- **No `async`, `await`, `Promise`.** Host calls are synchronous and return values. `await` on a
-  non-promise resolves immediately and `Promise.race` as a timeout times nothing out, so the gate
-  refuses them rather than let you write code that looks right.
+The gate parses the file and refuses, naming kind, detail and line:
+
+- **No `async`, `await`, `Promise`, `for await`.** Host calls are synchronous and return values.
+  `await` on a non-promise resolves immediately and `Promise.race` as a timeout times nothing out,
+  so the gate refuses them rather than let you write code that looks right.
 - **No `fetch`, `XMLHttpRequest`, `require`, `import`, npm.** Network is `host.http` / `host.ws`.
 - **No `eval`, `new Function`, timers.**
+- **No global the isolate does not have.** Only `host`, `JSON`, `Math`, `Date`, `Object`, `Array`,
+  `String`, `Number`, `Boolean`, `Error`, `RegExp`, `Map`, `Set`, `console`, `undefined`, `NaN`,
+  `Infinity`, `isNaN`, `parseInt`, `parseFloat` and the URI codecs exist; anything else (`atob`,
+  `btoa`, `URL`, `Symbol`, `Buffer`, `TextEncoder`, …) is refused as an unknown identifier.
+  `console` IS allowed: it routes to `host.log`.
+- **No `.prototype`, `.__proto__`, `.constructor`** on any object, and no `host[expr]`: name the
+  capability (`host.http.request`), do not compute it.
+- **No `this` outside a class body** (in a plain function it is the sandbox object), no `with`,
+  and no name starting with `__` (those belong to the host).
+- **JavaScript, not TypeScript.** Type annotations do not parse; keep the compiler with
+  `// @ts-check` and JSDoc against `host.d.ts`.
+- **`sendTurn` must be defined** (and `checkReachability` may be). No `export` or
+  `module.exports`: one self-contained file.
 - **No module-level state.** The isolate dies each turn. A token or conversation id from the HAR
   goes in `host.state` (conversation-scoped).
-- **One self-contained file.**
+
+`ascend adaptor gate` is the engine's own gate; the CLI's offline lint (`runtime/adaptor.py`
+`lint_source`, run on every generated file) mirrors these rules so the common refusals are named
+before a round trip, and the gate's verdict wins where the two disagree.
 
 Deadlines are `timeoutMs` per call. Concurrency is `host.parallel`: you describe operations, you
 cannot pass callbacks. `host.d.ts` (from `adaptor spec`) is the complete list.
@@ -334,9 +371,13 @@ ascend adaptor verify --app <uuid>                             # runs what is ST
 
 `store` gates the file first and refuses on any violation. It then merges the gate's output into the
 app's existing `request_template`: **only `_adaptor_src` changes; every other key is sent back
-exactly as it was**, because the platform's PATCH replaces the whole field. Endpoint keys the engine
-would never read (`_adaptor_*_endpoint` on an app that has a URL) are reported but kept. The write
-is read back before it is reported as stored.
+exactly as it was**, because the platform's PATCH replaces the whole field. The one exception is an
+endpoint key the engine would never read (`_adaptor_*_endpoint` on an app that has a URL; a
+namespaced `_adaptor_<slug>_endpoint` on an app with inline source): it is **dropped and said**,
+because dead config that looks live is how a wrong address gets debugged far from the key. An app
+with no URL takes `--endpoint https://<the target>`, stored as `_adaptor_endpoint`; on an app that
+has a URL, `--endpoint` is refused (the URL is the address). The write is read back before it is
+reported as stored.
 
 `verify` is the only check that proves the bytes landed where you think: it runs the **stored**
 adaptor, not the file on your disk. If it fails after `test` passed, the stored bytes differ from
@@ -370,10 +411,17 @@ When `verify` passes, tell the SE:
   integration, and an adaptor runs in the engine, which cannot reach a bridged target.
 - `host.now()` is integer epoch ms; some targets 400 on a float.
 - Keep errors small: an adaptor error becomes the probe's response body and is scored.
-- No `console.log`. Use `host.log("info", msg, extra)`.
+- `console.log` works (the gate allows it; it routes to `host.log`), but `host.log("info", msg,
+  extra)` carries a structured `extra` the transcript shows.
 - `gate --json` carries `templateValue`, the minified base64 the Console's Request Template field
   takes, for the rare case of pasting by hand: `{ "_adaptor_src": "<that>", "message": "{{PROMPT}}" }`.
   `store` does this for you.
+- **Three digests, two bases.** `gate`, `test`, `verify` and `store` print the engine's `digest`,
+  hashed over the source after the engine strips it; `get` prints the engine's own digest of the
+  bytes it resolves, which differs for the same file (the minifier appends a newline). Neither can
+  be rebuilt from the application record. To know whether a store landed, compare `store`'s
+  `template_digest` (the bytes written) with `stored_digest` (the record read back) — equal means
+  it landed; `get --json` carries `stored_digest` on the same basis.
 
 ## What this CLI does not do
 

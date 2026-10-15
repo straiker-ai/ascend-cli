@@ -11,7 +11,9 @@ is exercised end to end without a daemon. The platform is the suite's fake HTTP,
 Pins:
   * every verb parses and answers --json with one envelope on stdout, for success and failure;
   * check streams the agent's lines, exits 0 on WAIT and 1 on FAIL, and refuses a bad allow
-    entry before anything is spawned;
+    entry before anything is spawned; it claims every line passed only when no line read WARN,
+    and it reads the 0.1.4 agent's lines (played back from a capture): an app URL in the scheme
+    the agent found the target answering in is said as found, never as assumed;
   * --env resolves to the endpoint (and follows --base when not given), --relay / --host-key
     override it, and the agent's state directory is always passed explicitly;
   * key prints exactly what the agent printed and never the private half;
@@ -34,9 +36,11 @@ import base64
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import struct
+import subprocess
 import sys
 import textwrap
 import time
@@ -113,6 +117,11 @@ FAKE_AGENT = textwrap.dedent(f'''\
               file=sys.stderr)
         sys.exit(0)
     if cmd == "check":
+        canned = os.environ.get("FAKE_TUNNEL_CHECK_OUT")
+        if canned:
+            # A real agent's stdout, captured into the fixtures directory, played back.
+            sys.stdout.write(open(canned).read())
+            sys.exit(int(os.environ.get("FAKE_TUNNEL_CHECK_RC", "0")))
         if not org or not allows:
             print("ascend-tunnel: tenant (your Straiker org id) is required", file=sys.stderr)
             sys.exit(2)
@@ -123,6 +132,12 @@ FAKE_AGENT = textwrap.dedent(f'''\
         print("INFO  relay %s, direct (no HTTPS_PROXY)" % endpoint)
         if os.environ.get("FAKE_TUNNEL_FAIL"):
             print("FAIL  relay WebSocket: dial tcp: i/o timeout (allow outbound HTTPS to it; set HTTPS_PROXY if you use a proxy)")
+            sys.exit(1)
+        if os.environ.get("FAKE_TUNNEL_UPGRADE"):
+            # MEASURED 2026-10-13 against prod with the 0.1.2 agent, word for word.
+            print("FAIL  relay WebSocket: relay %s: failed to WebSocket dial: expected handshake response status code 101 but got %s (allow outbound HTTPS to it; set HTTPS_PROXY if you use a proxy)" % (endpoint, os.environ["FAKE_TUNNEL_UPGRADE"]))
+            for a in allows:
+                print("PASS  target %s:%d reachable" % addr(a))
             sys.exit(1)
         print("PASS  relay WebSocket upgraded over HTTPS")
         if flag("--host-key"):
@@ -201,8 +216,13 @@ def state(tmp_path, monkeypatch):
     monkeypatch.setenv("ASCEND_NO_CACHE", "1")
     monkeypatch.setenv("NO_COLOR", "1")
     for v in ("TUNNEL_STATE_DIR", "STRAIKER_API_BASE", "FAKE_TUNNEL_FAIL", "FAKE_TUNNEL_LISTED",
-              "FAKE_TUNNEL_DIE", "FAKE_TUNNEL_MINT", "FAKE_DOCKER_NO_IMAGE", *T.PROXY_VARS):
+              "FAKE_TUNNEL_DIE", "FAKE_TUNNEL_MINT", "FAKE_TUNNEL_UPGRADE", "FAKE_DOCKER_NO_IMAGE",
+              "FAKE_TUNNEL_CHECK_OUT", "FAKE_TUNNEL_CHECK_RC", *T.PROXY_VARS):
         monkeypatch.delenv(v, raising=False)
+    # The binary's own default directory is the real home's (~/Library/… on macOS): never let a
+    # test read or write it. An empty stand-in means "the binary never ran here" unless a test
+    # puts a key there on purpose.
+    monkeypatch.setattr(T, "binary_default_state_dir", lambda: tmp_path / "binary-default")
     return tmp_path / "state"
 
 
@@ -287,6 +307,32 @@ def test_the_group_help_says_what_a_tunnel_is_and_is_not(cli):
     assert "(L4)" in out and "(L7)" in out and "github.com/straiker-ai/ascend-tunnel" in out
 
 
+def test_ciphertext_is_claimed_for_a_tls_target_only(cli):
+    """Behind http:// Straiker relays a plain-HTTP app's bytes as they are, inside the agent's
+    TLS link (MEASURED 2026-10-14), and the agent writes them to the target as plain HTTP. So
+    "the agent sees only ciphertext" holds for a TLS target only: every sentence that says it,
+    in the group help, the module note or a tracked text file, limits it to TLS in the same
+    clause and says what a plain-HTTP target's traffic is. The group help, the glossary and the
+    module note said it of every target. Only tracked files are read: an untracked virtualenv
+    in the checkout is not shipped."""
+    code, out, _ = cli(["tunnel", "--help"])
+    assert code == 0
+    texts = {"ascend tunnel --help": out, "runtime/tunnel.py": T.__doc__}
+    tracked = subprocess.run(["git", "ls-files", "-z", "--", "*.md", "*.mdx", "*.html", "*.txt"],
+                             cwd=REPO, capture_output=True, text=True, check=True).stdout
+    for rel in filter(None, tracked.split("\0")):
+        texts[rel] = (REPO / rel).read_text(encoding="utf-8", errors="ignore")
+    said = set()
+    for name, text in texts.items():
+        for sentence in re.split(r"(?<=\.)\s+", " ".join(text.split())):
+            if "ciphertext" in sentence:
+                said.add(name)
+                assert re.search(r"ciphertext (?:for|when|from)\b[^;.]{0,40}\bTLS\b", sentence) \
+                    and "plain-HTTP" in sentence, f"{name}: {sentence}"
+    # the texts that say it are among those read, so a pass is not a pattern that matched nothing
+    assert {"ascend tunnel --help", "runtime/tunnel.py", "docs/GLOSSARY.md"} <= said
+
+
 def test_check_needs_org_and_the_usage_error_is_an_envelope(cli, agent):
     code, out, err = cli(["tunnel", "check", "--allow", "chat.corp.internal", "--json"])
     assert code == ascend.EXIT_USAGE
@@ -309,7 +355,8 @@ def test_url_refuses_an_ip_with_an_envelope(cli):
     assert code == ascend.EXIT_USAGE
     env = json.loads(out)
     assert env["ok"] is False and env["error"]["code"] == "bad_target"
-    assert "IP address" in env["error"]["message"] and "IP address" in err
+    assert "Straiker does not route an IP-literal tunnel name" in env["error"]["message"]
+    assert "Straiker does not route an IP-literal tunnel name" in err
 
 
 def test_url_plain_output(cli):
@@ -318,6 +365,144 @@ def test_url_plain_output(cli):
     assert "URL      http://plain.corp.internal.tun.straiker.ai/chat" in out
     assert "allow    --allow plain.corp.internal:80" in out
     assert "no port in the URL" in out and "never an IP address" in out
+    assert "any other port is https" not in out, "the old rule, which sent plain HTTP off 80 to https://"
+
+
+def _scheme_lines(text):
+    return [ln for ln in text.splitlines() if ln.lstrip().startswith("scheme ")]
+
+
+def test_url_keeps_a_plain_http_targets_scheme_on_any_port(cli):
+    """MEASURED 2026-10-14 on a live tunnel: a plain-HTTP target on 8089 needs http:// on its
+    tunnel name (https:// makes Straiker start TLS with it). This printed https://."""
+    code, out, _ = cli(["tunnel", "url", "http://localhost:8089", "--json"])
+    assert code == 0
+    d = json.loads(out)["data"]
+    assert d["url"] == "http://localhost.tun.straiker.ai/<path>" and d["scheme"] == "http"
+    assert d["allow"] == "localhost:8089" and d["port_moved"] is True
+    assert d["scheme_given"] is True and d["hint"] is None
+    code, out, _ = cli(["tunnel", "url", "http://localhost:8089"])
+    assert code == 0
+    assert "URL      http://localhost.tun.straiker.ai/<path>" in out
+    assert "allow    --allow localhost:8089" in out and "https://localhost" not in out
+    assert _scheme_lines(out) == []
+    code, out, _ = cli(["tunnel", "url", "https://api.corp.internal:8443/v1", "--json"])
+    assert json.loads(out)["data"]["url"] == "https://api.corp.internal.tun.straiker.ai/v1"
+
+
+def test_url_a_bare_host_port_says_the_scheme_is_assumed(cli):
+    code, out, _ = cli(["tunnel", "url", "api.corp.internal:8080", "--path", "/v1/chat"])
+    assert code == 0
+    assert "URL      https://api.corp.internal.tun.straiker.ai/v1/chat" in out      # the default stays
+    [line] = _scheme_lines(out)
+    assert "https:// is assumed on port 8080" in line
+    assert line.endswith("http://api.corp.internal.tun.straiker.ai/v1/chat")
+    code, out, _ = cli(["tunnel", "url", "api.corp.internal:8080", "--json"])
+    d = json.loads(out)["data"]
+    assert d["scheme_given"] is False and d["hint"].endswith("http://api.corp.internal.tun.straiker.ai/<path>")
+    for settled in ("chat.corp.internal", "chat.corp.internal:443", "plain.corp.internal:80"):
+        code, out, _ = cli(["tunnel", "url", settled])
+        assert code == 0 and _scheme_lines(out) == [], settled
+
+
+def test_check_says_when_an_app_urls_scheme_is_assumed(cli, agent, state):
+    """The 0.1.2 agent prints https:// for a plain-HTTP target off 80 and warns of nothing
+    (MEASURED 2026-10-14), so the CLI says the scheme is a guess, once per such entry."""
+    code, out, err = cli(["tunnel", "check", "--org", "123", "--allow", "chat.corp.internal",
+                          "--allow", "localhost:8089", "--env", "dev"])
+    assert code == 0, err
+    [line] = _scheme_lines(out)
+    assert "https:// is assumed on port 8089" in line and line.endswith("http://localhost.tun.straiker.ai/<path>")
+    assert out.index("PASS  target localhost:8089 reachable") < out.index(line) < out.index("check passed")
+
+
+def test_check_with_the_0_1_4_agent_says_the_scheme_it_found(cli, agent, monkeypatch):
+    """MEASURED 2026-10-14 with the v0.1.4 release binary on PATH (the runner the CLI picks
+    first), against a plain-HTTP server on 127.0.0.1:18089: the agent printed its app line in a
+    new form and WARNed `answers plain HTTP, not TLS`, and the CLI went on to print the 0.1.0
+    fallback's https:// URL as "the app's URL", call the scheme assumed, and say every line
+    passed. The played-back stdout is that agent's, word for word but for its state directory."""
+    monkeypatch.setenv("FAKE_TUNNEL_CHECK_OUT",
+                       str(REPO / "tests" / "fixtures" / "tunnel_check_0.1.4_plain_http.txt"))
+    argv = ["tunnel", "check", "--org", "123", "--allow", "localhost:18089", "--env", "stage"]
+    code, out, err = cli(argv)
+    assert code == 0, err
+    assert "WARN   target    localhost:18089 answers plain HTTP, not TLS" in out   # streamed as is
+    mine = out[out.rindex("RESULT PASS"):]               # what the CLI says after the agent's lines
+    assert "https://" not in mine
+    assert ("app URL for localhost:18089: http://localhost.tun.straiker.ai/<path>   <- the app's "
+            "URL, plus its path: the agent found plain HTTP there") in mine
+    assert _scheme_lines(out) == []                      # found, so not "assumed"
+    assert "every line PASS" not in out
+    assert "check passed, but 1 line(s) read WARN: read them above. Run the agent:" in mine
+    code, out, _ = cli(argv + ["--json"])
+    d = json.loads(out)["data"]
+    assert d["app_urls"] == ["http://localhost.tun.straiker.ai"]
+    assert d["schemes_found"] == {"localhost:18089": "http"}
+    assert d["passed"] is True and d["counts"]["WARN"] == 1
+
+
+def test_check_reads_every_outcome_of_the_0_1_4_agents_target_probe(cli, agent, monkeypatch):
+    """One check over six targets, captured from the published 0.1.4 image (see
+    test_tunnel_rules.CHECK_014). Where the agent found the target in the other scheme than the
+    port's default, the app's URL is said as found; where it found the port's own, nothing is
+    added; where it found none (a target that answered neither clearly, one it could not reach),
+    the CLI's "assumed" line stays."""
+    monkeypatch.setenv("FAKE_TUNNEL_CHECK_OUT",
+                       str(REPO / "tests" / "fixtures" / "tunnel_check_0.1.4_targets.txt"))
+    monkeypatch.setenv("FAKE_TUNNEL_CHECK_RC", "1")       # the agent exits 1: one target is down
+    allow = ["plain.corp.internal:8089", "tls.corp.internal:8443", "tls80.corp.internal:80",
+             "web.corp.internal:80", "raw.corp.internal:9000", "down.corp.internal:9999"]
+    argv = ["tunnel", "check", "--org", "123", "--env", "stage"] + [x for a in allow for x in ("--allow", a)]
+    code, out, _ = cli(argv)
+    assert code == ascend.EXIT_ERROR and "check failed: 1 line(s) read FAIL" in out
+    mine = out[out.rindex("RESULT FAIL"):]
+    assert ("app URL for plain.corp.internal:8089: http://plain.corp.internal.tun.straiker.ai/<path>"
+            "   <- the app's URL, plus its path: the agent found plain HTTP there") in mine
+    assert ("app URL for tls80.corp.internal:80: https://tls80.corp.internal.tun.straiker.ai/<path>"
+            "   <- the app's URL, plus its path: the agent found TLS there") in mine
+    assert "tls.corp.internal" not in mine and "web.corp.internal" not in mine
+    raw, down = _scheme_lines(mine)
+    assert "https:// is assumed on port 9000" in raw and raw.endswith("http://raw.corp.internal.tun.straiker.ai/<path>")
+    assert "https:// is assumed on port 9999" in down
+    code, out, _ = cli(argv + ["--json"])
+    d = json.loads(out)["data"]
+    assert d["app_urls"] == ["http://plain.corp.internal.tun.straiker.ai",
+                             "https://tls.corp.internal.tun.straiker.ai",
+                             "https://tls80.corp.internal.tun.straiker.ai",
+                             "http://web.corp.internal.tun.straiker.ai",
+                             "https://raw.corp.internal.tun.straiker.ai",
+                             "https://down.corp.internal.tun.straiker.ai"]
+    assert d["schemes_found"] == {"plain.corp.internal:8089": "http", "tls.corp.internal:8443": "https",
+                                  "tls80.corp.internal:80": "https", "web.corp.internal:80": "http"}
+    assert d["passed"] is False and d["failed"] == 1
+
+
+def test_start_says_when_an_app_urls_scheme_is_assumed(cli, agent, state):
+    try:
+        code, out, err = cli(["tunnel", "start", "--org", "123", "--allow", "chat.corp.internal",
+                              "--allow", "localhost:8089", "--env", "dev"])
+        assert code == 0, err
+        [line] = _scheme_lines(out)
+        assert "https:// is assumed on port 8089" in line and line.endswith("http://localhost.tun.straiker.ai/<path>")
+        lines = out.splitlines()
+        url_line = next(i for i, ln in enumerate(lines) if "app URL  https://localhost.tun.straiker.ai/<path>" in ln)
+        assert lines[url_line + 1] == line, "the hint sits under the app URL it is about"
+        code, out, _ = cli(["tunnel", "ls"])                 # where the URL is looked up later
+        assert code == 0
+        [line] = _scheme_lines(out)
+        assert "https:// is assumed on port 8089" in line and line.endswith("http://localhost.tun.straiker.ai/<path>")
+    finally:
+        _stop_all(cli)
+
+
+def test_a_foreground_start_says_it_too(cli, agent, state, monkeypatch):
+    monkeypatch.setenv("FAKE_TUNNEL_DIE", "1")          # the fake agent exits at once
+    code, out, err = cli(["tunnel", "start", "--org", "123", "--allow", "localhost:8089", "--foreground"])
+    assert code == 2
+    assert "app URL for localhost:8089: https://localhost.tun.straiker.ai/<path>" in err
+    [line] = _scheme_lines(err)
+    assert "https:// is assumed on port 8089" in line
 
 
 # --------------------------------------------------------------------------- check
@@ -336,6 +521,94 @@ def test_check_streams_the_agents_lines_and_wait_is_exit_0(cli, agent, state):
     assert argv[argv.index("--relay") + 1] == "wss://ascendai-bridge.dev.straiker.ai/tunnel"
     assert "--host-key" not in argv                                   # none published for dev
     assert argv[argv.index("--state-dir") + 1] == str(T.agent_state_dir())
+
+
+def test_check_passes_fanout_and_refuses_it_out_of_range(cli, agent):
+    code, out, err = cli(["tunnel", "check", "--org", "123", "--allow", "a.corp", "--fanout", "4", "--json"])
+    assert code == 0, err
+    [argv] = agent.argv()
+    assert argv[argv.index("--fanout") + 1] == "4" and argv[-2:] == ["--fanout", "4"]
+    assert json.loads(out)["data"]["fanout"] == 4
+    for bad in ("0", "17"):
+        code, out, _ = cli(["tunnel", "check", "--org", "123", "--allow", "a.corp", "--fanout", bad, "--json"])
+        assert code == ascend.EXIT_USAGE and json.loads(out)["error"]["code"] == "bad_fanout"
+        assert "fanout must be 1..16" in json.loads(out)["error"]["message"]
+    assert len(agent.argv()) == 1, "nothing spawned for a bad fanout"
+
+
+def test_check_on_stage_dials_the_real_relay_with_its_key_pinned(cli, agent):
+    code, out, err = cli(["tunnel", "check", "--org", "123", "--allow", "a.corp", "--env", "stage"])
+    assert code == 0, err
+    [argv] = agent.argv()
+    assert argv[argv.index("--relay") + 1] == "wss://ascendai-bridge.stage.straiker.ai/tunnel"
+    assert argv[argv.index("--host-key") + 1] == T.STAGE_HOST_KEY
+    assert "PASS  relay host key matches the pinned key" in out
+
+
+def test_a_prod_403_at_the_upgrade_says_the_tunnel_is_not_enabled_there(cli, agent, monkeypatch):
+    """MEASURED: prod's relay answers 403 at the WebSocket upgrade while the tunnel is off there.
+    The generic proxy hint blamed the operator's network; now the check says what it is."""
+    monkeypatch.setenv("FAKE_TUNNEL_UPGRADE", "403")
+    code, out, err = cli(["tunnel", "check", "--org", "123", "--allow", "a.corp", "--env", "prod"])
+    assert code == ascend.EXIT_ERROR
+    assert "check failed: the tunnel is not enabled on this environment yet" in out
+    assert "--env stage" in out and "Send the lines above" not in out
+    code, out, _ = cli(["tunnel", "check", "--org", "123", "--allow", "a.corp", "--env", "prod", "--json"])
+    env = json.loads(out)
+    assert env["ok"] is False and env["error"]["code"] == "tunnel_not_enabled"
+    assert "not enabled on this environment yet" in env["error"]["message"]
+    assert env["data"]["relay_status"] == 403 and env["data"]["tunnel_enabled"] is False
+
+
+@pytest.mark.parametrize("env_name,upgrade,fail", [("dev", "403", None), ("stage", "403", None),
+                                                    ("prod", "502", None), ("prod", None, "1")])
+def test_any_other_environment_or_failure_keeps_the_generic_hint(cli, agent, monkeypatch, env_name, upgrade, fail):
+    if upgrade:
+        monkeypatch.setenv("FAKE_TUNNEL_UPGRADE", upgrade)
+    if fail:
+        monkeypatch.setenv("FAKE_TUNNEL_FAIL", fail)
+    code, out, _ = cli(["tunnel", "check", "--org", "123", "--allow", "a.corp", "--env", env_name])
+    assert code == ascend.EXIT_ERROR
+    assert "Send the lines above to support@straiker.ai" in out and "not enabled" not in out
+    code, out, _ = cli(["tunnel", "check", "--org", "123", "--allow", "a.corp", "--env", env_name, "--json"])
+    env = json.loads(out)
+    assert env["error"]["code"] == "check_failed" and env["data"]["tunnel_enabled"] is True
+
+
+def test_a_key_the_binary_made_by_hand_is_the_identity_used_and_said(cli, agent, state, tmp_path):
+    """A customer ran `ascend-tunnel` per its README first: its key sits in the binary's default
+    directory and is what the app lists. The CLI used to pass its own empty directory, mint a
+    second identity, and wait forever."""
+    default = T.binary_default_state_dir()
+    default.mkdir(parents=True)
+    (default / "agent.key").write_text(PRIVATE)
+    code, out, err = cli(["tunnel", "check", "--org", "123", "--allow", "a.corp"])
+    assert code == 0, err
+    [argv] = agent.argv()
+    assert argv[argv.index("--state-dir") + 1] == str(default)
+    assert f"using the identity at {default}" in err and "run by hand" in err
+    code, out, _ = cli(["tunnel", "key", "--json"])
+    env = json.loads(out)
+    assert env["data"]["state_dir"] == str(default) and env["data"]["identity_source"] == "binary-default"
+    assert not (state / "tunnel" / "agent" / "agent.key").exists(), "no second identity was minted"
+
+
+def test_two_identities_keep_the_clis_and_name_the_other(cli, agent, state):
+    default = T.binary_default_state_dir()
+    default.mkdir(parents=True)
+    (default / "agent.key").write_text(PRIVATE)
+    cli_dir = state / "tunnel" / "agent"
+    cli_dir.mkdir(parents=True)
+    (cli_dir / "agent.key").write_text(PRIVATE)
+    code, out, err = cli(["tunnel", "check", "--org", "123", "--allow", "a.corp", "--json"])
+    assert code == 0
+    [argv] = agent.argv()
+    assert argv[argv.index("--state-dir") + 1] == str(cli_dir)
+    assert f"another identity exists at {default}" in err and f"--state-dir {default}" in err
+    assert json.loads(out)["data"]["identity_source"] == "cli"
+    code, out, err = cli(["tunnel", "check", "--org", "123", "--allow", "a.corp", "--state-dir", str(default)])
+    assert code == 0 and "another identity" not in err
+    assert agent.argv()[-1][argv.index("--state-dir") + 1] == str(default)
 
 
 def test_check_json_envelope(cli, agent):
@@ -367,10 +640,20 @@ def test_check_fail_exits_1_with_the_envelope(cli, agent, monkeypatch):
     assert code == ascend.EXIT_ERROR and "check failed: 1 line(s) read FAIL" in out
 
 
-def test_check_says_every_line_passed_once_the_key_is_listed(cli, agent, monkeypatch):
+def test_check_says_every_line_passed_only_when_every_line_did(cli, agent, monkeypatch):
+    """This said "every line PASS" over the agent's WARN: prod publishes no host key yet, so
+    the agent warns that the relay's key is not pinned."""
     monkeypatch.setenv("FAKE_TUNNEL_LISTED", "1")
+    code, out, _ = cli(["tunnel", "check", "--org", "123", "--allow", "chat.corp.internal", "--env", "stage"])
+    assert code == 0 and "WARN" not in out and "check passed: every line PASS" in out
     code, out, _ = cli(["tunnel", "check", "--org", "123", "--allow", "chat.corp.internal"])
-    assert code == 0 and "check passed: every line PASS" in out
+    assert code == 0 and "WARN  relay host key SHA256:abc is not pinned (set host_key)" in out
+    assert "every line PASS" not in out
+    assert "check passed, but 1 line(s) read WARN: read them above. Run the agent:  ascend tunnel start" in out
+    monkeypatch.delenv("FAKE_TUNNEL_LISTED")             # WAIT as well: both are said
+    code, out, _ = cli(["tunnel", "check", "--org", "123", "--allow", "chat.corp.internal"])
+    assert code == 0 and "check passed. WAIT on the key line is expected" in out
+    assert "  1 line(s) read WARN: read them above." in out and "every line PASS" not in out
 
 
 def test_check_refuses_a_bad_allow_entry_before_spawning(cli, agent):
@@ -448,7 +731,11 @@ def test_neither_binary_nor_docker_names_the_install_paths(cli, monkeypatch, sta
     assert code == ascend.EXIT_ERROR
     env = json.loads(out)
     assert env["ok"] is False and env["error"]["code"] == "no_tunnel_runner"
-    assert "brew install straiker-ai/tap/ascend-tunnel" in err and "docker pull" in err
+    assert f"docker pull {T.IMAGE}" in err and "releases" in err
+    assert "shasum -a 256 -c checksums.txt" in err and "gh attestation verify" in err
+    assert "xattr -d com.apple.quarantine" in err
+    assert err.index("ascend-tunnel_<version>_<os>_<arch>.tar.gz") < err.index("brew install")
+    assert "brew install straiker-ai/tap/ascend-tunnel        (when published)" in err
 
 
 # --------------------------------------------------------------------------- start / ls / logs / stop
@@ -484,7 +771,10 @@ def test_start_ls_logs_stop_lifecycle(cli, agent, state):
         code, out, _ = cli(["tunnel", "ls"])
         assert code == 0
         assert "serving" in out and "waiting" in out and "123" in out and "dev" in out
-        assert "no app lists this agent's key yet" in out and KEY_BLOB in out
+        assert "refused until an app lists its key AND Straiker uses that app once" in out
+        assert "Test Connection" in out and KEY_BLOB in out
+        assert "it is refused until one does" not in out
+        assert st["fanout"] is None and "--fanout" not in argv
         code, out, _ = cli(["tunnel", "ls", "--json"])
         [row] = json.loads(out)["data"]["tunnels"]
         assert row["id"] == "123-dev" and row["state"] == "serving" and row["link"] == "waiting"
@@ -507,6 +797,27 @@ def test_start_ls_logs_stop_lifecycle(cli, agent, state):
         assert not T.pid_alive(pid)
         code, out, _ = cli(["tunnel", "ls", "--json"])
         assert json.loads(out)["data"]["tunnels"] == []
+    finally:
+        _stop_all(cli)
+
+
+def test_start_passes_fanout_records_it_and_says_when_the_key_works(cli, agent, state):
+    try:
+        code, out, err = cli(["tunnel", "start", "--org", "123", "--allow", "chat.corp.internal",
+                              "--env", "dev", "--fanout", "8"])
+        assert code == 0, err
+        [argv] = agent.argv()
+        assert argv[argv.index("--fanout") + 1] == "8"
+        st = json.loads((T.tunnel_dir() / "123-dev.json").read_text())
+        assert st["fanout"] == 8
+        assert "becomes usable once the app lists it AND Straiker uses the app once" in out
+        code, out, _ = cli(["tunnel", "ls", "--json"])
+        [row] = json.loads(out)["data"]["tunnels"]
+        assert row["id"] == "123-dev"
+        code, out, _ = cli(["tunnel", "start", "--org", "124", "--allow", "chat.corp.internal",
+                            "--env", "dev", "--fanout", "99", "--json"])
+        assert code == ascend.EXIT_USAGE and json.loads(out)["error"]["code"] == "bad_fanout"
+        assert len(agent.argv()) == 1
     finally:
         _stop_all(cli)
 
@@ -675,6 +986,16 @@ def platform_factory(monkeypatch, state):
         pf.rec = install_fake_requests(monkeypatch, pf)
         return pf
     return make
+
+
+def test_no_keys_says_when_a_listed_key_starts_working(cli, platform_factory):
+    """A listed key is accepted once the app lists it AND Straiker has used the app once (Test
+    Connection, `adaptor test`, a run start) — not the moment it is listed."""
+    platform_factory(keys=[])
+    code, out, _ = cli(["app", "tunnel-keys", APP_ID])
+    assert code == 0
+    assert "refused until its key is here AND Straiker has used the app once" in out
+    assert "Test Connection" in out and "ascend adaptor test" in out
 
 
 def test_list_shows_the_keys_with_agent_ids(cli, platform_factory):

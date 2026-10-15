@@ -1,0 +1,30 @@
+== Tunnel: this machine -> Straiker
+INFO   agent     org 123; no agent key yet in /tmp/agent-state: the agent creates it when it first runs (this check creates nothing)
+INFO   relay     wss://ascendai-bridge.stage.straiker.ai/tunnel, direct (no HTTPS_PROXY)
+PASS   dns       ascendai-bridge.stage.straiker.ai -> 77.112.237.49, 3.19.254.125, 3.15.58.55
+PASS   tcp       port 443 open on 77.112.237.49, 3.19.254.125, 3.15.58.55
+PASS   tls       verified ascendai-bridge.stage.straiker.ai, issued by "Amazon RSA 2048 M04" (a TLS-inspecting proxy shows its own CA here; that is fine)
+PASS   https     reached Straiker's relay (HTTP 404)
+PASS   websocket upgraded (HTTP 101)
+PASS   tunnel    relay host key matches the pinned key
+INFO   login     not checked: the agent has no key yet (it creates one when it first runs)
+RESULT PASS: this machine reaches Straiker
+
+== Apps: this machine -> your apps
+INFO   app       plain.corp.internal:8089 is reached at https://plain.corp.internal.tun.straiker.ai/... (the Ascend app's URL, with its path)
+WARN   target    plain.corp.internal:8089 answers plain HTTP, not TLS
+                 -> Use http:// in the Ascend app's URL: http://plain.corp.internal.tun.straiker.ai/...
+INFO   app       tls.corp.internal:8443 is reached at https://tls.corp.internal.tun.straiker.ai/... (the Ascend app's URL, with its path)
+PASS   target    tls.corp.internal:8443 reachable (TLS)
+INFO   app       tls80.corp.internal:80 is reached at http://tls80.corp.internal.tun.straiker.ai/... (the Ascend app's URL, with its path)
+WARN   target    tls80.corp.internal:80 answers TLS on port 80
+                 -> Use https:// in the Ascend app's URL: https://tls80.corp.internal.tun.straiker.ai/...
+INFO   app       web.corp.internal:80 is reached at http://web.corp.internal.tun.straiker.ai/... (the Ascend app's URL, with its path)
+PASS   target    web.corp.internal:80 reachable (plain HTTP)
+INFO   app       raw.corp.internal:9000 is reached at https://raw.corp.internal.tun.straiker.ai/... (the Ascend app's URL, with its path)
+PASS   target    raw.corp.internal:9000 reachable
+INFO   app       down.corp.internal:9999 is reached at https://down.corp.internal.tun.straiker.ai/... (the Ascend app's URL, with its path)
+FAIL   target    down.corp.internal:9999 is not reachable from this machine: nothing listens on port 9999 there
+                 -> Check the app's port: nothing is listening on 9999 at down.corp.internal.
+RESULT FAIL: this machine cannot reach 1 of 6 app(s) (see -> above)
+

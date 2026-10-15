@@ -65,12 +65,59 @@ class TestTargetAddNeverProposesABridge:
     @pytest.mark.parametrize("url", ROUTED)
     @pytest.mark.parametrize("adapter,cfg_extra", [
         ("direct_api", {}),
-        ("sse_stream", {}),                                   # a protocol the platform cannot speak
-        ("direct_api", {"auth": {"type": "oauth2"}}),         # a handshake only a bridge could run
+        ("direct_api", {"auth": {"type": "static"}}),
     ])
-    def test_the_transport_is_direct_and_the_reason_is_the_note(self, url, adapter, cfg_extra):
+    def test_a_plain_request_is_direct_and_the_reason_is_the_note(self, url, adapter, cfg_extra):
         via, why = ascend._choose_transport(self._args(), adapter, {"endpoint": url, **cfg_extra})
         assert via == "api" and why == NOTE
+
+    @pytest.mark.parametrize("url", ROUTED)
+    @pytest.mark.parametrize("adapter,cfg_extra,word", [
+        ("sse_stream", {}, "sse_stream"),                            # a stream: no template renders it
+        ("websocket_direct", {}, "websocket_direct"),
+        ("session_api", {}, "session_api"),
+        ("direct_api", {"auth": {"type": "oauth2"}}, "oauth2"),       # a handshake: the scaffold
+    ])
+    def test_a_contract_a_template_cannot_render_gets_the_hosted_adaptor(self, url, adapter, cfg_extra, word):
+        """The old rule returned "api" for EVERY routed name, so a streaming or session target
+        behind a tunnel was registered as a template app that could not speak its contract.
+        The shape decides, exactly as for a public name; only the local reachability gate is
+        skipped, since Straiker reaches the name."""
+        via, why = ascend._choose_transport(self._args(), adapter, {"endpoint": url, **cfg_extra})
+        assert via == "adaptor" and NOTE in why and word in why
+
+    @pytest.mark.parametrize("url", ROUTED)
+    def test_insisting_on_a_template_app_for_a_stream_is_refused(self, url, capsys, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["ascend", "--json"])
+        with pytest.raises(SystemExit):
+            ascend._choose_transport(self._args(via="api", json=True), "sse_stream", {"endpoint": url})
+        err = json.loads(capsys.readouterr().out)["error"]
+        assert err["code"] == "direct_not_possible" and "sse_stream" in err["message"]
+
+    def test_the_whole_command_registers_a_hosted_adaptor_for_a_session_api_behind_a_tunnel(
+            self, monkeypatch, tmp_path, capsys):
+        """A session API behind a tunnel: the app is adaptor-driven, the second host (the
+        session mint) is written as ITS tunnel name in `_adaptor_domains` and in the generated
+        file, and the output says the tunnel agent must allow it."""
+        cfg = {"adapter": "session_api",
+               "session_endpoint": "https://auth.corp.internal:8443/v1/sessions",
+               "session_body": {}, "session_extract": "id", "session_variable": "SID",
+               "message_endpoint": "https://chat.corp.internal.tun.straiker.ai/v1/messages",
+               "message_body": {"text": "{{PROMPT}}", "session": "{{SID}}"}, "response_path": "reply"}
+        platform = FakePlatform(existing=None)
+        run_target_add(monkeypatch, tmp_path, cfg, platform, gate="poison", name="Tunnelled Session Bot")
+        cap = capsys.readouterr()
+        (spec,), out = platform.created, json.loads(cap.out)
+        assert spec["api_type"] == "api" and spec["url"] == "https://chat.corp.internal.tun.straiker.ai/v1/messages"
+        tpl = json.loads(spec["request_template"])
+        assert tpl["_adaptor_src"] == "FRESH-ADAPTOR"
+        assert tpl["_adaptor_domains"] == ["auth.corp.internal.tun.straiker.ai"]
+        assert out["transport"] == "adaptor" and NOTE in out["transport_reason"]
+        assert out["adaptor"]["domains"] == ["auth.corp.internal.tun.straiker.ai"]
+        [note] = out["adaptor"]["domain_notes"]
+        assert "--allow auth.corp.internal:8443" in note and "--allow auth.corp.internal:8443" in cap.err
+        [src] = platform.gated
+        assert "auth.corp.internal.tun.straiker.ai" in src and "auth.corp.internal:8443" not in src
 
     @pytest.mark.parametrize("url", ROUTED)
     def test_insisting_on_a_bridge_is_refused_with_the_note(self, url, capsys, monkeypatch):
@@ -92,6 +139,7 @@ class TestTargetAddNeverProposesABridge:
         assert out["transport"] == "api" and out["transport_reason"] == NOTE
         assert out["needs_bridge"] is False and out["key_stored"] is False
         assert out["validated"] is False, "nothing was proven from here, and the result says so"
+        assert "_adaptor_src" not in spec["request_template"], "a plain request stays a template app"
 
     @pytest.mark.parametrize("url", ROUTED)
     def test_probing_a_routed_name_says_the_note_not_a_resolver_error(self, url, monkeypatch, capsys):
@@ -145,6 +193,30 @@ class TestTargetInspect:
         assert out["routed_by_straiker"] is True and out["reachable_from_cloud"] is True
         assert out["transport"] == "api" and NOTE in out["note"]
         assert out["already_registered"] == []
+
+    def test_a_public_name_is_a_hosted_adaptor_by_default(self, capsys, monkeypatch):
+        """`inspect` said api or bridge and nothing else, while `target add` registers a hosted
+        adaptor by default for anything Straiker can reach."""
+        monkeypatch.setattr(profiles, "detect", lambda url, verify=True: None)    # no published contract
+        monkeypatch.setattr(ascend, "_is_public_host", lambda url: True)
+        ascend.cmd_target_inspect(self._args("https://bot.example.com/api/chat"))
+        out = capsys.readouterr().out
+        assert "transport   adaptor" in out and "--via api" in out and "needs a bridge" not in out
+        ascend.cmd_target_inspect(self._args("https://bot.example.com/api/chat", json=True))
+        js = json.loads(capsys.readouterr().out)
+        assert js["transport"] == "adaptor" and js["transports"] == ["adaptor", "api"]
+
+    def test_a_private_host_is_told_tunnel_or_bridge_never_needs_a_bridge(self, capsys, monkeypatch):
+        monkeypatch.setattr(profiles, "detect", lambda url, verify=True: None)
+        monkeypatch.setattr(ascend, "_is_public_host", lambda url: False)
+        ascend.cmd_target_inspect(self._args("https://chat.corp.internal/api"))
+        out = capsys.readouterr().out
+        assert "transport   tunnel" in out and "ascend tunnel start" in out
+        assert "--via bridge (deprecated)" in out and "needs a bridge" not in out
+        ascend.cmd_target_inspect(self._args("https://chat.corp.internal/api", json=True))
+        js = json.loads(capsys.readouterr().out)
+        assert js["transport"] == "tunnel" and js["transports"] == ["tunnel", "bridge"]
+        assert js["reachable_from_cloud"] is False and js["routed_by_straiker"] is False
 
 
 class TestTargetCheck:

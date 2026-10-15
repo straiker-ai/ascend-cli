@@ -502,14 +502,52 @@ class TestStore:
         assert exits_with(monkeypatch, rec, "adaptor", "store", js, "--app", "aapp_1") == 1
         assert rec.patched == [] and "not a JSON object" in capsys.readouterr().err
 
-    def test_dead_endpoint_keys_are_warned_about_but_kept(self, monkeypatch, capsys, js):
+    def test_dead_endpoint_keys_are_dropped_and_said(self, monkeypatch, capsys, js):
+        """With a URL every endpoint key is dead: the URL is the address. Kept "with a warning"
+        they stayed on the record as config that looked live; the canonical harness drops them,
+        and so does `store` now — naming each one."""
         tpl = {"message": "{{PROMPT}}", "_adaptor_endpoint": "https://t",
-               "_adaptor_shop_endpoint": "https://t"}
+               "_adaptor_shop_endpoint": "https://t", "_adaptor_user_role": "admin"}
         rec = Recorder(app={**APP, "request_template": json.dumps(tpl)})
         run(monkeypatch, rec, "adaptor", "store", js, "--app", "aapp_1")
         stored = json.loads(rec.patched[0][1]["request_template"])
-        assert stored == {**tpl, "_adaptor_src": "c3Jj"}
-        assert "would never be read" in capsys.readouterr().err
+        assert stored == {"message": "{{PROMPT}}", "_adaptor_user_role": "admin", "_adaptor_src": "c3Jj"}
+        err = capsys.readouterr().err
+        assert "dropped _adaptor_endpoint, _adaptor_shop_endpoint" in err and "never be used" in err
+
+    def test_without_a_url_a_namespaced_key_is_dropped_but_the_bare_one_stays(self, monkeypatch, capsys, js):
+        tpl = {"message": "{{PROMPT}}", "_adaptor_endpoint": "https://t", "_adaptor_shop_endpoint": "https://u"}
+        rec = Recorder(app={**APP, "url": "", "request_template": json.dumps(tpl)})
+        run(monkeypatch, rec, "adaptor", "store", js, "--app", "aapp_1", json_mode=True)
+        stored = json.loads(rec.patched[0][1]["request_template"])
+        assert stored == {"message": "{{PROMPT}}", "_adaptor_endpoint": "https://t", "_adaptor_src": "c3Jj"}
+        env = json.loads(capsys.readouterr().out)
+        assert env["data"]["dropped"] == ["_adaptor_shop_endpoint"] and env["data"]["address"] == "https://t"
+
+    def test_endpoint_gives_an_app_with_no_url_its_address(self, monkeypatch, capsys, js):
+        rec = Recorder(app={**APP, "url": "", "request_template": json.dumps({"message": "{{PROMPT}}"})})
+        run(monkeypatch, rec, "adaptor", "store", js, "--app", "aapp_1", "--endpoint", "https://t.example/v1")
+        stored = json.loads(rec.patched[0][1]["request_template"])
+        assert stored == {"message": "{{PROMPT}}", "_adaptor_endpoint": "https://t.example/v1", "_adaptor_src": "c3Jj"}
+        assert "address  https://t.example/v1" in capsys.readouterr().out
+
+    def test_endpoint_on_an_app_that_has_a_url_is_refused(self, monkeypatch, capsys, js):
+        """An app's own URL is its adaptor's address; --endpoint would never be read."""
+        rec = Recorder()
+        assert exits_with(monkeypatch, rec, "adaptor", "store", js, "--app", "aapp_1",
+                          "--endpoint", "https://elsewhere.example") == cli.EXIT_USAGE
+        assert rec.patched == [] and "would never be read" in capsys.readouterr().err
+
+    def test_endpoint_equal_to_the_url_is_harmless(self, monkeypatch, capsys, js):
+        rec = Recorder()
+        run(monkeypatch, rec, "adaptor", "store", js, "--app", "aapp_1", "--endpoint", APP["url"])
+        stored = json.loads(rec.patched[0][1]["request_template"])
+        assert "_adaptor_endpoint" not in stored and stored["_adaptor_src"] == "c3Jj"
+
+    def test_no_url_and_no_endpoint_names_the_flag(self, monkeypatch, capsys, js):
+        rec = Recorder(app={**APP, "url": ""})
+        assert exits_with(monkeypatch, rec, "adaptor", "store", js, "--app", "aapp_1") == 1
+        assert "--endpoint https://<the target>" in capsys.readouterr().err
 
     def test_the_placeholder_is_replaced_and_said(self, monkeypatch, capsys, js):
         rec = Recorder(app={**APP, "request_template": json.dumps(

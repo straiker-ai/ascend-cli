@@ -10,14 +10,19 @@ here, before anything is spawned, in the agent's words. Pins:
     that contradicts the key material, junk;
   * the allow list: port 443 when omitted, one entry per host, an IP address refused, a name that
     is already a tunnel name refused, the agent's host regex;
-  * the URL rule: no port in the URL, http only on 80, wss for a WebSocket app, the port of a real
-    URL moved into the allow entry;
+  * the URL rule: no port in the URL, the port of a real URL moved into the allow entry, and its
+    scheme kept on any port (http:// for a plain-HTTP target, ws:// / wss:// for a WebSocket
+    one); a bare host[:port] keeps the assumed default (http on 80, https elsewhere) and says so
+    where the port does not settle it;
   * the environment table and `--base` following, the argv for either runner — the Docker form
     mounts the state directory, runs as this user, and passes the proxy variables by name only
-    when they are set — and the runner search order.
+    when they are set — and the runner search order;
+  * the agent's `check` lines in the 0.1.2 and the 0.1.4 forms: each app's URL and, from 0.1.4,
+    the scheme each target answered in, which then decides the app's URL.
 """
 import base64
 import os
+import re
 import struct
 import sys
 from pathlib import Path
@@ -105,8 +110,10 @@ class TestAllowList:
         assert T.parse_allow(["plain.corp.internal:80"])[0]["app_url"] == "http://plain.corp.internal.tun.straiker.ai"
 
     @pytest.mark.parametrize("ip", ["10.0.0.5:8080", "127.0.0.1", "[::1]:443", "fe80::1"])
-    def test_an_ip_address_is_refused(self, ip):
-        with pytest.raises(T.AllowError, match="is an IP address"):
+    def test_an_ip_literal_is_refused_as_straikers_rule(self, ip):
+        """The agent itself accepts an IPv4 literal; it is the platform that refuses the tunnel
+        name built from one, so the refusal says whose rule it is."""
+        with pytest.raises(T.AllowError, match="Straiker does not route an IP-literal tunnel name"):
             T.parse_allow([ip])
 
     def test_a_tunnel_name_is_refused_naming_the_real_host(self):
@@ -128,6 +135,33 @@ class TestAllowList:
         with pytest.raises(T.AllowError, match="at least one target"):
             T.parse_allow([])
 
+    def test_the_host_cap_is_the_relays_socket_name_85_at_the_default_fanout(self):
+        """/run/t/<12 hex>/<host>~0 within sun_path's 107 bytes. MEASURED: the 0.1.2 binary
+        refuses an 86-character host; the old cap of 97 let it through to be refused there."""
+        assert T.MAX_HOST_LEN == 85 and T.max_host_len() == 85 and T.max_host_len(1) == 85
+        ok = "a" * 80 + ".corp"                                           # 85
+        assert T.parse_allow([ok])[0]["host"] == ok
+        with pytest.raises(T.AllowError, match=r"too long for the tunnel's socket name \(85 characters"):
+            T.parse_allow(["a" * 81 + ".corp"])                          # 86
+
+    def test_above_ten_links_the_cap_is_one_shorter(self):
+        """`~10` … `~15` cost one more character than `~0` … `~9`."""
+        assert [T.max_host_len(n) for n in (2, 10, 11, 16)] == [85, 85, 84, 84]
+        host84, host85 = "a" * 79 + ".corp", "a" * 80 + ".corp"
+        assert T.parse_allow([host85], fanout=10)[0]["host"] == host85
+        assert T.parse_allow([host84], fanout=16)[0]["host"] == host84
+        with pytest.raises(T.AllowError, match=r"84 characters at most with --fanout 16"):
+            T.parse_allow([host85], fanout=16)
+
+    @pytest.mark.parametrize("value,expected", [(None, None), (1, 1), ("16", 16), (8, 8)])
+    def test_fanout_in_range(self, value, expected):
+        assert T.check_fanout(value) == expected
+
+    @pytest.mark.parametrize("value", [0, 17, -1, "lots", 1.5])
+    def test_fanout_out_of_range_is_the_agents_words(self, value):
+        with pytest.raises(ValueError, match=r"fanout must be 1\.\.16"):
+            T.check_fanout(value)
+
     def test_localhost_is_a_name(self):
         assert T.parse_allow(["localhost:8080"])[0]["app_url"] == "https://localhost.tun.straiker.ai"
 
@@ -148,14 +182,57 @@ class TestUrlRule:
         assert r["allow"] == "api.corp.internal:8080" and r["port_moved"] is True
         assert ":8080" not in r["url"]
 
-    def test_http_on_80_stays_http_and_any_other_port_is_https(self):
-        assert T.url_rule("http://plain.corp.internal/chat")["url"] == "http://plain.corp.internal.tun.straiker.ai/chat"
-        assert T.url_rule("http://plain.corp.internal:8080/chat")["url"] == "https://plain.corp.internal.tun.straiker.ai/chat"
+    @pytest.mark.parametrize("url,expected,allow", [
+        # MEASURED 2026-10-14 on a live tunnel: a plain-HTTP target on 8089 behind https:// fails
+        # (Straiker starts TLS with it) and behind http:// works. This rule said https for it.
+        ("http://plain.corp.internal:8089/chat", "http://plain.corp.internal.tun.straiker.ai/chat", "plain.corp.internal:8089"),
+        ("http://plain.corp.internal/chat", "http://plain.corp.internal.tun.straiker.ai/chat", "plain.corp.internal:80"),
+        ("https://api.corp.internal:8443/v1", "https://api.corp.internal.tun.straiker.ai/v1", "api.corp.internal:8443"),
+        ("https://tls.corp.internal:80/x", "https://tls.corp.internal.tun.straiker.ai/x", "tls.corp.internal:80"),
+        ("HTTP://Plain.Corp.Internal:8089/Chat", "http://plain.corp.internal.tun.straiker.ai/Chat", "plain.corp.internal:8089"),
+    ])
+    def test_a_real_urls_scheme_is_kept_on_any_port(self, url, expected, allow):
+        r = T.url_rule(url)
+        assert (r["url"], r["allow"]) == (expected, allow)
+        assert r["scheme"] == expected.split("://")[0] and r["app_url"] == expected.rsplit("/", 1)[0]
+        assert r["scheme_given"] is True and r["hint"] is None
 
-    def test_websocket_apps(self):
-        assert T.url_rule("ws://bot.corp.internal:9000/socket")["url"] == "wss://bot.corp.internal.tun.straiker.ai/socket"
+    def test_websocket_apps_keep_their_scheme_too(self):
+        assert T.url_rule("ws://bot.corp.internal:9000/socket")["url"] == "ws://bot.corp.internal.tun.straiker.ai/socket"
+        assert T.url_rule("wss://bot.corp.internal:9443/socket")["url"] == "wss://bot.corp.internal.tun.straiker.ai/socket"
         assert T.url_rule("ws://bot.corp.internal/socket")["url"] == "ws://bot.corp.internal.tun.straiker.ai/socket"
-        assert T.url_rule("wss://bot.corp.internal/socket")["allow"] == "bot.corp.internal:443"
+        r = T.url_rule("wss://bot.corp.internal/socket")
+        assert r["allow"] == "bot.corp.internal:443" and r["websocket"] is True
+        assert T.url_rule("ws://bot.corp.internal:9000/socket")["allow"] == "bot.corp.internal:9000"
+
+    def test_a_bare_host_port_keeps_the_default_and_says_it_is_assumed(self):
+        """No scheme to keep: https is assumed off 80, as before, and the hint names the http://
+        URL a plain-HTTP target needs instead (the 0.1.4 agent's `check app` warns the same)."""
+        r = T.url_rule("api.corp.internal:8080", path="/v1/chat")
+        assert r["url"] == "https://api.corp.internal.tun.straiker.ai/v1/chat" and r["scheme"] == "https"
+        assert r["scheme_given"] is False
+        assert "https:// is assumed on port 8080" in r["hint"] and "plain HTTP" in r["hint"]
+        assert r["hint"].endswith("http://api.corp.internal.tun.straiker.ai/v1/chat")
+        assert "\n" not in r["hint"]
+        assert T.url_rule("localhost:8089")["hint"].endswith("http://localhost.tun.straiker.ai/<path>")
+
+    @pytest.mark.parametrize("target,url", [
+        ("chat.corp.internal", "https://chat.corp.internal.tun.straiker.ai/<path>"),
+        ("chat.corp.internal:443", "https://chat.corp.internal.tun.straiker.ai/<path>"),
+        ("plain.corp.internal:80", "http://plain.corp.internal.tun.straiker.ai/<path>"),
+    ])
+    def test_no_hint_where_the_port_settles_the_scheme(self, target, url):
+        r = T.url_rule(target)
+        assert r["url"] == url and r["hint"] is None and r["scheme_given"] is False
+
+    @pytest.mark.parametrize("port,hinted", [(80, False), (443, False), (8080, True), (8089, True),
+                                             (8443, True), (3000, True)])
+    def test_scheme_hint_is_said_only_off_80_and_443(self, port, hinted):
+        hint = T.scheme_hint("h.corp", port)
+        assert (hint is not None) is hinted
+        if hinted:
+            assert hint.startswith(f"https:// is assumed on port {port}")
+            assert hint.endswith("http://h.corp.tun.straiker.ai/<path>")
 
     def test_path_flag_wins_over_the_urls_path(self):
         assert T.url_rule("https://a.corp/old", path="/new")["url"] == "https://a.corp.tun.straiker.ai/new"
@@ -169,8 +246,36 @@ class TestUrlRule:
     def test_the_rules_are_stated(self):
         rules = " ".join(T.url_rule("a.corp")["rules"])
         for phrase in ("no port in the URL", "one entry per host", "never an IP address",
-                       "key must be listed on the app", "http:// only"):
+                       "key must be listed on the app", "plain HTTP on any port"):
             assert phrase in rules
+        assert "plain HTTP on port 80" not in rules, "the rule that sent a plain-HTTP target to https://"
+
+
+class TestAppUrl:
+    """The contract: a given scheme is the target's own and is kept on any port; without one it
+    is assumed from the port, the agent's default (http on 80, https on any other)."""
+
+    @pytest.mark.parametrize("port,scheme,expected", [
+        (8089, "http", "http://h.corp.tun.straiker.ai"),
+        (8443, "https", "https://h.corp.tun.straiker.ai"),
+        (80, "https", "https://h.corp.tun.straiker.ai"),
+        (443, "http", "http://h.corp.tun.straiker.ai"),
+        (9000, "WS", "ws://h.corp.tun.straiker.ai"),
+        (9443, "wss", "wss://h.corp.tun.straiker.ai"),
+        (8089, None, "https://h.corp.tun.straiker.ai"),
+        (443, None, "https://h.corp.tun.straiker.ai"),
+        (80, None, "http://h.corp.tun.straiker.ai"),
+    ])
+    def test_a_given_scheme_is_kept_and_a_missing_one_assumed(self, port, scheme, expected):
+        assert T.app_url("h.corp", port, scheme) == expected
+
+    def test_a_scheme_the_tunnel_does_not_carry_is_refused(self):
+        with pytest.raises(T.AllowError, match=r"ftp:// is not an http\(s\) or ws\(s\) URL"):
+            T.app_url("h.corp", 21, "ftp")
+
+    def test_an_allow_entry_has_no_scheme_so_it_keeps_the_default(self):
+        assert [f["app_url"] for f in T.parse_allow(["a.corp:8089", "b.corp:80", "c.corp"])] == [
+            "https://a.corp.tun.straiker.ai", "http://b.corp.tun.straiker.ai", "https://c.corp.tun.straiker.ai"]
 
 
 # --------------------------------------------------------------------------- environments
@@ -185,15 +290,31 @@ class TestEnvironments:
     def test_default_env_follows_the_control_plane_base(self, base, env):
         assert T.default_env(base) == env
 
-    def test_the_table_and_the_overrides(self):
-        for env in ("dev", "stage", "prod"):
-            r = T.resolve_endpoint(env)
-            assert r["endpoint"].startswith("wss://ascendai-bridge.") and r["endpoint"].endswith("/tunnel")
-            assert r["host_key"] is None and r["host_key_source"] is None    # none published yet
-        assert T.resolve_endpoint("prod")["endpoint"] == "wss://ascendai-bridge.prod.straiker.ai/tunnel"
+    def test_the_table_is_exact_per_environment(self):
+        """Exact URLs, not a prefix: the prefix test let `ascendai-bridge.staging.straiker.ai`
+        through, and that name is NXDOMAIN (MEASURED 2026-10-13); the stage relay is
+        `ascendai-bridge.stage.straiker.ai`, and its host key is published, so stage pins it."""
+        assert T.resolve_endpoint("dev") == {
+            "env": "dev", "endpoint": "wss://ascendai-bridge.dev.straiker.ai/tunnel",
+            "host_key": None, "host_key_source": None}
+        assert T.resolve_endpoint("stage") == {
+            "env": "stage", "endpoint": "wss://ascendai-bridge.stage.straiker.ai/tunnel",
+            "host_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILdbcgnXLQ0PX4mltsX+dHYu3iV5dGIrtf3qTLuwswD6",
+            "host_key_source": "built-in"}
+        assert T.resolve_endpoint("prod") == {
+            "env": "prod", "endpoint": "wss://ascendai-bridge.prod.straiker.ai/tunnel",
+            "host_key": None, "host_key_source": None}
+        assert set(T.ENVIRONMENTS) == {"dev", "stage", "prod"}
+        assert "staging" not in " ".join(e["endpoint"] for e in T.ENVIRONMENTS.values())
+        parsed = T.parse_key_line(T.STAGE_HOST_KEY)
+        assert parsed["type"] == "ssh-ed25519", "the pinned key is a key line the agent can take"
+
+    def test_the_overrides(self):
         r = T.resolve_endpoint("dev", "wss://relay.example/tunnel", "ssh-ed25519 AAAA")
         assert r == {"env": "dev", "endpoint": "wss://relay.example/tunnel",
                      "host_key": "ssh-ed25519 AAAA", "host_key_source": "flag"}
+        r = T.resolve_endpoint("stage", None, "ssh-ed25519 BBBB")
+        assert r["host_key"] == "ssh-ed25519 BBBB" and r["host_key_source"] == "flag"
 
     def test_a_non_wss_endpoint_and_a_bad_host_key_are_refused(self):
         with pytest.raises(ValueError, match="wss://"):
@@ -222,7 +343,40 @@ class TestRunner:
             ["/opt/bin/ascend-tunnel", "key", "--state-dir", "/s/agent"]
         no_pin = T.build_argv(self.BIN, "run", org="1", allow=["a.corp:443"], endpoint="wss://e",
                               state_dir="/s")
-        assert "--host-key" not in no_pin and "--ca-file" not in no_pin
+        assert "--host-key" not in no_pin and "--ca-file" not in no_pin and "--fanout" not in no_pin
+
+    def test_fanout_rides_last_on_both_runners_and_only_when_given(self):
+        argv = T.build_argv(self.BIN, "check", org="1", allow=["a.corp:443"], endpoint="wss://e",
+                            state_dir="/s", fanout=4)
+        assert argv[-2:] == ["--fanout", "4"]
+        argv = T.build_argv(self.DOCKER, "run", org="1", allow=["a.corp:443"], endpoint="wss://e",
+                            state_dir="/s", fanout=16)
+        assert argv[-2:] == ["--fanout", "16"] and argv[argv.index(T.IMAGE) + 1] == "run"
+        assert "--fanout" not in T.build_argv(self.BIN, "key", state_dir="/s", fanout=4)
+
+    def test_the_image_is_0_1_2_pinned_by_digest(self):
+        """A re-pushed tag cannot change what runs: the reference carries the index digest
+        (MEASURED with `docker buildx imagetools inspect`), and the tag stays for a human."""
+        assert T.IMAGE == f"ghcr.io/straiker-ai/ascend-tunnel:{T.IMAGE_VERSION}@{T.IMAGE_DIGEST}"
+        assert T.IMAGE_VERSION == "0.1.2"
+        assert re.fullmatch(r"sha256:[0-9a-f]{64}", T.IMAGE_DIGEST)
+        assert "0.1.0" not in T.IMAGE
+
+    def test_the_install_hints_lead_with_what_exists(self):
+        """MEASURED: the brew tap, winget manifest and scoop bucket do not exist yet; the Releases
+        archive, the Docker image and the deb/rpm do. The macOS archive is ad-hoc signed."""
+        hints = T.INSTALL_HINTS
+        text = "\n".join(hints)
+        order = [next(i for i, h in enumerate(hints) if h.lstrip().startswith(word))
+                 for word in ("archive", "Docker", "Linux", "brew", "winget", "scoop")]
+        assert order == sorted(order), "archive, Docker, deb/rpm, then the unpublished channels"
+        assert "shasum -a 256 -c checksums.txt" in text and "gh attestation verify" in text
+        assert "xattr -d com.apple.quarantine" in text and "ad-hoc signed" in text
+        assert f"docker pull {T.IMAGE}" in text
+        for word in ("brew", "winget", "scoop"):
+            line = next(h for h in hints if h.lstrip().startswith(word))
+            assert "(when published)" in line, word
+        assert T.no_runner_message(["x"]).index("archive") < T.no_runner_message(["x"]).index("brew")
 
     def test_docker_argv_mounts_state_runs_as_this_user_and_passes_proxies_only_when_set(
             self, monkeypatch, tmp_path):
@@ -283,6 +437,9 @@ class TestRunner:
         assert T.docker_notes(self.BIN, [{"host": "localhost"}]) == []
         notes = T.docker_notes(self.DOCKER, [{"host": "localhost"}])
         assert len(notes) == 1 and "host.docker.internal" in notes[0]
+        # an app on this machine is often plain HTTP on a dev port: the note names both schemes
+        assert "https://host.docker.internal.tun.straiker.ai/<path>" in notes[0]
+        assert "http://host.docker.internal.tun.straiker.ai/<path> for a target that speaks plain HTTP" in notes[0]
         monkeypatch.setenv("HTTPS_PROXY", "http://user:secret@127.0.0.1:3128")
         notes = T.docker_notes(self.DOCKER, [{"host": "chat.corp.internal"}])
         assert len(notes) == 1 and "127.0.0.1" in notes[0]
@@ -303,6 +460,108 @@ PASS  target chat.corp.internal:443 reachable
 FAIL  target api.corp.internal:8080 not reachable from this machine: dial tcp: connection refused
 """
 
+# MEASURED 2026-10-14: the 0.1.4 agent's `check`, word for word. The published image
+# (ghcr.io/straiker-ai/ascend-tunnel:0.1.4) ran it once over six targets in a Docker network:
+# plain HTTP on 8089 and on 80, TLS on 8443 and on 80, a socket that accepts and closes on 9000,
+# nothing listening on 9999. The 0.1.2 and 0.1.3 images, over the same six, print the form above.
+CHECK_014 = (REPO / "tests" / "fixtures" / "tunnel_check_0.1.4_targets.txt").read_text()
+
+
+PROD_403 = ("FAIL  relay WebSocket: relay wss://ascendai-bridge.prod.straiker.ai/tunnel: failed to "
+            "WebSocket dial: expected handshake response status code 101 but got 403 (allow outbound "
+            "HTTPS to it; set HTTPS_PROXY if you use a proxy)")
+TIMEOUT = "FAIL  relay WebSocket: dial tcp: i/o timeout (allow outbound HTTPS to it; set HTTPS_PROXY if you use a proxy)"
+
+
+class TestRelayRefusal:
+    """MEASURED 2026-10-13 with the 0.1.2 agent: prod answers 403 at the WebSocket upgrade."""
+
+    def test_the_status_is_read_off_the_measured_line(self):
+        assert T.relay_refusal([PROD_403]) == 403
+        assert T.relay_refusal(["INFO  x", PROD_403.replace("403", "502")]) == 502
+        assert T.relay_refusal([TIMEOUT]) is None
+        assert T.relay_refusal(["PASS  relay WebSocket upgraded over HTTPS"]) is None
+        assert T.relay_refusal([]) is None
+        assert T.relay_refusal(["WARN  relay WebSocket: expected handshake response status code 101 but got 403"]) is None
+
+    def test_prod_403_means_not_enabled_and_nothing_else_does(self):
+        msg = T.relay_not_enabled("prod", [PROD_403])
+        assert msg and msg.startswith("the tunnel is not enabled on this environment yet")
+        assert "--env stage" in msg and "support@straiker.ai" in msg
+        assert T.relay_not_enabled("dev", [PROD_403]) is None
+        assert T.relay_not_enabled("stage", [PROD_403]) is None
+        assert T.relay_not_enabled("prod", [TIMEOUT]) is None
+        assert T.relay_not_enabled("prod", [PROD_403.replace("403", "502")]) is None
+
+
+class TestIdentityDirectory:
+    """Which key the agent runs with. The CLI always passed its own directory; a customer who had
+    run the binary by hand had a key at the binary's default directory, listed THAT, and a tunnel
+    from the CLI ran as a second identity and stayed waiting."""
+
+    @pytest.fixture
+    def dirs(self, tmp_path, monkeypatch):
+        cli, default = tmp_path / "state" / "tunnel", tmp_path / "Library" / "ascend-tunnel"
+        monkeypatch.setattr(T, "tunnel_dir", lambda: cli)
+        monkeypatch.setattr(T, "binary_default_state_dir", lambda: default)
+        monkeypatch.delenv("TUNNEL_STATE_DIR", raising=False)
+        return cli / "agent", default
+
+    def test_nothing_anywhere_means_the_clis_own_directory(self, dirs):
+        cli, _ = dirs
+        r = T.resolve_identity()
+        assert r == {"dir": cli, "source": "cli", "other": None, "note": None}
+        assert T.agent_state_dir() == cli
+
+    def test_a_key_the_binary_made_is_adopted_and_said(self, dirs):
+        cli, default = dirs
+        default.mkdir(parents=True)
+        (default / "agent.key").write_text("k")
+        r = T.resolve_identity()
+        assert r["dir"] == default and r["source"] == "binary-default" and r["other"] is None
+        assert "using the identity at" in r["note"] and str(default) in r["note"]
+        assert T.agent_state_dir() == default
+
+    def test_two_keys_keep_the_clis_and_name_the_other(self, dirs):
+        cli, default = dirs
+        for d in (cli, default):
+            d.mkdir(parents=True)
+            (d / "agent.key").write_text("k")
+        r = T.resolve_identity()
+        assert r["dir"] == cli and r["source"] == "cli" and r["other"] == default
+        assert "another identity exists at" in r["note"] and f"--state-dir {default}" in r["note"]
+
+    def test_the_flag_and_the_agents_variable_win_silently(self, dirs, monkeypatch, tmp_path):
+        cli, default = dirs
+        default.mkdir(parents=True)
+        (default / "agent.key").write_text("k")
+        r = T.resolve_identity(str(tmp_path / "mine"))
+        assert r == {"dir": tmp_path / "mine", "source": "flag", "other": None, "note": None}
+        monkeypatch.setenv("TUNNEL_STATE_DIR", str(tmp_path / "byhand"))
+        r = T.resolve_identity()
+        assert r["dir"] == tmp_path / "byhand" and r["source"] == "env" and r["note"] is None
+
+    def test_a_directory_without_the_key_file_counts_for_nothing(self, dirs):
+        cli, default = dirs
+        default.mkdir(parents=True)                      # the directory, no agent.key
+        assert T.resolve_identity()["source"] == "cli"
+
+    def test_the_binarys_default_directory_per_platform(self, monkeypatch):
+        monkeypatch.setattr(T.os, "name", "posix")
+        monkeypatch.setattr(T.sys, "platform", "darwin")
+        monkeypatch.setenv("HOME", "/h/x")
+        assert T.binary_default_state_dir() == Path("/h/x/Library/Application Support/Straiker/ascend-tunnel")
+        monkeypatch.setattr(T.sys, "platform", "linux")
+        monkeypatch.setattr(T.os, "geteuid", lambda: 1000, raising=False)
+        monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+        assert T.binary_default_state_dir() == Path("/h/x/.local/state/ascend-tunnel")
+        monkeypatch.setenv("XDG_STATE_HOME", "/xdg")
+        assert T.binary_default_state_dir() == Path("/xdg/ascend-tunnel")
+        monkeypatch.setattr(T.os, "geteuid", lambda: 0, raising=False)
+        assert T.binary_default_state_dir() == Path("/var/lib/straiker-tunnel")
+        # Windows (%LOCALAPPDATA%\Straiker\ascend-tunnel) cannot be asserted here: pathlib refuses
+        # to build a WindowsPath on a POSIX host.
+
 
 class TestAgentOutput:
     def test_check_lines_are_read_in_the_agents_format(self):
@@ -317,6 +576,50 @@ class TestAgentOutput:
     def test_a_listed_key_reads_as_listed(self):
         p = T.parse_check_lines(["PASS  an Ascend app lists this agent's key: the relay accepts it"])
         assert p["listed"] is True and p["waiting"] is False
+
+    def test_the_0_1_2_agent_names_each_app_url_and_no_scheme(self):
+        p = T.parse_check_lines(CHECK_OUTPUT.splitlines())
+        assert p["app_url_for"] == {"chat.corp.internal:443": "https://chat.corp.internal.tun.straiker.ai",
+                                    "api.corp.internal:8080": "https://api.corp.internal.tun.straiker.ai"}
+        assert p["schemes_found"] == {}           # `target … reachable` says nothing of the scheme
+
+    def test_the_0_1_4_agents_app_lines_and_the_scheme_each_target_answered_in(self):
+        """0.1.4 names an app's URL as `app  host:port is reached at …` (0.1.2: `app URL for
+        host:port: …`) and says which scheme each target answered in. Neither was read, so with
+        0.1.4 `tunnel check` printed the 0.1.0 fallback's https:// line after the agent had
+        warned that the target answers plain HTTP."""
+        p = T.parse_check_lines(CHECK_014.splitlines())
+        assert p["app_url_for"] == {
+            "plain.corp.internal:8089": "https://plain.corp.internal.tun.straiker.ai",
+            "tls.corp.internal:8443": "https://tls.corp.internal.tun.straiker.ai",
+            "tls80.corp.internal:80": "http://tls80.corp.internal.tun.straiker.ai",
+            "web.corp.internal:80": "http://web.corp.internal.tun.straiker.ai",
+            "raw.corp.internal:9000": "https://raw.corp.internal.tun.straiker.ai",
+            "down.corp.internal:9999": "https://down.corp.internal.tun.straiker.ai"}
+        assert p["app_urls"] == list(p["app_url_for"].values())
+        assert p["schemes_found"] == {
+            "plain.corp.internal:8089": "http",       # WARN  answers plain HTTP, not TLS
+            "tls.corp.internal:8443": "https",        # PASS  reachable (TLS)
+            "tls80.corp.internal:80": "https",        # WARN  answers TLS on port 80
+            "web.corp.internal:80": "http"}           # PASS  reachable (plain HTTP)
+        # raw.corp.internal answered neither clearly and down.corp.internal was not reached:
+        # nothing settles their scheme
+        assert p["counts"] == {"PASS": 9, "FAIL": 1, "WARN": 2, "WAIT": 0, "INFO": 9}
+        assert p["failed"] == 1
+
+    def test_the_app_url_after_a_check_is_in_the_scheme_the_agent_found(self):
+        allow = T.parse_allow(["plain.corp.internal:8089", "tls.corp.internal:8443",
+                               "tls80.corp.internal:80", "web.corp.internal:80",
+                               "raw.corp.internal:9000", "down.corp.internal:9999"])
+        assert T.checked_app_urls(T.parse_check_lines(CHECK_014.splitlines()), allow) == [
+            "http://plain.corp.internal.tun.straiker.ai", "https://tls.corp.internal.tun.straiker.ai",
+            "https://tls80.corp.internal.tun.straiker.ai", "http://web.corp.internal.tun.straiker.ai",
+            "https://raw.corp.internal.tun.straiker.ai", "https://down.corp.internal.tun.straiker.ai"]
+        # nothing found (0.1.2): the URL the agent printed; nothing printed (0.1.0): the rule's
+        allow = T.parse_allow(["chat.corp.internal", "api.corp.internal:8080"])
+        assert T.checked_app_urls(T.parse_check_lines(CHECK_OUTPUT.splitlines()), allow) == [
+            "https://chat.corp.internal.tun.straiker.ai", "https://api.corp.internal.tun.straiker.ai"]
+        assert T.checked_app_urls(T.parse_check_lines([]), allow) == [f["app_url"] for f in allow]
 
     def test_key_output_is_the_first_non_empty_line(self):
         assert T.key_from_output(f"\n{ED25519_BLOB}\n") == ED25519_BLOB

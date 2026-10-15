@@ -33,16 +33,17 @@ class TestBudget:
     def test_the_default(self):
         assert AD.check_budget(None) == (AD.DEFAULT_BUDGET_S, None)
 
-    @pytest.mark.parametrize("value", [1, 60, 240, "90", 0.5])
+    @pytest.mark.parametrize("value", [1, 60, 240, "90", 1.5])
     def test_in_range(self, value):
         budget, why = AD.check_budget(value)
         assert why is None and budget == float(value)
 
-    @pytest.mark.parametrize("value", [0, -5, 241, 1000])
+    @pytest.mark.parametrize("value", [0, -5, 241, 1000, 0.5, 0.99])
     def test_out_of_range_names_the_limit(self, value):
-        """Checked locally so the error says 240, not a bare 422 from the engine."""
+        """Checked locally so the error says 1 and 240, not a bare 422 from the engine — which
+        requires a whole second at least; 0.5 used to pass here and be refused remotely."""
         budget, why = AD.check_budget(value)
-        assert budget is None and "240" in why
+        assert budget is None and "240" in why and "between 1 and" in why
 
     def test_not_a_number(self):
         budget, why = AD.check_budget("soon")

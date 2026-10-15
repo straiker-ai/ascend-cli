@@ -7,7 +7,7 @@ usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] t
 
 Reach a private or local target: run the Ascend tunnel agent here.
 
-`ascend-tunnel` is Straiker's open-source agent (github.com/straiker-ai/ascend-tunnel). It runs on a machine that can reach the target, opens ONE outbound HTTPS connection to Straiker, and Ascend reaches the target through it at https://<host>.tun.straiker.ai/<path>. No inbound ports, no VPN, no DNS change; it dials only the hosts you --allow and sees only ciphertext. HTTPS_PROXY and NO_PROXY are honoured.
+`ascend-tunnel` is Straiker's open-source agent (github.com/straiker-ai/ascend-tunnel). It runs on a machine that can reach the target, opens ONE outbound HTTPS connection to Straiker, and Ascend reaches the target through it at https://<host>.tun.straiker.ai/<path>. No inbound ports, no VPN, no DNS change; it dials only the hosts you --allow. It sees only ciphertext for a target that speaks TLS; a plain-HTTP target's requests and replies cross it as they are, inside its TLS link to Straiker. HTTPS_PROXY and NO_PROXY are honoured.
 
 This group drives the agent. `check` proves the path, `key` prints the agent's public key, `start` runs it detached (pid, log and status under the CLI's state dir, like a bridge), `url` states the URL rule for an app behind it, and `app tunnel-keys` lists the key on the app. The agent is `ascend-tunnel` on PATH, else the published Docker image with the agent's state directory as its volume; every verb says which it used.
 

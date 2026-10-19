@@ -17,12 +17,32 @@ Config keys:
   send.method      - "click" or "enter"
   send.selector    - CSS selector for the send button (if method=click)
   response         - wait_strategy, container_selector, text_selector, timeout_ms, etc.
+
+Optional response contract (selectors use the resolved page/frame):
+  completion_selector - Require a visible completion marker AND a fresh, visible
+                        response before returning text; overrides wait_strategy.
+  error_selector      - Any visible match fails the turn, including before send.
+                        Without completion_selector, retain the legacy strategy.
+Omit unused contract keys; supplied contract selectors must be nonempty strings.
+An empty/null text_selector still means extract the container's own text. Contract mode
+requires container_selector and positive finite timeout_ms/poll_interval_ms
+(defaults: 30000/500). Selector syntax is checked before submission. The response
+wait is bounded by a monotonic deadline, including DOM calls. No retry is sent.
+
+Freshness is measured against state captured immediately before submission:
+the last visible response node or its text must change. A completion node already
+visible before send must be observed hidden/absent, or a new visible node must
+appear. Use selectors specific to assistant replies and terminal success/error
+states, not a permanently visible status area. Polling cannot detect transitions
+entirely between samples; ambiguous unchanged state times out rather than being
+accepted as a new answer. Error-only mode still uses heuristic legacy completion.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
@@ -156,6 +176,11 @@ class BrowserAdapter(BotAdapter):
             return self._fail("No url configured (or attach a warmed browser with "
                               "cdp_url + use_current_page)", start)
         try:
+            resp_cfg = config.get("response", {})
+            contract = self._validate_response_contract(resp_cfg)
+        except (ValueError, OverflowError) as e:
+            return self._fail(str(e), start, adapter="browser")
+        try:
             import playwright.async_api  # noqa: F401  lazy: only needed for this adapter
         except ImportError:
             return self._fail(
@@ -166,11 +191,10 @@ class BrowserAdapter(BotAdapter):
             await self._ensure_session(config)
 
             target = self._target
-            resp_cfg = config.get("response", {})
             container_sel = resp_cfg.get("container_selector", "")
 
             pre_count = 0
-            if container_sel:
+            if container_sel and not contract:
                 pre_elements = await target.query_selector_all(container_sel)
                 pre_count = len(pre_elements)
                 logger.info(f"Browser: {pre_count} existing messages")
@@ -185,11 +209,23 @@ class BrowserAdapter(BotAdapter):
 
             send_cfg = config.get("send", {})
             send_method = send_cfg.get("method", "click")
+            if send_method != "enter":
+                send_sel = send_cfg.get("selector", "button[type='submit'], button:has-text('Send')")
+                send_btn = await target.wait_for_selector(send_sel, timeout=5000)
+
+            pre_state = None
+            if contract:
+                try:
+                    pre_state = await asyncio.wait_for(
+                        self._prepare_response_contract(target, resp_cfg),
+                        timeout=resp_cfg.get("timeout_ms", 30000) / 1000,
+                    )
+                except asyncio.TimeoutError:
+                    return self._fail("Timed out validating browser response contract before submission",
+                                      start, adapter="browser")
             if send_method == "enter":
                 await input_el.press("Enter")
             else:
-                send_sel = send_cfg.get("selector", "button[type='submit'], button:has-text('Send')")
-                send_btn = await target.wait_for_selector(send_sel, timeout=5000)
                 await send_btn.click()
 
             logger.info("Browser: prompt sent, waiting for response")
@@ -198,9 +234,21 @@ class BrowserAdapter(BotAdapter):
             timeout_ms = resp_cfg.get("timeout_ms", 30000)
             poll_ms = resp_cfg.get("poll_interval_ms", 500)
 
-            response_text = await self._wait_for_response(
-                target, resp_cfg, strategy, pre_count, timeout_ms, poll_ms
-            )
+            if contract:
+                try:
+                    response_text = await asyncio.wait_for(
+                        self._wait_response_contract(target, resp_cfg, pre_state),
+                        timeout=timeout_ms / 1000,
+                    )
+                except asyncio.TimeoutError:
+                    response_text = None
+                if not response_text:
+                    return self._fail("Timed out waiting for bot response contract",
+                                      start, adapter="browser")
+            else:
+                response_text = await self._wait_for_response(
+                    target, resp_cfg, strategy, pre_count, timeout_ms, poll_ms
+                )
 
             if not response_text:
                 try:
@@ -218,6 +266,114 @@ class BrowserAdapter(BotAdapter):
             logger.error(f"Browser adapter error: {e}", exc_info=True)
             self._ready = False
             return self._fail(str(e), start, adapter="browser")
+
+    @staticmethod
+    def _validate_response_contract(resp_cfg):
+        if not isinstance(resp_cfg, dict):
+            raise ValueError("response must be an object")
+        enabled = any(key in resp_cfg for key in ("completion_selector", "error_selector"))
+        if not enabled:
+            return False
+        for key in ("container_selector", "completion_selector", "error_selector",
+                    "text_selector", "loading_selector"):
+            if key == "container_selector" or key in resp_cfg:
+                value = resp_cfg.get(key)
+                if key == "text_selector" and value in (None, ""):
+                    continue
+                if not isinstance(value, str) or not value.strip():
+                    raise ValueError(f"response.{key} must be a nonempty selector string")
+        for key, default, positive in (("timeout_ms", 30000, True),
+                                       ("poll_interval_ms", 500, True),
+                                       ("stabilization_delay_ms", 1500, False),
+                                       ("fixed_wait_ms", 10000, False)):
+            value = resp_cfg.get(key, default)
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or value < 0 or (positive and value == 0)):
+                raise ValueError(f"response.{key} must be a finite "
+                                 f"{'positive' if positive else 'nonnegative'} number")
+        return True
+
+    async def _visible_matches(self, target, selector):
+        if not selector:
+            return []
+        return [el for el in await target.query_selector_all(selector) if await el.is_visible()]
+
+    async def _check_response_error(self, target, resp_cfg):
+        if await self._visible_matches(target, resp_cfg.get("error_selector")):
+            raise RuntimeError("Browser response.error_selector matched a visible error")
+
+    async def _response_snapshot(self, target, resp_cfg):
+        elements = await self._visible_matches(target, resp_cfg["container_selector"])
+        last = elements[-1] if elements else None
+        text = await self._extract_text(last, resp_cfg.get("text_selector", "")) if last else ""
+        return last, text.strip()
+
+    async def _prepare_response_contract(self, target, resp_cfg):
+        # Query even unmatched selectors so malformed syntax fails before send.
+        for key in ("container_selector", "text_selector", "completion_selector",
+                    "error_selector", "loading_selector"):
+            if resp_cfg.get(key):
+                await target.query_selector_all(resp_cfg[key])
+        await self._check_response_error(target, resp_cfg)
+        response = await self._response_snapshot(target, resp_cfg)
+        completion = await self._visible_matches(target, resp_cfg.get("completion_selector"))
+        pre_count = 0
+        if "completion_selector" not in resp_cfg:
+            pre_count = len(await target.query_selector_all(resp_cfg["container_selector"]))
+        await self._check_response_error(target, resp_cfg)
+        return response, completion, pre_count
+
+    @staticmethod
+    async def _same_node(element, previous):
+        return previous is not None and await element.evaluate(
+            "(node, previous) => node === previous", previous)
+
+    async def _wait_response_contract(self, target, resp_cfg, pre_state):
+        before, blocked_markers, pre_count = pre_state
+        deadline = time.monotonic() + resp_cfg.get("timeout_ms", 30000) / 1000
+        poll = resp_cfg.get("poll_interval_ms", 500) / 1000
+        legacy = None
+        if "completion_selector" not in resp_cfg:
+            legacy = asyncio.create_task(self._wait_for_response(
+                target, resp_cfg, resp_cfg.get("wait_strategy", "new_element"),
+                pre_count, resp_cfg.get("timeout_ms", 30000),
+                resp_cfg.get("poll_interval_ms", 500)))
+        try:
+            while time.monotonic() < deadline:
+                await self._check_response_error(target, resp_cfg)
+                if legacy is not None:
+                    complete = legacy.done() and bool(legacy.result())
+                else:
+                    markers = await self._visible_matches(target, resp_cfg["completion_selector"])
+                    still_blocked = []
+                    complete = False
+                    for marker in markers:
+                        matches_old = False
+                        for old in blocked_markers:
+                            if await self._same_node(marker, old):
+                                matches_old = True
+                                break
+                        if matches_old:
+                            still_blocked.append(marker)
+                        else:
+                            complete = True
+                    blocked_markers = still_blocked
+                if complete:
+                    # Read only after completion: a pre-marker read may still be partial.
+                    last, text = await self._response_snapshot(target, resp_cfg)
+                    fresh = bool(text) and (text != before[1]
+                            or not await self._same_node(last, before[0]))
+                    await self._check_response_error(target, resp_cfg)
+                    if fresh and time.monotonic() < deadline:
+                        return text
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    await asyncio.sleep(min(poll, remaining))
+            return None
+        finally:
+            if legacy is not None:
+                legacy.cancel()
+                await asyncio.gather(legacy, return_exceptions=True)
 
     async def _run_pre_actions(self, page: Page, actions: List[Dict]) -> None:
         """Execute pre-actions like clicking the chat icon or dismissing banners."""

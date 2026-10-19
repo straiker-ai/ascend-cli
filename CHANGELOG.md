@@ -13,6 +13,13 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ### Added
 
+- **Optional browser response completion and error signals.** Browser configs can set
+  `response.completion_selector` to require a fresh visible reply and a new or reset
+  visible completion marker, and `response.error_selector` to reject visible errors.
+  The response wait has a monotonic deadline; invalid contract settings are refused
+  before submission, and a timeout does not send another prompt. Existing configs
+  keep their legacy wait strategy. See `docs/ADAPTER_AUTHORING.md` for configuration
+  and polling limits.
 - **`ascend target cloud list | add` — the agents the operator's own cloud credentials can see,
   as native targets.** Discover lists an organisation's Bedrock AgentCore runtimes, classic Bedrock
   agents and Vertex Agent Engine deployments, but an inventory row for one carries no endpoint and

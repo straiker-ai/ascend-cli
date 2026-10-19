@@ -198,6 +198,49 @@ Needs `playwright` + Chromium. Keeps one session open; runs `pre_actions` once.
 | `send.method` / `send.selector` | `click` or `enter`; send-button selector for click |
 | `response` | `wait_strategy`, `container_selector`, `text_selector`, `timeout_ms`, … |
 
+For a page with explicit terminal states, configure the optional response contract:
+
+```json
+{
+  "response": {
+    "container_selector": ".assistant-message",
+    "text_selector": ".message-text",
+    "completion_selector": ".reply-complete",
+    "error_selector": ".chat-error",
+    "timeout_ms": 30000,
+    "poll_interval_ms": 100
+  }
+}
+```
+
+These example selectors must be replaced with the target's actual selectors. They
+are resolved inside the configured iframe when one is present. Omit unused
+contract keys rather than supplying empty strings. An empty or null
+`text_selector` still extracts the response container's own text.
+
+`completion_selector` overrides `wait_strategy`: success requires a fresh visible
+last response (changed node or text) and a visible completion marker. A marker
+already visible before submission is not accepted until it is observed absent or
+hidden, or a new marker node appears. Any visible `error_selector` match fails the
+turn, including before submission. Error-only configurations retain heuristic
+legacy completion; configurations without either key retain their existing behavior.
+
+The contract validates selector syntax before sending and bounds the response
+wait, including DOM queries, using a monotonic deadline. Invalid settings and
+visible errors return failure. When `completion_selector` is configured,
+incomplete or ambiguous replies return failure, not partial text reported as a
+completed answer. No second submission is attempted. Polling
+can miss state transitions entirely between samples: use assistant-only response
+selectors and genuine terminal markers, not a permanently visible status area.
+This is a DOM completion contract, not proof of authentication, backend delivery,
+or a way to clear bot protection.
+
+Playwright and its browser binary are optional installation requirements for
+browser capture and the `browser` adapter. Other adapters do not gain a browser
+dependency from this contract. Installing the Python package alone does not
+install Chromium; provision a compatible browser separately. This configuration
+reference does not certify a bundled browser distribution or its update policy.
+
 ### `amazon_connect` — AWS Connect Chat *(stateful)*
 | Key | Meaning |
 |---|---|

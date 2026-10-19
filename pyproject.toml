@@ -15,8 +15,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Only needed for `ascend map --url` (live browser capture). The RUNTIME never
-# needs a browser — assessments are pure HTTP.
+# Needed for browser capture and the optional browser adapter. Other adapters
+# do not require it. Provision the compatible browser binary separately.
 capture = ["playwright>=1.40"]
 # Only needed for the `bedrock` adapter (SigV4 signing + eventstream decoding come free).
 aws = ["boto3>=1.34"]

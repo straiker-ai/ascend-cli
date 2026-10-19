@@ -92,6 +92,13 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ### Fixed
 
+- Browser capture chooses one submission action instead of pressing Enter and
+  then clicking Send. An uncertain dispatch is not automatically repeated.
+  Outbound prompt verification decodes JSON and form values and checks complete
+  WebSocket messages without trimming whitespace or treating a substring as the
+  prompt. Traffic observed before the submission window cannot verify that send.
+  Observing an outbound value is not proof of server acceptance or a complete reply.
+
 - **The tunnel agent's identity no longer moves with the tenant pin.** The tunnel directory —
   the agent's key, and the pid, log and status of every tunnel started here — lived under the
   per-tenant state dir, which exists only once a platform call has pinned the tenant; and

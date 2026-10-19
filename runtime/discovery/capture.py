@@ -20,6 +20,7 @@ import json
 import os
 import re
 from typing import Any, Dict, List, Optional
+from urllib.parse import parse_qsl
 
 BENIGN_DEFAULT = "Hello, what can you help me with?"
 
@@ -82,6 +83,67 @@ INPUT_SELECTORS = [
     "input[placeholder*='type' i]", "textarea[placeholder*='message' i]",
     "input[placeholder*='message' i]", "input[placeholder*='ask' i]",
 ]
+
+
+def _has_exact_prompt(payload: Any, prompt: str, content_type: str = "") -> bool:
+    """Match whole message values, never substrings, keys, or normalized text.
+
+    JSON strings may be nested in objects/arrays; URL-encoded and multipart forms
+    carry text field values. Unstructured text (including WebSocket text) must
+    match in full. Decode before comparison without normalizing the prompt.
+    """
+    if not prompt:
+        return False
+    if isinstance(payload, bytes):
+        try:
+            payload = payload.decode("utf-8")
+        except UnicodeDecodeError:
+            return False
+    if not isinstance(payload, str):
+        return False
+    mime = content_type.split(";", 1)[0].strip().lower()
+    if mime == "application/x-www-form-urlencoded":
+        try:
+            return any(value == prompt for _, value in parse_qsl(
+                payload, keep_blank_values=True, encoding="utf-8", errors="strict"))
+        except (ValueError, UnicodeError):
+            return False
+    if mime == "multipart/form-data":
+        from email import policy
+        from email.parser import BytesParser
+
+        try:
+            message = BytesParser(policy=policy.default).parsebytes(
+                (f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n" + payload).encode("utf-8"))
+            if not message.is_multipart() or message.defects:
+                return False
+            for part in message.iter_parts():
+                if (part.get_content_disposition() != "form-data" or part.is_multipart()
+                        or part.get_filename() is not None
+                        or part.get_param("name", header="content-disposition") is None):
+                    continue
+                data = part.get_payload(decode=True)
+                if data is not None and data.decode(part.get_content_charset() or "utf-8") == prompt:
+                    return True
+        except (ValueError, LookupError, UnicodeError):
+            pass
+        return False
+    if mime in ("", "text/plain") and payload == prompt:
+        return True
+    try:
+        value = json.loads(payload)
+    except (ValueError, RecursionError):
+        return "json" not in mime and payload == prompt
+    pending = [value]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, str) and value == prompt:
+            return True
+        if isinstance(value, dict):
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            pending.extend(value)
+    return False
 
 
 def _browser_channels(preferred=None):
@@ -273,6 +335,28 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
             ctx = await browser.new_context(**ctx_kw)
         page = await ctx.new_page()
 
+        verification_active = False
+        prompt_observed = False
+
+        def on_request(req):
+            nonlocal prompt_observed
+            # Request-time evidence is independent of response completion. A
+            # pre-action request with a delayed response must not verify this send.
+            if not verification_active:
+                return
+            try:
+                if req.method not in ("POST", "GET", "PUT", "PATCH") or not _worth_recording(
+                        req.url, req.method, getattr(req, "resource_type", "") or ""):
+                    return
+                ct = next((v for k, v in (req.headers or {}).items()
+                           if k.lower() == "content-type"), "")
+                if _has_exact_prompt(req.post_data, prompt, ct):
+                    prompt_observed = True
+            except Exception:
+                pass
+
+        page.on("request", on_request)
+
         async def on_response(resp):
             try:
                 req = resp.request
@@ -319,8 +403,16 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
         def on_ws(ws):
             rec = {"url": ws.url, "sent": [], "received": []}
             ws_messages.append(rec)
-            ws.on("framesent", lambda p: rec["sent"].append(
-                str(p.get("payload") if isinstance(p, dict) else p)[:4000]))
+
+            def on_sent(p):
+                nonlocal prompt_observed
+                payload = p.get("payload") if isinstance(p, dict) else p
+                # Verify the full frame before applying the evidence display cap.
+                if verification_active and _has_exact_prompt(payload, prompt):
+                    prompt_observed = True
+                rec["sent"].append(str(payload)[:4000])
+
+            ws.on("framesent", on_sent)
             ws.on("framereceived", lambda p: rec["received"].append(
                 str(p.get("payload") if isinstance(p, dict) else p)[:4000]))
 
@@ -346,12 +438,12 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
             print(f"  3. Wait for the bot to reply, then leave the window alone.", flush=True)
             print(f"  Recording for up to {manual_wait_s}s (Ctrl-C when done).", flush=True)
             print("=" * 68 + "\n", flush=True)
+            verification_active = True
             waited = 0
             while waited < manual_wait_s:
                 await page.wait_for_timeout(2000)
                 waited += 2
-                if any(prompt.strip() in (pr["request"].get("raw_body") or "") for pr in pairs) or \
-                   any(prompt.strip() in str(f) for w in ws_messages for f in (w.get("sent") or [])):
+                if prompt_observed:
                     notes.append(f"prompt observed in traffic after {waited}s")
                     await page.wait_for_timeout(8000)   # let the reply land
                     break
@@ -371,14 +463,7 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
                 await browser.close()
             _augment_pairs_from_har(pairs, _har_path, notes)
 
-            def _in_traffic_m(needle):
-                if not needle: return False
-                for pr in pairs:
-                    if needle in (pr["request"].get("raw_body") or ""): return True
-                for w in ws_messages:
-                    if any(needle in str(f) for f in (w.get("sent") or [])): return True
-                return False
-            verified_m = _in_traffic_m(prompt.strip())
+            verified_m = prompt_observed
             if not verified_m:
                 notes.append("NO PROMPT SENT — manual capture timed out without seeing the prompt")
             return {"pairs": pairs, "ws_messages": ws_messages, "notes": notes,
@@ -461,25 +546,34 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
                 recipe["input_selector"] = await _stable_selector(loc, sel)
                 recipe["input_frame_url"] = "" if fr is page else (getattr(fr, "url", "") or "")
                 recipe["send"] = "enter"
-                await loc.press("Enter")
-                await page.wait_for_timeout(2500)
-                # If Enter didn't submit, try an explicit send button near the input.
+                # Choose once BEFORE submitting. A timeout or absent traffic after
+                # dispatch is uncertain, not permission to send the prompt again.
+                send_button = None
                 for bsel in SEND_BUTTONS:
                     try:
                         b = fr.locator(bsel).first
-                        if await b.count() and await b.is_visible():
-                            await b.click(timeout=2500)
-                            notes.append(f"clicked send button {bsel}")
+                        if await b.count() and await b.is_visible() and await b.is_enabled():
+                            send_button = b
                             recipe["send"] = bsel
                             break
                     except Exception:
                         continue
                 recipe["input_fr"] = fr           # kept in-process for reply derivation; stripped below
+                sent = True                      # attempted, even if dispatch raises
+                verification_active = True
+                if send_button is not None:
+                    await send_button.click(timeout=2500)
+                    notes.append(f"clicked send button {recipe['send']}")
+                else:
+                    await loc.press("Enter")
+                await page.wait_for_timeout(2500)
                 notes.append(f"typed prompt via {sel} (score={score:.1f}, frame="
                              f"{'main' if fr is page else (getattr(fr,'url','') or '')[:60]})")
-                sent = True
                 break
             except Exception:
+                if sent:
+                    notes.append("submission outcome uncertain; no second action or input attempted")
+                    break
                 continue
         if not sent:
             notes.append("no chat input found — capture may only contain page bootstrap")
@@ -523,24 +617,12 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
 
     _augment_pairs_from_har(pairs, _har_path, notes)
 
-    # HARD VERIFICATION: typing into a box proves nothing — the prompt must appear in
-    # real traffic. Two silent failure modes this catches: (a) we typed into a site
-    # search box instead of the chat widget, (b) the widget never actually submitted.
-    def _in_traffic(needle: str) -> bool:
-        if not needle:
-            return False
-        for pr in pairs:
-            if needle in (pr["request"].get("raw_body") or ""):
-                return True
-        for w in ws_messages:
-            if any(needle in str(f) for f in (w.get("sent") or [])):
-                return True
-        return False
-
-    verified = _in_traffic(prompt.strip())
+    # Only exact outbound values observed during this submission window count.
+    # Retained bootstrap pairs and HAR augmentation are evidence, not send proof.
+    verified = sent and prompt_observed
     if sent and not verified:
-        notes.append("TYPED BUT NOT OBSERVED IN TRAFFIC — the input we typed into was "
-                     "probably not the chat widget (e.g. a site search box)")
+        notes.append("SUBMISSION NOT VERIFIED - no exact prompt observed in outbound traffic; "
+                     "no automatic retry attempted")
     if not sent:
         notes.append("NO PROMPT SENT — capture contains only page bootstrap")
 

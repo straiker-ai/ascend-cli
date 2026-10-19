@@ -232,8 +232,10 @@ def test_run_no_wait_skips_poll(monkeypatch):
 
 def test_run_no_assessment_id_raises(monkeypatch):
     client = AscendAPI(token="s6r_pat_x")
+    monkeypatch.setattr(client, "live_assessment", lambda app: None)
     monkeypatch.setattr(client, "create_assessment", lambda a, n: {"no": "id"})
-    with pytest.raises(AscendAPIError):
+    monkeypatch.setattr(client._s, "request", lambda *a, **k: pytest.fail("unexpected HTTP request"))
+    with pytest.raises(AscendAPIError, match="assessment create returned no id"):
         client.run("aapp_1", "r", wait=False)
 
 

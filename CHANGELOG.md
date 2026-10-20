@@ -99,6 +99,16 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ### Fixed
 
+- **Adapter test/verify JSON retains authenticated public-to-engine route correlation.**
+  Successful runs now include CLI-owned `app_id` and `console_id` fields when the
+  authenticated public record and unambiguous Console lookup agree with the returned
+  engine UUID. Engine payloads are unchanged. Direct UUIDs, `--console-id`, failed or
+  conflicting lookups remain explicitly unresolved. Console matching no longer ignores
+  a conflicting URL on a sole name match or folds URL path/query case; trailing path
+  slashes are distinct, while explicit scheme-default ports match omitted ports.
+  This is operational route correlation, not immutable backend
+  identity equivalence or remote source attestation.
+
 - Browser capture chooses one submission action instead of pressing Enter and
   then clicking Send. An uncertain dispatch is not automatically repeated.
   Outbound prompt verification decodes JSON and form values and checks complete

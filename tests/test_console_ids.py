@@ -67,7 +67,45 @@ class TestMatching:
         assert console.match_application(ROWS, "Support") is None
 
     def test_a_duplicate_name_is_settled_by_url(self):
-        assert console.match_application(ROWS, "Support Bot", "https://other.example.com/chat/")["irisId"] == UUID_B
+        assert console.match_application(ROWS, "Support Bot", "https://other.example.com/chat")["irisId"] == UUID_B
+
+    def test_trailing_path_slash_is_not_assumed_equivalent(self):
+        assert console.match_application(ROWS, "Support Bot", "https://other.example.com/chat/") is None
+
+    @pytest.mark.parametrize("url", [
+        "https://elsewhere.example/chat", "https://bot.example/Chat?key=Value",
+        "https://bot.example/chat?key=value", "https://bot.example/chat?Key=Value",
+        "https://bot.example/chat/?key=Value", "https://bot.example/chat?key=Value#fragment",
+        "https://user:pass@bot.example/chat?key=Value", "not a URL",
+        "https://bot.example:bad/chat?key=Value", "", "https://bot.exa\nmple/chat?key=Value",
+    ])
+    def test_sole_name_cannot_override_url_conflict_or_invalid_url(self, url):
+        rows = [{"name": "Bot", "irisId": UUID_A, "url": "https://bot.example/chat?key=Value"}]
+        assert console.match_application(rows, "Bot", url) is None
+
+    def test_scheme_and_host_case_are_not_path_or_query_case(self):
+        row = {"name": "Bot", "irisId": UUID_A, "url": "https://bot.example/Chat?Key=Value"}
+        assert console.match_application([row], "bot", "HTTPS://BOT.EXAMPLE/Chat?Key=Value") == row
+
+    @pytest.mark.parametrize("scheme,port", [("https", 443), ("http", 80)])
+    @pytest.mark.parametrize("explicit_in_row", [False, True])
+    def test_default_port_is_equivalent_to_omitted_port(self, scheme, port, explicit_in_row):
+        implicit = f"{scheme}://bot.example/Chat?Key=Value"
+        explicit = f"{scheme}://bot.example:{port}/Chat?Key=Value"
+        row = {"name": "Bot", "irisId": UUID_A, "url": explicit if explicit_in_row else implicit}
+        assert console.match_application([row], "Bot", implicit if explicit_in_row else explicit) == row
+
+    @pytest.mark.parametrize("scheme,port", [("https", 80), ("https", 8443), ("http", 443), ("http", 8080)])
+    def test_nondefault_port_is_not_equivalent_to_omitted_port(self, scheme, port):
+        row = {"name": "Bot", "irisId": UUID_A, "url": f"{scheme}://bot.example/Chat?Key=Value"}
+        assert console.match_application([row], "Bot", f"{scheme}://bot.example:{port}/Chat?Key=Value") is None
+
+    def test_missing_row_url_cannot_satisfy_supplied_url(self):
+        assert console.match_application([{"name": "Bot", "irisId": UUID_A}], "Bot", "https://bot.example/") is None
+
+    def test_two_matching_rows_stay_ambiguous(self):
+        row = {"name": "Bot", "irisId": UUID_A, "url": "https://bot.example/"}
+        assert console.match_application([row, dict(row, irisId=UUID_B)], "Bot", row["url"]) is None
 
     def test_a_duplicate_name_without_a_url_stays_ambiguous(self):
         assert console.match_application(ROWS, "Support Bot") is None

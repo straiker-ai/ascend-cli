@@ -151,7 +151,9 @@ def _norm_url(u: Any):
             return None
         # Host and scheme are insensitive; path/query bytes are not. Do not
         # equate /chat and /chat/, reorder queries, or decode escaped characters.
-        return (parts.scheme.lower(), parts.hostname.lower(), parts.port,
+        scheme = parts.scheme.lower()
+        port = parts.port if parts.port is not None else {"http": 80, "https": 443}[scheme]
+        return (scheme, parts.hostname.lower(), port,
                 parts.path or "/", parts.query)
     except ValueError:
         return None

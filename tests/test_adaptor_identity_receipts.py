@@ -31,7 +31,8 @@ def argv(verb, source, ref=APP["id"], override=False):
 
 @pytest.mark.parametrize("verb", ["test", "verify"])
 @pytest.mark.parametrize("ref", [APP["id"], APP["name"]])
-@pytest.mark.parametrize("listing_case", ["matched", "url_conflict", "path_case", "ambiguous", "denied"])
+@pytest.mark.parametrize("listing_case", [
+    "matched", "default_port", "nondefault_port", "url_conflict", "path_case", "ambiguous", "denied"])
 def test_authenticated_lookup_and_engine_response_emit_operational_identity(
         monkeypatch, capsys, js, verb, ref, listing_case):
     """Use real API auth, get_app, Console decoding/matcher, and CLI command code."""
@@ -44,7 +45,11 @@ def test_authenticated_lookup_and_engine_response_emit_operational_identity(
         rows[0]["url"] = APP["url"].replace("/v1", "/V1")
     elif listing_case == "ambiguous":
         rows.append(dict(rows[0], irisId=OTHER_UUID))
-    route = UUID if listing_case == "matched" else APP["id"]
+    elif listing_case in ("default_port", "nondefault_port"):
+        port = 443 if listing_case == "default_port" else 8443
+        rows[0]["url"] = APP["url"].replace("/v1", f":{port}/v1")
+    resolved = listing_case in ("matched", "default_port")
+    route = UUID if resolved else APP["id"]
     observed = []
     def handler(method, url, kwargs):
         observed.append((method, url, kwargs))
@@ -71,7 +76,7 @@ def test_authenticated_lookup_and_engine_response_emit_operational_identity(
     run(monkeypatch, client, *argv(verb, js, ref), json_mode=True)
     envelope = json.loads(capsys.readouterr().out)
     assert envelope["ok"] and envelope["verdict"]["ok"]
-    if listing_case == "matched":
+    if resolved:
         assert envelope["app_id"] == APP["id"] and envelope["console_id"] == UUID
         assert envelope["identity_scope"] == "operational_route"
         assert "identity_unresolved" not in envelope

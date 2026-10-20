@@ -87,6 +87,19 @@ class TestMatching:
         row = {"name": "Bot", "irisId": UUID_A, "url": "https://bot.example/Chat?Key=Value"}
         assert console.match_application([row], "bot", "HTTPS://BOT.EXAMPLE/Chat?Key=Value") == row
 
+    @pytest.mark.parametrize("scheme,port", [("https", 443), ("http", 80)])
+    @pytest.mark.parametrize("explicit_in_row", [False, True])
+    def test_default_port_is_equivalent_to_omitted_port(self, scheme, port, explicit_in_row):
+        implicit = f"{scheme}://bot.example/Chat?Key=Value"
+        explicit = f"{scheme}://bot.example:{port}/Chat?Key=Value"
+        row = {"name": "Bot", "irisId": UUID_A, "url": explicit if explicit_in_row else implicit}
+        assert console.match_application([row], "Bot", implicit if explicit_in_row else explicit) == row
+
+    @pytest.mark.parametrize("scheme,port", [("https", 80), ("https", 8443), ("http", 443), ("http", 8080)])
+    def test_nondefault_port_is_not_equivalent_to_omitted_port(self, scheme, port):
+        row = {"name": "Bot", "irisId": UUID_A, "url": f"{scheme}://bot.example/Chat?Key=Value"}
+        assert console.match_application([row], "Bot", f"{scheme}://bot.example:{port}/Chat?Key=Value") is None
+
     def test_missing_row_url_cannot_satisfy_supplied_url(self):
         assert console.match_application([{"name": "Bot", "irisId": UUID_A}], "Bot", "https://bot.example/") is None
 

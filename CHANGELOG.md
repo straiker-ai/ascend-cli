@@ -105,7 +105,8 @@ them is visible at a glance. A growing Regressions section is a process signal, 
   engine UUID. Engine payloads are unchanged. Direct UUIDs, `--console-id`, failed or
   conflicting lookups remain explicitly unresolved. Console matching no longer ignores
   a conflicting URL on a sole name match or folds URL path/query case; trailing path
-  slashes are distinct. This is operational route correlation, not immutable backend
+  slashes are distinct, while explicit scheme-default ports match omitted ports.
+  This is operational route correlation, not immutable backend
   identity equivalence or remote source attestation.
 
 - Browser capture chooses one submission action instead of pressing Enter and

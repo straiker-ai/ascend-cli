@@ -138,21 +138,34 @@ def _norm(s: Any) -> str:
     return " ".join(str(s or "").split()).lower()
 
 
-def _norm_url(u: Any) -> str:
-    return str(u or "").strip().rstrip("/").lower()
+def _norm_url(u: Any):
+    from urllib.parse import urlsplit
+    if not isinstance(u, str) or not u.strip():
+        return None
+    if any(character.isspace() or ord(character) < 32 for character in u.strip()):
+        return None
+    try:
+        parts = urlsplit(u.strip())
+        if (parts.scheme.lower() not in ("http", "https") or not parts.hostname
+                or parts.username is not None or parts.password is not None or parts.fragment):
+            return None
+        # Host and scheme are insensitive; path/query bytes are not. Do not
+        # equate /chat and /chat/, reorder queries, or decode escaped characters.
+        return (parts.scheme.lower(), parts.hostname.lower(), parts.port,
+                parts.path or "/", parts.query)
+    except ValueError:
+        return None
 
 
 def match_application(rows: List[Dict[str, Any]], name: str, url: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """The row for `name`: an exact (case- and whitespace-insensitive) match; among several, the
-    one whose url is the target's. None when there is no match or it stays ambiguous."""
+    """Match name and, when supplied, URL; never override a URL conflict by name."""
     exact = [r for r in rows if _norm(r.get("name")) == _norm(name)]
-    if len(exact) == 1:
-        return exact[0]
-    if len(exact) > 1 and url:
-        by_url = [r for r in exact if _norm_url(r.get("url")) == _norm_url(url)]
-        if len(by_url) == 1:
-            return by_url[0]
-    return None
+    if url is not None:
+        target = _norm_url(url)
+        if target is None:
+            return None
+        exact = [r for r in exact if _norm_url(r.get("url")) == target]
+    return exact[0] if len(exact) == 1 else None
 
 
 def console_app_uuid(jwt: str, name: str, *, url: Optional[str] = None, base: Optional[str] = None,

@@ -9124,6 +9124,8 @@ def _adaptor_engine_ref_and_app(c, ref, console_id=None):
         app = c.get_app(app_id) or {}
     except Exception:
         app = {}
+    if not isinstance(app, dict) or app.get("id") != app_id:
+        app = {}
     app_name = app.get("name") or ("" if str(ref).startswith("aapp_") else ref)
     uuid = c.console_app_uuid(app_name, url=app.get("url")) if app_name else None
     if uuid:
@@ -9337,13 +9339,38 @@ def _run_envelope(ok, out, verdict, code):
     return env
 
 
+def _adaptor_run_envelope(ok, out, verdict, code, route, app):
+    """CLI-owned operational route correlation, not immutable backend ID equivalence."""
+    env = _run_envelope(ok, out, verdict, code)
+    AD = _adaptor_mod()
+    public = (app or {}).get("id")
+    if (not ok or not isinstance(public, str) or not public.startswith("aapp_")
+            or not (app or {}).get("name") or not (app or {}).get("url")
+            or not AD.is_engine_uuid(route)):
+        env["identity_unresolved"] = "authenticated_public_route_unconfirmed"
+        return env
+    # Only documented identity fields, never values inside target transcripts.
+    identifiers = [("app_id", out.get("app_id"))]
+    if "console_id" in out:
+        identifiers.append(("console_id", out["console_id"]))
+    if "app" in out:
+        identifiers.append(("app", out["app"].get("id") if isinstance(out["app"], dict) else None))
+    if ("identity_unresolved" in out or out.get("app_id") != route
+            or any(value not in ((route,) if key == "console_id" else (route, public))
+                   for key, value in identifiers)):
+        env["identity_unresolved"] = "returned_engine_identity_unconfirmed"
+        return env
+    env.update(app_id=public, console_id=route, identity_scope="operational_route")
+    return env
+
+
 def cmd_adaptor_test(args):
     """Run the file against the app's real target, one turn per prompt, and show what it DID."""
     AD = _adaptor_mod()
     c = _client(args)
     src = _adaptor_source(args.file)
     budget = _adaptor_budget(args)
-    app_id = _adaptor_engine_ref(c, args.app, getattr(args, "console_id", None))
+    app_id, app = _adaptor_engine_ref_and_app(c, args.app, getattr(args, "console_id", None))
     prompts = list(args.prompt or [AD.DEFAULT_PROMPT])
     _say(args, f"Running {args.file} against the target of {app_id}: {len(prompts)} prompt(s), "
                f"{budget:g}s budget. Each turn is a real conversation with a real system.")
@@ -9364,7 +9391,8 @@ def cmd_adaptor_test(args):
     if verdict["ok"]:
         lines.append(f"  the scored line is a real answer on every turn. Store it:  "
                      f"ascend adaptor store {args.file} --app <name|aapp_id>")
-    _out(_run_envelope(verdict["ok"], out, verdict, "test_failed"), args, human="\n".join(lines))
+    _out(_adaptor_run_envelope(verdict["ok"], out, verdict, "test_failed", app_id, app),
+         args, human="\n".join(lines))
     if not verdict["ok"]:
         raise SystemExit(EXIT_ERROR)
 
@@ -9375,7 +9403,7 @@ def cmd_adaptor_verify(args):
     AD = _adaptor_mod()
     c = _client(args)
     budget = _adaptor_budget(args)
-    app_id = _adaptor_engine_ref(c, args.app, getattr(args, "console_id", None))
+    app_id, app = _adaptor_engine_ref_and_app(c, args.app, getattr(args, "console_id", None))
     _say(args, f"Running the adaptor stored on {app_id} against its target ({budget:g}s budget)...")
     import api
     try:
@@ -9392,7 +9420,8 @@ def cmd_adaptor_verify(args):
     if ok:
         lines += ["", "Start a NEW assessment from the Console — not Rerun. An assessment snapshots",
                   "the app when it is created, and Rerun replays the previous snapshot's adaptor."]
-    _out(_run_envelope(ok, out, verdict, "verify_failed"), args, human="\n".join(lines))
+    _out(_adaptor_run_envelope(ok, out, verdict, "verify_failed", app_id, app),
+         args, human="\n".join(lines))
     if not ok:
         raise SystemExit(EXIT_ERROR)
 

@@ -41,20 +41,28 @@ The scanner already accepts a live MCP URL. The runtime check is three MCP `call
 
 1. submit `import os` → expect rejection `Import of 'os' is not permitted`  *(sandbox advertised)*
 2. submit write-mode `open()` → expect rejection `Mode 'w' is not permitted`  *(sandbox advertised)*
-3. submit the **presence-only** primitive below → `has_open && has_import` ⇒ **escapable**
+3. submit the primitive below → the recovered `open`/`__import__` are the **real** builtins ⇒ **escapable**
 
 Verdict = **vulnerable** iff a sandbox is advertised (1 and 2 rejected) AND step 3 recovers the
-builtins. This exact logic is implemented and tested in `detect_sandbox_escape.py` (Path B) and can
-be lifted as the catalog's live-URL probe. Transport is MCP **streamable-HTTP** (not stdio).
+*real* builtins. Decide "real" by **type** (`builtin_function_or_method` vs. a guard `function`),
+never by invoking them — this is what avoids a false positive on a patched sandbox that still exposes
+guarded `open`/`__import__` wrappers. This exact logic is implemented and tested in
+`detect_sandbox_escape.py` (Path B) and can be lifted as the catalog's live-URL probe. Transport is
+MCP **streamable-HTTP** (not stdio).
 
-Benign primitive (recovers the builtins, invokes none of them):
+Benign primitive (recovers the builtins by type, invokes none of them):
 ```python
 import json
 def run():
-    b = json.__dict__["__builtins__"]
+    try:
+        b = json.__dict__["__builtins__"]
+    except Exception:
+        return {"open_is_real": False, "import_is_real": False}
     if not isinstance(b, dict):
-        b = b.__dict__
-    return {"has_open": callable(b.get("open")), "has_import": callable(b.get("__import__"))}
+        b = getattr(b, "__dict__", {})
+    real = lambda fn: type(fn).__name__ == "builtin_function_or_method"
+    o, i = b.get("open"), b.get("__import__")
+    return {"open_is_real": callable(o) and real(o), "import_is_real": callable(i) and real(i)}
 ```
 
 ## Fixtures / oracle (in this directory tree)
@@ -64,12 +72,14 @@ def run():
 | `../mock_ue_mcp_server.py` | **Positive oracle** — faithfully reproduces the broken sandbox; a correct signature must flag it. Loopback only. |
 | `../probes/t0a_negative_import_os.py`, `t0b_negative_open_tmp.py` | The "sandbox advertised" controls (expected rejections). |
 | `../probes/t1_write_outside.py`, `t2_os_date.py`, `t3*.py` | Impact payloads (file write / exec / egress) — for an impact-confirming mode; **not** needed for benign detection. |
-| the primitive above | The benign escape signal. |
+| the primitive above | The benign escape signal (type-based, no side effects). |
+| `mock_ue_mcp_server_patched.py` | **Negative oracle** — same server, hole closed (modules scrubbed so `json.__builtins__` yields guarded wrappers). A correct signature must NOT flag it. |
 | `detect_sandbox_escape.py --json` | Reference live-URL implementation + output shape. |
+| `test_detect.py` | Asserts true positive, **no false positive** (patched oracle), and no side effects. |
 
-**Negative oracle to add:** a patched mock that binds *copies* of the modules with scrubbed
-`__builtins__` (or runs the script in a real subinterpreter) — the signature must NOT flag it, and
-must NOT flag an MCP server with no script-execution tool.
+**Still worth adding:** a negative case for an MCP server with **no** script-execution tool at all
+(the signature must stay silent). The patched oracle above already covers the advertised-but-fixed
+false-positive case.
 
 ## Suggested finding shape
 `{ reference: "HackerOne #3907191", tool: "...ProgrammaticToolset.execute_tool_script",

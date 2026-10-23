@@ -17,8 +17,11 @@ Run it where those exist.
 
 ## Path B — active runtime detector (built, tested)
 `detect_sandbox_escape.py` — reuses `../unreal_mcp_adapter.py` to probe a live endpoint and returns a
-scan-style finding. **Benign by construction:** it recovers `json.__builtins__` and checks that
-`open`/`__import__` came back, but invokes none of them — no file write, no process, no network.
+scan-style finding. **Benign by construction:** it recovers `json.__builtins__` and checks whether
+`open`/`__import__` are the **real** (unrestricted) builtins — decided by *type*
+(`builtin_function_or_method` vs. a sandbox-guard `function`), never by invoking them. No file write,
+no process, no network. The type check is what stops a false positive on a patched-but-advertised
+sandbox that still exposes guarded wrappers.
 
 ```bash
 # against the local mock
@@ -31,8 +34,16 @@ python3 demo/unreal-mcp/detect/detect_sandbox_escape.py --endpoint https://host:
 ```
 
 Verdict = **vulnerable** iff a sandbox is advertised (`import os` and write-`open()` both rejected)
-**and** the benign primitive recovers the builtins. Advertised-but-not-escapable ⇒ not vulnerable;
-no sandbox advertised ⇒ inconclusive (not this target).
+**and** the benign primitive recovers the *real* builtins. Advertised-but-not-escapable ⇒ not
+vulnerable; no sandbox advertised ⇒ inconclusive (not this target).
+
+### Fixtures and tests
+- `mock_ue_mcp_server_patched.py` — **negative oracle**: the same server with the hole closed
+  (modules scrubbed so `json.__builtins__` yields guarded wrappers). A correct detector/signature
+  reports `not_vulnerable` here.
+- `test_detect.py` — asserts true positive (vulnerable mock → `vulnerable`), **no false positive**
+  (patched mock → `not_vulnerable`), and no side effects. Run: `python3 demo/unreal-mcp/detect/test_detect.py`
+  (or `pytest`).
 
 ### How this slots into `ascend-agent` (not done — needs a product/policy decision)
 `ascend-agent` already has a bounded MCP client (`local_mcp_list` / `local_mcp_call`,

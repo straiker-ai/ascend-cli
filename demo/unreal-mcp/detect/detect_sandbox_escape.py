@@ -40,19 +40,35 @@ sys.path.insert(0, str(DEMO))  # reuse the demo adapter (preflight + send_prompt
 
 REFERENCE = "HackerOne #3907191 — UE 5.8 ProgrammaticToolset Python sandbox escape"
 
-# The one probe this detector submits: recover the real builtins, call NONE of them.
+# The one probe this detector submits: recover the builtins and report whether they are the REAL
+# (unrestricted) ones — by TYPE, never by invoking them, so there is no side effect. A genuine
+# builtin is a `builtin_function_or_method`; a sandbox guard is a plain Python `function`. That
+# type check is what distinguishes "escapable" from "sandbox advertised but actually patched" —
+# a presence-only check (is `open` callable?) would false-positive on a fixed sandbox that still
+# exposes guarded wrappers.
 BENIGN_PRIMITIVE = '''\
 import json
 
 
 def run():
-    real_builtins = json.__dict__["__builtins__"]
-    if not isinstance(real_builtins, dict):
-        real_builtins = real_builtins.__dict__
-    # Presence only — we never invoke open()/__import__(), so there is no side effect.
+    try:
+        b = json.__dict__["__builtins__"]
+    except Exception:
+        return {"has_open": False, "has_import": False,
+                "open_is_real": False, "import_is_real": False}
+    if not isinstance(b, dict):
+        b = getattr(b, "__dict__", {})
+    open_fn, import_fn = b.get("open"), b.get("__import__")
+
+    def _real(fn):
+        # Unrestricted builtin, not a sandbox wrapper — decided by type, not by calling it.
+        return type(fn).__name__ == "builtin_function_or_method"
+
     return {
-        "has_open": callable(real_builtins.get("open")),
-        "has_import": callable(real_builtins.get("__import__")),
+        "has_open": callable(open_fn),
+        "has_import": callable(import_fn),
+        "open_is_real": callable(open_fn) and _real(open_fn),
+        "import_is_real": callable(import_fn) and _real(import_fn),
     }
 '''
 
@@ -81,7 +97,8 @@ def detect(adapter) -> dict:
         prim = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
         prim = {}
-    escapable = bool(prim.get("has_open")) and bool(prim.get("has_import"))
+    # Escapable = the recovered builtins are the REAL ones (unrestricted), not guarded wrappers.
+    escapable = bool(prim.get("open_is_real")) and bool(prim.get("import_is_real"))
 
     if sandbox_advertised and escapable:
         verdict, severity = "vulnerable", "critical"
@@ -99,7 +116,8 @@ def detect(adapter) -> dict:
             "sandbox_advertised": sandbox_advertised,
             "import_os_blocked": import_blocked,
             "open_write_blocked": openw_blocked,
-            "builtins_recovered": escapable,
+            "builtins_present": bool(prim.get("has_open")) and bool(prim.get("has_import")),
+            "builtins_unrestricted": escapable,
         },
         "benign": True,
         "side_effects": "none (presence check only; open/__import__ never invoked)",
@@ -145,8 +163,8 @@ def main(argv=None) -> int:
                 "inconclusive": "inconclusive"}[v]
         print(f"\n{REFERENCE}")
         print(f"endpoint: {endpoint}  ({finding['target']})")
-        print(f"  sandbox advertised : {finding['signals']['sandbox_advertised']}")
-        print(f"  builtins recovered : {finding['signals']['builtins_recovered']}  (benign, no side effects)")
+        print(f"  sandbox advertised    : {finding['signals']['sandbox_advertised']}")
+        print(f"  builtins unrestricted : {finding['signals']['builtins_unrestricted']}  (benign, no side effects)")
         print(f"  => {mark}  [severity: {finding['severity']}]\n")
     # exit 1 marks a positive detection (useful in CI / scan pipelines)
     return 1 if finding["verdict"] == "vulnerable" else 0

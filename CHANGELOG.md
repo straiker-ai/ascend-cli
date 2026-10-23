@@ -11,8 +11,25 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ## [Unreleased]
 
+### Fixed
+
+- **Published-profile preparation capture and slot consistency.** Every sanitized
+  capture is rebuilt from original response JSON with the final credential map,
+  so credentials learned by later reads cannot remain raw in earlier captures.
+  Raw response hashes remain unchanged. Each declared credential slot must occur
+  at its exact request location, including when multiple slots share a reference.
+
 ### Added
 
+- **Read-only published-profile preparation.** `target prepare` exports a complete
+  symbolic HTTP contract and bounded private sanitized source captures for an
+  explicitly expected supported profile. Recognized supported inspection results
+  advertise versioned preparation capability. Unavailable or changed sources never
+  select generic discovery; unsafe credentials and unsupported protocols hold.
+  An exclusive caller-owned private output bundle can hand observed identity
+  inputs to native credential admission without printing values or reasking them.
+  No application, login/chat, adapter test or store is performed. See
+  `docs/PROFILE_PREPARE.md` for reference slots, hash bases and consumer boundaries.
 - **Optional browser response completion and error signals.** Browser configs can set
   `response.completion_selector` to require a fresh visible reply and a new or reset
   visible completion marker, and `response.error_selector` to reject visible errors.

@@ -18,7 +18,8 @@ ascend target prepare https://target.example --expected-profile doppelganger \
 Credential arguments are references, never values. The caller supplies only the
 required variables in the child process environment. All supplied references
 must resolve, belong to the exact origin and profile-supported slot, and be used
-in the resulting contract. Multiple references for the same value or duplicate
+at that exact location in the resulting contract. One reference may serve multiple
+slots only when every declared slot is present. Multiple references for the same value or duplicate
 slots hold rather than guess. GET authentication uses only exact declared header
 slots; body slots are never sent to the preparation endpoints.
 
@@ -114,7 +115,11 @@ JSON parsing/replacement, not socket-level wire bytes. The sanitized digest meas
 allow_nan=False).encode("ascii")`. Neither attests remote authorship, freshness,
 semantic correctness, application state or engine execution. Source-derived
 credentials and occurrences of scoped credential values are replaced in sanitized
-captures; duplicate
+captures. Before publication, all captures are rebuilt from original response JSON
+using the final input map, including credentials learned by later reads; sanitized
+hashes are recomputed and raw entity hashes stay unchanged. If final replacement
+cannot safely represent a capture, preparation holds without publishing a contract
+or stale captures. Duplicate
 JSON keys, injected reference/template markers, unsafe credentials and oversized
 sources hold. There is no general inference that arbitrary unlabelled text is
 secret-free. Raw bytes and observed values exist only in the private artifact;

@@ -11,6 +11,14 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ## [Unreleased]
 
+### Fixed
+
+- **Published-profile preparation capture and slot consistency.** Every sanitized
+  capture is rebuilt from original response JSON with the final credential map,
+  so credentials learned by later reads cannot remain raw in earlier captures.
+  Raw response hashes remain unchanged. Each declared credential slot must occur
+  at its exact request location, including when multiple slots share a reference.
+
 ### Added
 
 - **Read-only published-profile preparation.** `target prepare` exports a complete

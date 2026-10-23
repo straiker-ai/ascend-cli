@@ -217,11 +217,13 @@ class Inputs:
                 text = _json_bytes(value).decode("ascii")
                 if "env:" not in text and "input:" not in text:
                     continue
-                expected = self.by_slot.get((kind, field.lower() if kind == "header" else field))
+                canonical = field.lower() if kind == "header" else field
+                expected = self.by_slot.get((kind, canonical))
                 if expected is None or value != expected:
                     raise Hold("refused", "undeclared_credential_placement")
-                used.add(expected)
-        if any(row["reference"] not in used for row in [*self.slots, *self.observed_inputs]):
+                used.add((kind, canonical, expected))
+        if any((kind, field, reference) not in used
+               for (kind, field), reference in self.by_slot.items()):
             raise Hold("refused", "unused_credential_slot")
 
     def sanitize(self, value, extra_secret_fields=(), sensitive=False, trusted_markers=False):
@@ -263,6 +265,17 @@ class Reader:
 
     def close(self):
         self.session.close()
+
+    def sanitized_observations(self):
+        # Reparse original bytes; later inputs must also replace earlier occurrences.
+        observations = []
+        for observation, raw in zip(self.observations, self.raw_captures):
+            data = json.loads(raw.decode("utf-8"), object_pairs_hook=_object,
+                              parse_constant=_invalid_constant)
+            sanitized = self.inputs.sanitize(data, self.profile.prepare_secret_fields)
+            observations.append({**observation, "sanitized_data": sanitized,
+                "sanitized_capture_sha256": hashlib.sha256(_json_bytes(sanitized)).hexdigest()})
+        return observations
 
     def get(self, url, headers=None, verify=True):
         if _origin(url) != self.origin or verify is not True:
@@ -388,8 +401,16 @@ def _prepare(source, *, expected_profile, workspace=None, credential_slots=None,
         out.update(ok=False, outcome="refused", error={"code": "profile_contract_invalid"})
     finally:
         if reader is not None:
-            out["read_observations"] = reader.observations
-            reader.close()
+            try:
+                out["read_observations"] = reader.sanitized_observations()
+            except Hold as hold:
+                for key in ("contract", "credential_slots", "facts", "required_slot"):
+                    out.pop(key, None)
+                out.update(ok=False, outcome=hold.outcome, error={"code": hold.code}, read_observations=[])
+                if hold.requirement is not None:
+                    out["required_slot"] = hold.requirement
+            finally:
+                reader.close()
     if artifact is not None:
         summary = {key: out[key] for key in ("version", "producer_revision", "source_kind", "ok",
                    "outcome", "profile", "profile_version", "origin", "selected_workspace", "error",

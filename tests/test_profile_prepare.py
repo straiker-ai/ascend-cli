@@ -365,6 +365,59 @@ def test_private_native_observed_input_needs_no_preexisting_workspace_credential
     assert SHARE not in json.dumps(observation["sanitized_data"])
 
 
+def test_later_observed_input_resanitizes_every_original_capture(transport, tmp_path):
+    transport.config["public_note"] = "Earlier " + ACCESS + " and " + SHARE
+    path = tmp_path / "native-plan.json"
+    out = run(transport, credential_slots=SLOTS[:2], private_output=str(path))
+    assert out["ok"] and SHARE not in json.dumps(out)
+    bundle = json.loads(path.read_bytes())
+    assert bundle["observed_inputs"][0]["value"] == SHARE
+    assert bundle["read_observations"][0]["sanitized_data"]["public_note"] == (
+        "Earlier env:ACCESS and input:profile_workspace")
+    for observation, response in zip(bundle["read_observations"], transport.responses):
+        assert observation["raw_response_bytes_sha256"] == hashlib.sha256(response.content).hexdigest()
+        assert base64.b64decode(observation["raw_response_bytes_base64"], validate=True) == response.content
+        sanitized = observation["sanitized_data"]
+        assert all(value not in json.dumps(sanitized) for value in ENV.values())
+        assert observation["sanitized_capture_sha256"] == hashlib.sha256(
+            prepare._json_bytes(sanitized)).hexdigest()
+
+
+def test_later_observed_input_in_earlier_property_name_refuses_publication(transport, tmp_path):
+    observed = "opaque-observed-value-003"
+    transport.config[observed] = "earlier property"
+    transport.workspace["share_id"] = observed
+    path = tmp_path / "native-plan.json"
+    out = run(transport, credential_slots=SLOTS[:2], private_output=str(path))
+    assert not out["ok"] and out["error"]["code"] == "credential_in_property_name"
+    assert observed not in json.dumps(out) and "private_output" not in out and not path.exists()
+
+
+@pytest.mark.parametrize("missing", ["absent", None, "", False, 0])
+def test_missing_exact_slot_cannot_hide_behind_a_shared_reference(transport, missing):
+    if missing == "absent":
+        transport.workspace.pop("share_id")
+    else:
+        transport.workspace["share_id"] = missing
+    slots = deepcopy(SLOTS)
+    slots[2]["reference"] = "env:ACCESS"
+    out = run(transport, credential_slots=slots)
+    assert not out["ok"] and out["error"]["code"] == "unused_credential_slot"
+    assert "contract" not in out
+
+
+@pytest.mark.parametrize("header", ["x-demo-key", "X-Demo-Key"])
+def test_shared_reference_remains_valid_in_every_exact_declared_slot(transport, header):
+    transport.workspace["share_id"] = ACCESS
+    slots = deepcopy(SLOTS)
+    slots[0]["field"] = header
+    slots[2]["reference"] = "env:ACCESS"
+    out = run(transport, credential_slots=slots)
+    assert out["ok"]
+    step, = out["contract"]["steps"]
+    assert step["headers"]["x-demo-key"] == step["body"]["workspace"] == "env:ACCESS"
+
+
 def test_observed_facts_keep_native_profile_mechanics_and_exact_source_locations(transport):
     transport.workspace.update(description="Synthetic purpose", tool_specs=[{"name": "lookup"}])
     out = run(transport)

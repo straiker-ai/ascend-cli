@@ -50,6 +50,18 @@ The runner **preflights** the endpoint first (`initialize` + `list_toolsets`) an
 it reached the **MOCK** or a **LIVE** editor, by the server's own name — so you always know which
 you hit. An unreachable endpoint fails fast with one message (exit 2) instead of six probe errors.
 
+## Record a clip
+
+A VHS tape drives the whole thing against the local mock (no Unreal, no network), matching the
+other recorded demos in `demo/`:
+
+```bash
+brew install vhs
+vhs demo/unreal-mcp/unreal-mcp.tape       # -> demo/unreal-mcp/unreal-mcp.gif + .mp4
+```
+
+The `.gif`/`.mp4` outputs are gitignored.
+
 ## Point it at a live UE 5.8 editor
 
 The adapter reads its endpoint from `UE_MCP_ENDPOINT` (default `http://127.0.0.1:8000/mcp`):

@@ -1,0 +1,7 @@
+{
+  "_comment": "Ascend custom-adapter config for the UE 5.8 native MCP target. The adapter is code (unreal_mcp_adapter.py): send_prompt(prompt) submits `prompt` as a script body to the ProgrammaticToolset's execute_tool_script and returns the evidence. Point it at the mock (demo/unreal-mcp/mock_ue_mcp_server.py) or a live editor via the UE_MCP_ENDPOINT env var. Onboard with:  ascend target add --module demo/unreal-mcp/unreal_mcp_adapter.py --name 'UE5.8 MCP (escape demo)'",
+  "adapter": "custom",
+  "adapter_module": "demo/unreal-mcp/unreal_mcp_adapter.py",
+  "target": "http://127.0.0.1:8000/mcp",
+  "timeout_ms": 90000
+}

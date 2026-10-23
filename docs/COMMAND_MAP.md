@@ -2,7 +2,7 @@
 
 *Generated from the CLI's argparse tree by `scripts/gen_command_map.py`. A test fails if this file is stale, so every flag here is a flag that exists.*
 
-25 command groups · 85 commands. Sections follow `ascend --help`.
+25 command groups · 86 commands. Sections follow `ascend --help`.
 
 ## Flags every command accepts
 
@@ -1333,6 +1333,23 @@ look at a target first: what it is, what it needs, what is already registered
 
 every target: its adapter, whether it is registered, whether it is serving
 
+
+### `ascend target prepare`
+
+read a recognized profile into a symbolic contract without onboarding
+
+- **`source`** (optional) — the exact target URL from inspect
+
+
+| Flag | Value | Default | What it does |
+|---|---|---|---|
+| `--expected-profile` | `EXPECTED_PROFILE` | — | recognized profile identity; never auto-detected |
+| `--expected-origin` | `EXPECTED_ORIGIN` | — | exact origin from inspect; changes are refused |
+| `--workspace` | `WORKSPACE` | — | exact selected workspace identity |
+| `--credential-slots` | `JSON` | `[]` | origin/in/field/reference bindings; env:NAME references only, never values |
+| `--private-output` | `PATH` | — | exclusive 0600 private bundle in a caller-owned 0700 directory; stdout is metadata only |
+| `--timeout` | `TIMEOUT` | `20.0` | total bounded GET allowance, at most 20 seconds |
+| `--capabilities` | — | — | report prepare support without any target reads |
 
 ### `ascend target rm`
 

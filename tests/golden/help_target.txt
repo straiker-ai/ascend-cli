@@ -3,13 +3,14 @@ $ ascend target --help
 --- stdout
 usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] target
        [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE]
-       {add,inspect,list,show,check,rm,types,cloud} ...
+       {add,inspect,prepare,list,show,check,rm,types,cloud} ...
 
 positional arguments:
-  {add,inspect,list,show,check,rm,types,cloud}
+  {add,inspect,prepare,list,show,check,rm,types,cloud}
     add                 onboard a target from a URL, a cURL/HAR file, or a saved config
     inspect             look at a target first: what it is, what it needs, what is already
                         registered
+    prepare             read a recognized profile into a symbolic contract without onboarding
     list                every target: its adapter, whether it is registered, whether it is serving
     show                everything bound to one target, in one place
     check               re-prove a target against its live endpoint (the hard gate)

@@ -777,6 +777,9 @@ def cmd_target_inspect(args):
     if prof:
         out = prof.inspect(P.origin_of(url), auth_headers or {}, verify=verify)
         out["published_contract"] = True
+        from runtime.discovery.profile_prepare import capability
+        if capability(prof) is not None:
+            out["prepare_capability"] = capability(prof)
     else:
         out = {"profile": None, "published_contract": False, "origin": P.origin_of(url),
                "note": ((f"{ROUTED_NOTE} — the platform calls this target itself. Onboard it "
@@ -5773,6 +5776,30 @@ def _detect_source(thing):
                   f"or run `ascend adapter configs` to see saved configs")
 
 
+def cmd_target_prepare(args):
+    """Export a read-only expected-profile plan, not application or engine proof."""
+    from runtime.discovery import profile_prepare as preparation
+    if args.capabilities:
+        _out(preparation.capabilities(), args)
+        return
+    try:
+        slots = json.loads(args.credential_slots)
+    except (ValueError, TypeError):
+        slots = None
+    if not args.source or not args.expected_profile or slots is None:
+        result = {"version": 1, "producer_revision": preparation.PRODUCER_REVISION,
+                  "source_kind": "published_profile", "ok": False, "outcome": "refused",
+                  "error": {"code": "invalid_prepare_arguments"}, "read_observations": [],
+                  "remote_attested": False}
+    else:
+        result = preparation.prepare(args.source, expected_profile=args.expected_profile,
+            workspace=args.workspace, expected_origin=args.expected_origin,
+            credential_slots=slots, timeout=args.timeout, private_output=args.private_output)
+    _out(result, args)
+    if not result["ok"]:
+        raise SystemExit(EXIT_ERROR)
+
+
 def cmd_target_add(args):
     """Onboard a target from whatever evidence exists, and stop once it is registered."""
     src = getattr(args, "source", None)
@@ -10639,6 +10666,20 @@ def build_parser():
     s.add_argument("--bearer", metavar="TOKEN")
     s.add_argument("--insecure", action="store_true")
     s.set_defaults(func=cmd_target_inspect)
+
+    s = tg.add_parser("prepare", parents=[GLOBALS], formatter_class=_Fmt,
+                      help="read a recognized profile into a symbolic contract without onboarding")
+    s.add_argument("source", nargs="?", help="the exact target URL from inspect")
+    s.add_argument("--expected-profile", help="recognized profile identity; never auto-detected")
+    s.add_argument("--expected-origin", help="exact origin from inspect; changes are refused")
+    s.add_argument("--workspace", help="exact selected workspace identity")
+    s.add_argument("--credential-slots", default="[]", metavar="JSON",
+                   help="origin/in/field/reference bindings; env:NAME references only, never values")
+    s.add_argument("--private-output", metavar="PATH",
+                   help="exclusive 0600 private bundle in a caller-owned 0700 directory; stdout is metadata only")
+    s.add_argument("--timeout", type=float, default=20.0, help="total bounded GET allowance, at most 20 seconds")
+    s.add_argument("--capabilities", action="store_true", help="report prepare support without any target reads")
+    s.set_defaults(func=cmd_target_prepare)
 
     s = tg.add_parser("list", parents=[GLOBALS], formatter_class=_Fmt,
                       help="every target: its adapter, whether it is registered, whether it is serving")

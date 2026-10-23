@@ -60,6 +60,12 @@ class Doppelganger:
 
     name = "doppelganger"
     label = "Doppelganger"
+    prepare_version = 1
+    prepare_shape = ("/api/config", "app_name", "Doppelganger")
+    prepare_secret_fields = frozenset({"share_id"})
+    prepare_source_slots = {"/api/workspaces/{workspace}": {"share_id": ("body", "workspace")}}
+    prepare_slots = frozenset({("header", "x-demo-key"), ("body", "apiKey"),
+                               ("body", "workspace")})
 
     @staticmethod
     def detect(origin: str, verify: bool = True) -> bool:
@@ -96,9 +102,36 @@ class Doppelganger:
         }
 
     @classmethod
+    def prepare_config(cls, origin, workspace, inputs, fetch):
+        from .profile_prepare import Hold
+        headers = {"x-demo-key": inputs.required("header", "x-demo-key")}
+        fields = {"apiKey": inputs.required("body", "apiKey")}
+        _, selected = fetch(f"{origin}/api/workspaces/{workspace}", headers=headers)
+        if not isinstance(selected, dict) or selected.get("slug") != workspace:
+            raise Hold("conflicting_source", "selected_workspace_changed")
+        for name in ("name", "description", "system_prompt"):
+            if name in selected and selected[name] is not None and not isinstance(selected[name], str):
+                raise Hold("conflicting_source", "profile_fact_invalid")
+        if "tool_specs" in selected and (not isinstance(selected["tool_specs"], list)
+                or len(selected["tool_specs"]) > 64
+                or any(not isinstance(tool, dict) or not isinstance(tool.get("name"), str)
+                       or not tool["name"] for tool in selected["tool_specs"])):
+            raise Hold("conflicting_source", "profile_fact_invalid")
+        config, facts = cls.build(origin, workspace=workspace, headers=headers,
+                                  body_fields=fields, fetch=fetch)
+        locations = {"system_prompt": "system_prompt", "purpose": "description",
+                     "tools": "tool_specs", "agentic": "tool_specs", "name": "name"}
+        observed = {key: facts[key] for key, source in locations.items()
+                    if source in selected and selected[source] is not None}
+        sources = {key: {"url": f"{origin}/api/workspaces/{workspace}",
+                         "pointer": "/" + locations[key], "transform": "native_profile"}
+                   for key in observed}
+        return config, observed, sources
+
+    @classmethod
     def build(cls, origin: str, *, workspace: str, headers: Dict[str, str],
               body_fields: Dict[str, Any], bearer: Optional[str] = None,
-              verify: bool = True) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+              verify: bool = True, fetch=None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """(config, facts). Raises ValueError naming exactly what is missing."""
         hdrs = {k: v for k, v in (headers or {}).items()}
         low = {k.lower(): v for k, v in hdrs.items()}
@@ -117,7 +150,7 @@ class Doppelganger:
             raise ValueError(f"this host serves several agents — choose one with --workspace "
                              f"({slugs or 'list them with `ascend target inspect`'})")
 
-        status, ws = _get(f"{origin}/api/workspaces/{workspace}", headers=hdrs, verify=verify)
+        status, ws = (fetch or _get)(f"{origin}/api/workspaces/{workspace}", headers=hdrs, verify=verify)
         if status != 200 or not isinstance(ws, dict):
             raise ValueError(f"workspace {workspace!r} was not found on {origin} (HTTP {status})")
 

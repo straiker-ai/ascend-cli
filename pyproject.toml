@@ -17,7 +17,7 @@ dependencies = [
 [project.optional-dependencies]
 # Needed for browser capture and the optional browser adapter. Other adapters
 # do not require it. Provision the compatible browser binary separately.
-capture = ["playwright>=1.40"]
+capture = ["playwright>=1.64.0"]
 # Only needed for the `bedrock` adapter (SigV4 signing + eventstream decoding come free).
 aws = ["boto3>=1.34"]
 # Only needed for GCP service-account auth in `vertex_ai` (google-auth on a host w/o ADC).

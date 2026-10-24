@@ -31,13 +31,19 @@ def argv(verb, source, ref=APP["id"], override=False):
 
 @pytest.mark.parametrize("verb", ["test", "verify"])
 @pytest.mark.parametrize("ref", [APP["id"], APP["name"]])
+@pytest.mark.parametrize("backend_ids", ["present", "absent"])
 @pytest.mark.parametrize("listing_case", [
     "matched", "default_port", "nondefault_port", "url_conflict", "path_case", "ambiguous", "denied"])
 def test_authenticated_lookup_and_engine_response_emit_operational_identity(
-        monkeypatch, capsys, js, verb, ref, listing_case):
+        monkeypatch, capsys, js, verb, ref, backend_ids, listing_case):
     """Use real API auth, get_app, Console decoding/matcher, and CLI command code."""
     payload = {"app_id": UUID, "ok": True, "turns": [deepcopy(TURN_OK)],
                "digest": "opaque-engine-digest", "endpoint": APP["url"]}
+    if backend_ids == "absent":
+        payload.pop("app_id")
+        payload.update(allow_hosts=["chat.example.com"], artifact="synthetic-artifact",
+                       gate={"ok": True}, origin="synthetic-engine", preflight=None,
+                       summary="synthetic successful adapter turn")
     rows = [{"irisId": UUID, "name": APP["name"], "url": APP["url"]}]
     if listing_case == "url_conflict":
         rows[0]["url"] = "https://another.example/v1"
@@ -93,7 +99,7 @@ def test_authenticated_lookup_and_engine_response_emit_operational_identity(
 @pytest.mark.parametrize("verb", ["test", "verify"])
 @pytest.mark.parametrize("case", [
     "direct_uuid", "console_override", "missing_lookup", "wrong_public_record", "failed_lookup",
-    "missing_url", "console_failure", "returned_uuid_conflict", "returned_uuid_absent",
+    "missing_url", "console_failure", "returned_uuid_conflict",
     "returned_console_conflict", "returned_public_conflict", "returned_unresolved", "failed_execution",
 ])
 def test_unconfirmed_resolution_never_mints_public_identity(monkeypatch, capsys, js, verb, case):
@@ -118,8 +124,6 @@ def test_unconfirmed_resolution_never_mints_public_identity(monkeypatch, capsys,
         rec.console_uuid = None
     elif case == "returned_uuid_conflict":
         payload["app_id"] = OTHER_UUID
-    elif case == "returned_uuid_absent":
-        payload.pop("app_id")
     elif case == "returned_console_conflict":
         payload["console_id"] = OTHER_UUID
     elif case == "returned_public_conflict":
@@ -143,3 +147,37 @@ def test_unconfirmed_resolution_never_mints_public_identity(monkeypatch, capsys,
     assert len(rec.tested if verb == "test" else rec.verified) == 1
     if case in ("direct_uuid", "console_override"):
         assert not rec.console_asked and rec.listed == 0
+
+
+@pytest.mark.parametrize("verb", ["test", "verify"])
+@pytest.mark.parametrize("identity", [
+    {"app_id": None}, {"app_id": ""}, {"app_id": False}, {"app_id": {}},
+    {"app_id": APP["id"]}, {"app_id": OTHER_UUID},
+    {"console_id": None}, {"console_id": "invalid"}, {"console_id": OTHER_UUID},
+    {"app": None}, {"app": {}}, {"app": {"id": None}}, {"app": {"id": "aapp_foreign"}},
+    {"identity_unresolved": None}, {"identity_unresolved": False},
+    {"identity_unresolved": {"reason": "unbound"}},
+])
+def test_present_identity_cannot_be_treated_as_absent(monkeypatch, capsys, js, verb, identity):
+    payload = {"ok": True, "turns": [deepcopy(TURN_OK)], **deepcopy(identity)}
+    rec = Recorder(console_uuid=UUID, test=payload, verify=payload)
+    run(monkeypatch, rec, *argv(verb, js), json_mode=True)
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["ok"] and envelope["verdict"]["ok"]
+    assert envelope["identity_unresolved"] == "returned_engine_identity_unconfirmed"
+    assert "app_id" not in envelope and "console_id" not in envelope
+    assert "identity_scope" not in envelope and envelope["data"] == payload
+    assert rec.console_asked == [(APP["name"], APP["url"])]
+    assert (rec.tested[0][1] if verb == "test" else rec.verified[0][0]) == UUID
+
+
+@pytest.mark.parametrize("verb", ["test", "verify"])
+@pytest.mark.parametrize("identity", [{"console_id": UUID}, {"app": {"id": APP["id"]}}])
+def test_present_matching_partial_identity_preserves_original_payload(monkeypatch, capsys, js, verb, identity):
+    payload = {"ok": True, "turns": [deepcopy(TURN_OK)], **deepcopy(identity)}
+    rec = Recorder(console_uuid=UUID, test=payload, verify=payload)
+    run(monkeypatch, rec, *argv(verb, js), json_mode=True)
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["app_id"] == APP["id"] and envelope["console_id"] == UUID
+    assert envelope["identity_scope"] == "operational_route"
+    assert "identity_unresolved" not in envelope and envelope["data"] == payload

@@ -9377,16 +9377,18 @@ def _adaptor_run_envelope(ok, out, verdict, code, route, app):
         env["identity_unresolved"] = "authenticated_public_route_unconfirmed"
         return env
     # Only documented identity fields, never values inside target transcripts.
-    identifiers = [("app_id", out.get("app_id"))]
+    identifiers = [("app_id", out["app_id"])] if "app_id" in out else []
     if "console_id" in out:
         identifiers.append(("console_id", out["console_id"]))
     if "app" in out:
         identifiers.append(("app", out["app"].get("id") if isinstance(out["app"], dict) else None))
-    if ("identity_unresolved" in out or out.get("app_id") != route
+    if ("identity_unresolved" in out or ("app_id" in out and out["app_id"] != route)
             or any(value not in ((route,) if key == "console_id" else (route, public))
                    for key, value in identifiers)):
         env["identity_unresolved"] = "returned_engine_identity_unconfirmed"
         return env
+    # Correlate this authenticated selection and requested route, not immutable
+    # backend identity. The backend may omit IDs; present evidence must agree.
     env.update(app_id=public, console_id=route, identity_scope="operational_route")
     return env
 

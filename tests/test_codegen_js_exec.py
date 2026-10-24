@@ -282,3 +282,39 @@ class TestSessionPoll:
         ]})
         assert out["reply"]["status_code"] == 502
         assert sum(1 for c in out["calls"] if c["fn"] == "sleep") == 30, "bounded by poll.timeout_ms"
+
+
+class TestLoginScaffold:
+    """The login scaffold a dynamic-auth target gets, EXECUTED. Unconfigured it still reaches the
+    target so the operator can read the 401 that is the login's spec; configured, it mints the
+    credential ONCE (host.state.getOrMint) and carries it as a bearer on the per-turn request."""
+
+    CFG = {"adapter": "direct_api", "endpoint": "https://bot.example.com/api/chat", "method": "POST",
+           "body": {"message": "{{PROMPT}}"}, "response_path": "reply",
+           "auth": {"type": "oauth2", "grant": "client_credentials",
+                    "token_url": "https://idp.example.com/oauth/token"}}
+
+    def test_it_is_the_login_shape(self):
+        assert G.plan(self.CFG)["shape"] == "login" and G.plan(self.CFG)["finished"] is False
+
+    def test_unconfigured_it_reaches_the_target_and_reports_the_login(self):
+        out = run(self.CFG, {"http": [{"url_contains": "/api/chat", "method": "POST",
+                                       "status": 401, "body": {"error": "login required"}}]})
+        body = out["reply"]["body"]
+        assert out["reply"]["status_code"] == 200
+        assert body["reached"] is True and body["logged_in"] is False and body["target_status"] == 401
+        assert len(http_calls(out)) == 1, "it must not invent a login URL it was not given"
+
+    def test_configured_it_mints_once_and_carries_the_bearer(self):
+        out = run(self.CFG, {"http": [
+            {"url_contains": "/oauth/token", "method": "POST", "status": 200,
+             "body": {"access_token": "MINTED"}},
+            {"url_contains": "/api/chat", "method": "POST", "status": 200, "body": {"reply": "hi"}}]},
+            params={"_adaptor_login_url": "https://idp.example.com/oauth/token"})
+        assert out["reply"]["body"]["logged_in"] is True
+        calls = http_calls(out)
+        token = [c for c in calls if "/oauth/token" in c["url"]]
+        chat = [c for c in calls if "/api/chat" in c["url"]]
+        assert len(token) == 1 and token[0]["method"] == "POST"
+        assert chat[0]["headers"]["Authorization"] == "Bearer MINTED"
+        assert out["state"]["login_token"] == "MINTED"

@@ -42,6 +42,11 @@ RESPONSE_TOKEN = "{{RESPONSE}}"
 # The shapes a generator exists for. Anything else gets the scaffold.
 SHAPES = ("direct_api", "sse_stream", "websocket_direct", "session_api", "session_poll")
 SCAFFOLD = "scaffold"
+# A target that logs in with a handshake the engine performs itself (oauth2 / csrf /
+# derived_multihop) gets the LOGIN-capable scaffold, never a thin passthrough: the generated
+# adaptor mints or echoes the credential before each turn. It supersedes the per-adapter
+# generator, because a direct_api body with no login would 401 on every probe.
+LOGIN = "login"
 # Placeholders a derived URL may carry; the application's URL stops before the first one and the
 # adaptor renders the rest on that origin per turn.
 _PLACEHOLDER = re.compile(r"\{\{[A-Za-z_][A-Za-z0-9_]*\}\}")
@@ -57,6 +62,25 @@ def shape_of(cfg: Dict[str, Any]) -> str:
     if kind == "api":
         kind = "direct_api"
     return kind if kind in SHAPES else SCAFFOLD
+
+
+def is_login_shape(cfg: Dict[str, Any]) -> bool:
+    """Whether this contract authenticates with a handshake the engine must PERFORM itself, so it
+    needs a login-capable adaptor rather than a thin passthrough carrying static headers.
+
+    The predicate is AuthProvider.needs_network (runtime/layers/auth.py) -- the single source of
+    truth for which auth kinds reach the network: oauth2, csrf and derived_multihop. A static
+    credential (even two of them, as a list) is False; an absent or unreadable auth block is False,
+    so an undetected login degrades to the ordinary passthrough rather than crashing codegen.
+    """
+    try:
+        try:
+            from layers.auth import AuthProvider          # flat runtime/ on path (CLI, tests)
+        except ImportError:                                # pragma: no cover - the package form
+            from runtime.layers.auth import AuthProvider
+        return bool(AuthProvider.from_config(cfg).needs_network)
+    except Exception:                                      # noqa: BLE001 - never fail generation
+        return False
 
 # Python 3.9 forbids a backslash inside an f-string expression, so the fallback is named here.
 NO_EXTRA_HEADERS = "(none beyond the application's)"
@@ -1244,6 +1268,37 @@ def _gen_scaffold(cfg: Dict[str, Any]) -> str:
     return f"{first}\n{note}\n{rest}"
 
 
+def _gen_login_scaffold(cfg: Dict[str, Any]) -> str:
+    """The login-capable scaffold (templates/adaptor_login_scaffold.js: a pure-JS PKCE helper and
+    the mint/echo structure), with the captured handshake described so a person -- or the agent's
+    `ascend_adaptor_draft` -- can finish the login. The HANDSHAKE and the field NAMES only, never a
+    secret value: the credentials live on the application record, not in the source."""
+    src = _adaptor_rules().template_js(LOGIN)
+    auth = cfg.get("auth")
+    blocks = auth if isinstance(auth, list) else [auth]
+    kinds = [str(b.get("type")) for b in blocks if isinstance(b, dict) and b.get("type")]
+    dyn = next((b for b in blocks if isinstance(b, dict)
+                and str(b.get("type")) in ("oauth2", "csrf", "derived_multihop")), {}) or {}
+    kind = str(dyn.get("type") or (kinds[0] if kinds else "unknown"))
+    detail = {
+        "oauth2": f"grant {dyn.get('grant') or 'client_credentials'}, token at the host of "
+                  f"{_host(str(dyn.get('token_url') or '')) or '(set token_url)'}",
+        "csrf": f"bootstrap at the host of {_host(str(dyn.get('bootstrap_url') or '')) or '(set bootstrap_url)'}, "
+                f"token echoed in {dyn.get('into_header') or 'a header/body var'}",
+        "derived_multihop": f"{len(dyn.get('steps') or [])} step(s)",
+    }.get(kind, "a handshake no generator covers")
+    note = "\n".join([
+        f"// UNFINISHED: this target logs in with a {kind!r} handshake ({detail}); the engine runs the",
+        "// login itself, so this is a LOGIN scaffold, not a thin passthrough. What the capture showed:",
+        f"//   method   {str(cfg.get('method') or 'POST').upper()}   (the per-turn request, once logged in)",
+        f"//   headers  {', '.join(sorted((cfg.get('headers') or {}).keys())) or NO_EXTRA_HEADERS}",
+        "//   finish   mintCredential() from the login's real fields, then: "
+        "ascend adaptor test <this file> --app '<app>'   then   ascend adaptor store",
+    ])
+    first, rest = src.split("\n", 1) if "\n" in src else (src, "")
+    return f"{first}\n{note}\n{rest}"
+
+
 _GENERATORS = {
     "direct_api": _gen_direct_api,
     "sse_stream": _gen_sse_stream,
@@ -1256,6 +1311,11 @@ _GENERATORS = {
 def generate_adaptor(config: Dict[str, Any]) -> str:
     """The adaptor source for a derived config: one file, one exported `sendTurn`."""
     cfg = dict(config or {})
+    if is_login_shape(cfg):
+        # A handshake the engine performs itself (oauth2/csrf/multihop): the login scaffold, whose
+        # structure a passthrough generator has no place for. Checked before shape_of so a
+        # direct_api body that would 401 without the login never ships as a thin app.
+        return _gen_login_scaffold(cfg)
     shape = shape_of(cfg)
     rt = response_template(cfg)
     statement = reply_statement(rt)
@@ -1274,8 +1334,9 @@ def plan(config: Dict[str, Any]) -> Dict[str, Any]:
     the shape, the address, both templates, the extra domains, the parameters and the source."""
     cfg = dict(config or {})
     rt = response_template(cfg)
+    login = is_login_shape(cfg)
     return {
-        "shape": shape_of(cfg),
+        "shape": LOGIN if login else shape_of(cfg),
         "url": app_url(cfg),
         "raw_url": raw_url(cfg),
         "request_template": request_template(cfg),
@@ -1284,10 +1345,12 @@ def plan(config: Dict[str, Any]) -> Dict[str, Any]:
         "domains": extra_domains(cfg),
         "params": adaptor_params(cfg),
         "source": generate_adaptor(cfg),
-        "finished": shape_of(cfg) != SCAFFOLD,
+        # A login scaffold is unfinished by definition: the operator still writes the login body.
+        "finished": (not login) and shape_of(cfg) != SCAFFOLD,
     }
 
 
-__all__ = ["SHAPES", "SCAFFOLD", "PROMPT_TOKEN", "shape_of", "raw_url", "app_url", "path_template",
-           "body_template", "prompt_path", "request_template", "response_template", "reply_body_js",
-           "extra_domains", "adaptor_params", "generate_adaptor", "plan"]
+__all__ = ["SHAPES", "SCAFFOLD", "LOGIN", "PROMPT_TOKEN", "shape_of", "is_login_shape", "raw_url",
+           "app_url", "path_template", "body_template", "prompt_path", "request_template",
+           "response_template", "reply_body_js", "extra_domains", "adaptor_params",
+           "generate_adaptor", "plan"]

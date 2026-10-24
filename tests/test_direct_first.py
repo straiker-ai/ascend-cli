@@ -140,10 +140,40 @@ class TestDefaultIsAHostedAdaptor:
         assert via == "bridge" and adapter in why and "deprecated" in why
 
     @pytest.mark.parametrize("kind", ["oauth2", "csrf", "derived_multihop"])
-    def test_a_login_handshake_no_generator_runs_falls_to_the_bridge_with_the_way_out(self, kind):
+    def test_a_machine_login_on_a_public_target_is_a_hosted_login_adaptor(self, kind):
+        """FLIPPED from the old bridge-default. oauth2 (machine grant), csrf and derived_multihop
+        are all machine-completable: the engine runs a login-capable adaptor that mints or echoes
+        the credential every turn, so a public target that logs in no longer falls to the
+        deprecated bridge. The bridge pinned here before was the bug _choose_transport now fixes."""
         via, why = ascend._choose_transport(self._args(), "direct_api",
                                             {"endpoint": "https://8.8.8.8/c", "auth": {"type": kind}})
-        assert via == "bridge" and kind in why and "adaptor scaffold" in why
+        assert via == "adaptor"
+        assert kind in why and "nothing runs on this machine" in why
+
+    @pytest.mark.parametrize("grant", ["authorization_code", "device_code", "implicit"])
+    def test_an_interactive_oauth2_grant_stays_on_the_bridge(self, grant):
+        """A login a PERSON has to complete -- a browser redirect or a device code -- is the one
+        handshake a generated adaptor cannot finish in the engine. Keyed on the oauth2 grant, the
+        only human signal in the auth model; every machine grant goes to the adaptor above."""
+        via, why = ascend._choose_transport(
+            self._args(), "direct_api",
+            {"endpoint": "https://8.8.8.8/c", "auth": {"type": "oauth2", "grant": grant}})
+        assert via == "bridge"
+        assert "needs a person" in why and "deprecated" in why
+
+    @pytest.mark.parametrize("kind", ["oauth2", "csrf", "derived_multihop"])
+    def test_a_machine_login_targets_adaptor_source_is_a_login_scaffold(self, kind):
+        """The transport decision and the generated source agree: a dynamic-auth public target
+        resolves to an adaptor AND `target add` emits a login-capable scaffold (a PKCE helper and
+        the mint structure), not a thin passthrough that would 401 on every probe."""
+        cfg = {"adapter": "direct_api", "endpoint": "https://8.8.8.8/c",
+               "body": {"message": "{{PROMPT}}"}, "response_path": "reply",
+               "auth": {"type": kind}}
+        assert ascend._choose_transport(self._args(), "direct_api", cfg)[0] == "adaptor"
+        from runtime.discovery import codegen_js as cj
+        plan = cj.plan(cfg)
+        assert plan["shape"] == "login" and plan["finished"] is False
+        assert "pkceChallenge" in plan["source"] and "mintCredential" in plan["source"]
 
     def test_a_private_address_is_refused_before_any_app_exists(self, monkeypatch):
         """The engine cannot reach it, so a hosted adaptor would only ever fail its test; say so

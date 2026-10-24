@@ -111,7 +111,7 @@ def warmup_text(config: Optional[Dict[str, Any]]) -> str:
     Read from any key a writer has used, because they diverged and a mismatch silently drops the
     warm-up: the `--warmup` flag and the create-then-send derivation write `warmup`, the preset
     adapters (SCRT2, Slack, Amazon Connect, session_api) read `warmup_message`, and session_api
-    also accepted `session_greeting`. Measured on a Salesforce Agentforce (SCRT2) wire: `--warmup`
+    also accepted `session_greeting`. The failure this prevents: `--warmup`
     wrote `warmup`, the adapter read `warmup_message`, so the consent banner was never cleared and
     every probe scored it. Reading all three here means a warm-up a writer set is honoured whatever
     the adapter's own key. `warmup_message` wins when both are present — it is the adapter-native

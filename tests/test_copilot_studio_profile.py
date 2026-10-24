@@ -76,8 +76,8 @@ class TestAddressDerivation:
 
     # From the adapter bundle's worked example: this exact environment produced this exact
     # host, observed via the SDK. Thirty hex digits, then the last two as their own label.
-    ENV = "46052061-10f3-e860-bac5-ecd0075af000"
-    HOST = "4605206110f3e860bac5ecd0075af0.00.environment.api.powerplatform.com"
+    ENV = "12345678-9abc-def0-1234-56789abcde00"
+    HOST = "123456789abcdef0123456789abcde.00.environment.api.powerplatform.com"
 
     def test_the_host_is_a_pure_function_of_the_environment_id(self):
         assert CS.environment_host(self.ENV) == self.HOST
@@ -91,7 +91,7 @@ class TestAddressDerivation:
 
     def test_a_sovereign_cloud_splits_only_one_and_lands_on_its_own_suffix(self):
         host = CS.environment_host(self.ENV, "HIGH")
-        assert host.split(".")[0] == "4605206110f3e860bac5ecd0075af00"
+        assert host.split(".")[0] == "123456789abcdef0123456789abcde0"
         assert host.split(".")[1] == "0"
         assert host.endswith(".environment.api.high.powerplatform.microsoft.us")
 

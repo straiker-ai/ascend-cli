@@ -1975,18 +1975,35 @@ def _assess_run_many(args, c, refs, scope_ids=None):
             # is lost, and flags the result `recovered` — one implementation for both paths, so
             # the single-app and fleet forms cannot disagree about whether a run exists.
             r = c.run(appid, args.name, wait=False)
-            return {"app": ref, "app_id": appid, "assessment_id": r.get("assessment_id"),
-                    "status": r.get("status"), "recovered": bool(r.get("recovered")),
-                    "note": r.get("recovery_note"), "bridge": ensure}
+            row = {"app": ref, "app_id": appid, "assessment_id": r.get("assessment_id"),
+                   "status": r.get("status"), "recovered": bool(r.get("recovered")),
+                   "note": r.get("recovery_note"), "bridge": ensure}
+            for key in ("started", "auto_paused", "unconfirmed", "error", "stalled",
+                        "reused_assessment", "recovery_note", "recovery_needs_action",
+                        "resumes", "scope_warning", "diagnosis"):
+                if key in r:
+                    row[key] = r[key]
+            if r.get("started") is False or r.get("stalled"):
+                try:
+                    row["diagnosis"] = _diagnose_not_started(c, appid, r)
+                except Exception:
+                    # Diagnosis cannot erase an assessment that already exists.
+                    row["diagnosis"] = ("Start diagnosis unavailable; retain this assessment ID "
+                                        "and inspect its current state before continuing.")
+            return row
         except Exception as e:
             return {"app": ref, "app_id": appid, "error": f"{type(e).__name__}: {e}"}
 
     with ThreadPoolExecutor(max_workers=min(8, len(resolved))) as pool:
         out = list(pool.map(go, resolved))
-    started = [r for r in out if r.get("assessment_id")]
-    unbridged = [r for r in started
+    received = [r for r in out if r.get("assessment_id")]
+    started = [r for r in received if r.get("started") is True]
+    # As in the single-app API path, a wait may follow an unread start, but must
+    # not poll or restart a run the platform explicitly reported did not start.
+    following = [r for r in received if r.get("started") is not False]
+    unbridged = [r for r in received
                  if (r.get("bridge") or {}).get("skip") or (r.get("bridge") or {}).get("error")]
-    waiting = bool(started) and not getattr(args, "no_wait", False)
+    waiting = bool(following) and not getattr(args, "no_wait", False)
     if args.json and not waiting:
         _out(out, args)
     elif not args.json:
@@ -1996,21 +2013,28 @@ def _assess_run_many(args, c, refs, scope_ids=None):
                 b = r.get("bridge") or {}
                 bstate = ("bridge up" if b.get("ensured") else
                           "NO BRIDGE" if (b.get("skip") or b.get("error")) else "native")
-                print(f"  started  {r['app']:28} {r['assessment_id']}  [{bstate}]{tag}")
+                state = ("started" if r.get("started") is True else
+                         "NOT STARTED" if r.get("started") is False else "UNCONFIRMED")
+                print(f"  {state:11}  {r['app']:28} {r['assessment_id']}  [{bstate}]{tag}")
+                if r.get("diagnosis"):
+                    print(f"      {r['diagnosis']}")
+                elif r.get("unconfirmed"):
+                    print("      assessment exists; its start could not be confirmed. Inspect this run; do not create a duplicate.")
             else:
                 print(f"  FAILED   {r['app']:28} {r.get('error')}")
-        print(f"\n  {len(started)}/{len(out)} assessment(s) started "
+        print(f"\n  {len(started)}/{len(out)} assessment(s) confirmed started "
               f"(bridges auto-started for bridge-type apps)")
-        if started and not waiting:
+        if received and not waiting:
             print("  watch them:  ascend assess watch --all")
         if unbridged:
             print("  ! these have NO bridge and will score a FALSE PASS until one serves them:")
             for r in unbridged:
                 b = r.get("bridge") or {}
                 print(f"      {r['app']}: {b.get('skip') or b.get('error')}")
-    failed_start = len(started) < len(out) or bool(unbridged)
+    failed_start = (len(received) < len(out) or bool(unbridged)
+                    or any(r.get("started") is False for r in received))
     if not waiting:
-        if failed_start:
+        if failed_start or len(started) < len(out):
             sys.exit(EXIT_ERROR)
         return
     # Wait, exactly as the single-app form does. Fire-and-forget read as success to a pipeline
@@ -2018,10 +2042,10 @@ def _assess_run_many(args, c, refs, scope_ids=None):
     # false-pass shape, multiplied by the fleet. Each run keeps its own bridge watchdog and pause
     # guard; one summary table at the end; one JSON document under --json.
     import api
-    finals = _wait_for_fleet(args, c, started)
+    finals = _wait_for_fleet(args, c, following)
     rows = []
-    for r in started:
-        a = finals.get(r["app_id"]) or {}
+    for r in received:
+        a = finals.get(r["app_id"]) or (r if r.get("started") is False else {})
         failed, total = api.probe_counts(a) if a else (None, None)
         rows.append({"app": r["app"], "app_id": r["app_id"], "assessment_id": r["assessment_id"],
                      "status": str(a.get("status") or "unfinished").lower(), "severity": a.get("severity"),

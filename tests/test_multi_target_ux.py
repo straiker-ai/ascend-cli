@@ -110,7 +110,7 @@ class _FleetClient:
         return [{"id": "aapp_a", "name": "A", "api_type": "api"}, {"id": "aapp_b", "name": "B", "api_type": "api"}]
 
     def run(self, appid, name, wait=False, **kw):
-        return {"assessment_id": f"asmt_{appid}", "status": "running"}
+        return {"assessment_id": f"asmt_{appid}", "status": "running", "started": True}
 
     def get_assessment(self, appid, aid):
         n = self.polls[appid] = self.polls.get(appid, 0) + 1

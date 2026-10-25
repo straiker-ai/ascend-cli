@@ -13,6 +13,14 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ### Fixed
 
+- **Application-create recovery preserves request outcomes.** Authentication
+  failures before the application POST, HTTP rejections, and interrupted rejection
+  bodies no longer become recovered name matches. Interrupted HTTP 200/201 responses
+  are closed once before a read-only candidate lookup; a failed close preserves the
+  original transport error and skips lookup. Recovered records remain unconfirmed
+  candidates, not fresh-creation or verification evidence. The existing bounded
+  authentication refresh is retained; no create replay is added.
+
 - **Declared hosted stream completion is enforced.** Generated SSE/NDJSON adapters
   fail rather than score partial text when a configured terminal condition is
   missing. Generic sentinels cannot replace a different declared terminal, and

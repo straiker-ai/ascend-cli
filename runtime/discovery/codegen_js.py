@@ -495,7 +495,10 @@ function framesOf(raw) {
     for (i = 0; i < lines.length; i++) {
       line = lines[i].trim();
       if (!line) continue;
-      out.push({ event: "", json: parseJson(line), raw: line });
+      var frame = { event: "", json: null, raw: line };
+      try { frame.json = JSON.parse(line); }
+      catch (e) { if (!isDone(frame)) return null; }
+      out.push(frame);
     }
     return out;
   }
@@ -527,8 +530,7 @@ function framesOf(raw) {
 function isDone(f) {
   var dw = STREAM.done_when;
   if (STREAM.done_events && STREAM.done_events.length && contains(STREAM.done_events, f.event)) return true;
-  if (f.raw === "[DONE]" || f.raw === "DONE") return true;
-  if (!dw) return false;
+  if (!dw) return !(STREAM.done_events && STREAM.done_events.length) && (f.raw === "[DONE]" || f.raw === "DONE");
   if (dw.event) return f.event === dw.event;
   if (dw.contains) return f.raw.indexOf(dw.contains) >= 0;
   if (dw.path && f.json !== null) {
@@ -541,6 +543,7 @@ function isDone(f) {
 /** Reassemble the answer from the token frames; `done` is false when no terminal frame arrived. */
 function reassemble(raw) {
   var fs = framesOf(raw);
+  if (fs === null) return { text: "", done: false, frames: 0, invalid: true };
   var text = "";
   var last = "";
   var done = false;
@@ -633,6 +636,10 @@ function sendTurn(turn, host) {
     return failure(targetStatus(res.status), "target returned " + res.status, res.body);
   }
   var got = reassemble(res.body);
+  if (got.invalid) return failure(502, "invalid NDJSON frame", "");
+  if (!got.done && (STREAM.done_when || STREAM.done_events.length)) {
+    return failure(502, "stream ended without declared terminal frame", "");
+  }
   if (!got.text) {
     return failure(502, "no text frames in the stream", "frames=" + got.frames + " " + preview(res.body));
   }

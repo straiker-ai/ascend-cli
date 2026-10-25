@@ -239,6 +239,15 @@ genuinely not JSON.
 
 ### Rules the gate enforces (not style advice)
 
+The gate validates sandbox capabilities, not arbitrary JavaScript response-parser
+semantics. A successful test/verify proves the executed adapter returned usable
+scored text, not that its upstream protocol completed. A custom parser must enforce
+its declared completion rule and reject malformed frames instead of returning raw
+or partial text as a successful answer. Generated hosted SSE/NDJSON adapters require
+configured `done_when`/`done_events` before success; streams without a declared
+terminal may finish at EOF. JSON and unframed-text contracts do not require a
+stream terminal.
+
 - **No `async`, `await`, `Promise`.** Host calls are synchronous and return values. `await` on a
   non-promise resolves immediately and `Promise.race` as a timeout times nothing out, so the gate
   refuses them rather than let you write code that looks right.

@@ -114,8 +114,9 @@ def test_app_create_command_preserves_complete_http_receipt(monkeypatch, capsys,
     assert not any(c['method'] == 'GET' and c['url'].endswith('/ascend/applications') for c in calls.calls)
 
 
-@pytest.mark.parametrize('status', [200, 201])
-def test_real_requests_body_interruption_keeps_create_unconfirmed(status):
+@pytest.mark.parametrize('status', [200, 201, 401, 403])
+@pytest.mark.parametrize('pat', [False, True])
+def test_real_requests_body_interruption_keeps_create_unconfirmed(status, pat):
     calls = []
     class InterruptedBody:
         def stream(self, *args, **kwargs):
@@ -136,10 +137,67 @@ def test_real_requests_body_interruption_keeps_create_unconfirmed(status):
             return response
         def close(self):
             pass
-    c = client()
+    c = api.AscendAPI(token='s6r_pat_synthetic', cache=False) if pat else client()
+    if pat:
+        c._jwt, c._jwt_exp = 'synthetic-cached-access', float('inf')
     c._s.mount('https://', SyntheticAdapter())
-    result = c.create_app(SPEC)
-    assert result['id'] == ROW['id'] and result['recovered'] is True
-    assert 'ChunkedEncodingError' in result['recovery_note']
-    assert 'unconfirmed' in result['recovery_note']
-    assert calls == ['POST', 'GET']
+    if status in (200, 201):
+        result = c.create_app(SPEC)
+        assert result['id'] == ROW['id'] and result['recovered'] is True
+        assert 'ChunkedEncodingError' in result['recovery_note']
+        assert 'unconfirmed' in result['recovery_note']
+        assert calls == ['POST', 'GET']
+    else:
+        with pytest.raises(requests.exceptions.ChunkedEncodingError):
+            c.create_app(SPEC)
+        assert calls == ['POST']
+
+
+@pytest.mark.parametrize('refresh', [False, True])
+def test_auth_timeout_cannot_enter_app_transport_recovery(refresh):
+    calls = []
+    original = requests.Timeout('synthetic authentication timeout')
+    class SyntheticAdapter(requests.adapters.BaseAdapter):
+        def send(self, request, **kwargs):
+            calls.append(request.url)
+            if request.url.endswith('/synthetic-auth'):
+                raise original
+            assert request.url.endswith('/ascend/applications') and request.method == 'POST'
+            response = requests.Response()
+            response.url, response.request, response.status_code = request.url, request, 401
+            response._content = b'{"error":"synthetic expired token"}'
+            return response
+        def close(self):
+            pass
+    with api.AscendAPI(token='s6r_pat_synthetic', cache=False,
+            token_url='https://control.example.test/synthetic-auth') as c:
+        c._s.mount('https://', SyntheticAdapter())
+        if refresh:
+            c._jwt, c._jwt_exp = 'synthetic-cached-access', float('inf')
+        with pytest.raises(requests.Timeout) as exc:
+            c.create_app(SPEC)
+        assert exc.value is original
+    assert len(calls) == (2 if refresh else 1)
+    assert calls[-1].endswith('/synthetic-auth')
+
+
+@pytest.mark.parametrize('final_status', [200, 401])
+def test_complete_create_401_retains_exactly_one_auth_refresh(monkeypatch, final_status):
+    posts = []
+    def handler(method, url, kwargs):
+        assert method == 'POST'
+        posts.append(url)
+        if url.endswith('/auth/token'):
+            return FakeResponse(200, {'access_token': 'synthetic-refreshed-access'})
+        count = sum(p.endswith('/ascend/applications') for p in posts)
+        return FakeResponse(401 if count == 1 else final_status, ROW)
+    install_fake_requests(monkeypatch, handler)
+    with api.AscendAPI(token='s6r_pat_synthetic', cache=False) as c:
+        c._jwt, c._jwt_exp = 'synthetic-cached-access', float('inf')
+        if final_status == 200:
+            assert c.create_app(SPEC) == ROW
+        else:
+            with pytest.raises(api.AscendAPIError, match='401'):
+                c.create_app(SPEC)
+    assert len(posts) == 3
+    assert posts[0] == posts[2] and posts[1].endswith('/auth/token')

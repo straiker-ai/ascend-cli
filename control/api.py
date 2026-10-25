@@ -366,27 +366,56 @@ class AscendAPI:
             _jwt_cache_clear()
 
     def _req(self, method: str, path: str, *, json_body: Any = None, close_after: bool = False,
-             retry_auth: bool = True, timeout: Optional[float] = None) -> Any:
+             retry_auth: bool = True, timeout: Optional[float] = None,
+             _recover_create=None) -> Any:
         url = self.base + path
         headers = {"Authorization": f"Bearer {self._bearer()}",
                    **({"Connection": "close"} if close_after else {}),
                    "Content-Type": "application/json", "Accept": "application/json"}
-        r = self._s.request(method, url, headers=headers, json=json_body,
-                            timeout=timeout or self.timeout)
-        if r.status_code == 401 and retry_auth and self.token.startswith("s6r_pat_"):
-            # The cached token was rejected — drop it from disk too, or the next process
-            # re-reads a token the server already refused.
-            self._forget_jwt()
-            return self._req(method, path, json_body=json_body, retry_auth=False,
-                             timeout=timeout)
-        if r.status_code >= 400:
-            raise AscendAPIError(f"{method} {path} -> {r.status_code}: {r.text[:500]}")
-        if not r.content:
-            return None
         try:
-            return r.json()
-        except ValueError:
-            return r.text
+            r = self._s.request(method, url, headers=headers, json=json_body,
+                                timeout=timeout or self.timeout,
+                                **({"stream": True} if _recover_create is not None else {}))
+        except (requests.ConnectionError, requests.Timeout,
+                requests.exceptions.ChunkedEncodingError,
+                requests.exceptions.ContentDecodingError) as exc:
+            if _recover_create is None:
+                raise
+            return _recover_create(exc)
+        try:
+            # Keep refusal headers visible before Requests consumes a create response body.
+            # An interrupted refusal must not enter candidate recovery or the auth retry.
+            if _recover_create is not None and r.status_code >= 400:
+                r.content
+            if r.status_code == 401 and retry_auth and self.token.startswith("s6r_pat_"):
+                # The cached token was rejected — drop it from disk too, or the next process
+                # re-reads a token the server already refused.
+                self._forget_jwt()
+                return self._req(method, path, json_body=json_body, retry_auth=False,
+                                 timeout=timeout,
+                                 **({"_recover_create": _recover_create}
+                                    if _recover_create is not None else {}))
+            if r.status_code >= 400:
+                raise AscendAPIError(f"{method} {path} -> {r.status_code}: {r.text[:500]}")
+            try:
+                if not r.content:
+                    return None
+                try:
+                    return r.json()
+                except ValueError:
+                    return r.text
+            except (requests.ConnectionError, requests.Timeout,
+                    requests.exceptions.ChunkedEncodingError,
+                    requests.exceptions.ContentDecodingError) as exc:
+                if _recover_create is None or r.status_code not in (200, 201):
+                    raise
+                return _recover_create(exc)
+        finally:
+            if _recover_create is not None:
+                try:
+                    r.close()
+                except Exception:
+                    pass
 
     # ---- controls / applications --------------------------------------------
     def list_controls(self) -> Any:
@@ -495,18 +524,16 @@ class AscendAPI:
         the platform returns it on GET and in the app list as well as at creation — so a dropped
         response costs nothing but the round trip.
         """
-        try:
-            return self._req("POST", "/ascend/applications", json_body=_clean_templates(spec))
-        except (requests.ConnectionError, requests.Timeout,
-                requests.exceptions.ChunkedEncodingError,
-                requests.exceptions.ContentDecodingError) as exc:
+        def recover(exc):
             found = self._find_app_by_name(spec.get("name"))
             if found is None:
-                raise
+                raise exc
             return {**found, "recovered": True,
                     "recovery_note": (
                         f"the create response was unavailable ({type(exc).__name__}); a matching "
                         f"application was found, but the original create outcome is unconfirmed")}
+        return self._req("POST", "/ascend/applications", json_body=_clean_templates(spec),
+                         _recover_create=recover)
 
     def _find_app_by_name(self, name: Optional[str]):
         """Look for a just-created app by name. Returns None if the lookup itself fails."""

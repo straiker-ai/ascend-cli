@@ -382,6 +382,7 @@ class AscendAPI:
             if _recover_create is None:
                 raise
             return _recover_create(exc)
+        close_pending = _recover_create is not None
         try:
             # Keep refusal headers visible before Requests consumes a create response body.
             # An interrupted refusal must not enter candidate recovery or the auth retry.
@@ -409,9 +410,15 @@ class AscendAPI:
                     requests.exceptions.ContentDecodingError) as exc:
                 if _recover_create is None or r.status_code not in (200, 201):
                     raise
+                # A failed close must not retry cleanup or start candidate-lookup I/O.
+                close_pending = False
+                try:
+                    r.close()
+                except Exception:
+                    raise exc
                 return _recover_create(exc)
         finally:
-            if _recover_create is not None:
+            if close_pending:
                 try:
                     r.close()
                 except Exception:

@@ -201,3 +201,69 @@ def test_complete_create_401_retains_exactly_one_auth_refresh(monkeypatch, final
                 c.create_app(SPEC)
     assert len(posts) == 3
     assert posts[0] == posts[2] and posts[1].endswith('/auth/token')
+
+
+@pytest.mark.parametrize('status', [200, 201])
+@pytest.mark.parametrize('close_error', [False, True])
+def test_interrupted_create_closes_once_before_lookup_or_preserves_original(status, close_error):
+    calls = []
+    original = requests.Timeout('synthetic body interruption')
+    class InterruptedBody:
+        def stream(self, *args, **kwargs):
+            yield b'{"synthetic":"partial"}'
+            raise original
+        def close(self):
+            calls.append('close-post')
+            if close_error:
+                raise RuntimeError('synthetic close failure')
+    class SyntheticAdapter(requests.adapters.BaseAdapter):
+        def send(self, request, **kwargs):
+            calls.append(request.method)
+            response = requests.Response()
+            response.url, response.request = request.url, request
+            response.status_code = status if request.method == 'POST' else 200
+            if request.method == 'POST':
+                response.raw = InterruptedBody()
+            else:
+                response._content = json.dumps([ROW]).encode()
+            return response
+        def close(self):
+            pass
+    with client() as c:
+        c._s.mount('https://', SyntheticAdapter())
+        if close_error:
+            with pytest.raises(requests.Timeout) as exc:
+                c.create_app(SPEC)
+            assert exc.value is original
+        else:
+            assert c.create_app(SPEC)['recovered'] is True
+    assert calls == (['POST', 'close-post'] if close_error else ['POST', 'close-post', 'GET'])
+
+
+@pytest.mark.parametrize('status', [200, 201, 401, 403])
+@pytest.mark.parametrize('close_error', [False, True])
+def test_complete_response_finally_closes_once_without_lookup(status, close_error):
+    calls = []
+    class TrackedResponse(requests.Response):
+        def close(self):
+            calls.append('close-post')
+            if close_error:
+                raise RuntimeError('synthetic close failure')
+            super().close()
+    class SyntheticAdapter(requests.adapters.BaseAdapter):
+        def send(self, request, **kwargs):
+            calls.append(request.method)
+            response = TrackedResponse()
+            response.url, response.request, response.status_code = request.url, request, status
+            response._content = json.dumps(ROW).encode()
+            return response
+        def close(self):
+            pass
+    with client() as c:
+        c._s.mount('https://', SyntheticAdapter())
+        if status < 400:
+            assert c.create_app(SPEC) == ROW
+        else:
+            with pytest.raises(api.AscendAPIError, match=str(status)):
+                c.create_app(SPEC)
+    assert calls == ['POST', 'close-post']

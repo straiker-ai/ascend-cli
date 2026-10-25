@@ -1983,13 +1983,11 @@ def _assess_run_many(args, c, refs, scope_ids=None):
                         "resumes", "scope_warning", "diagnosis"):
                 if key in r:
                     row[key] = r[key]
-            if r.get("started") is False or r.get("stalled"):
-                try:
-                    row["diagnosis"] = _diagnose_not_started(c, appid, r)
-                except Exception:
-                    # Diagnosis cannot erase an assessment that already exists.
-                    row["diagnosis"] = ("Start diagnosis unavailable; retain this assessment ID "
-                                        "and inspect its current state before continuing.")
+            if (r.get("started") is False or r.get("stalled")) and not row.get("diagnosis"):
+                # Paused is an observed state, not a cause or permission to replay a target.
+                row["diagnosis"] = ("The assessment exists, but no start/pause cause was supplied. "
+                                    "Inspect this exact assessment and retained verification "
+                                    "evidence; do not create a duplicate.")
             return row
         except Exception as e:
             return {"app": ref, "app_id": appid, "error": f"{type(e).__name__}: {e}"}

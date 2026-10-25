@@ -14,10 +14,11 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 ### Fixed
 
 - **Batch assessment starts retain their actual outcome.** Per-app results now
-  preserve confirmed, failed and unread start facts, recovery details and the
-  existing not-started diagnosis instead of treating every returned assessment ID
+  preserve confirmed, failed and unread start facts, recovery details and any
+  supplied native diagnosis instead of treating every returned assessment ID
   as a running start. `--no-wait` exits nonzero for failed or unconfirmed starts;
   waiting can follow the same unconfirmed assessment without creating another.
+  A missing pause cause remains unknown, with no diagnostic target replay.
   Native apps still need no bridge, and no assessment start is replayed.
 
 - **Application-create recovery preserves request outcomes.** Authentication

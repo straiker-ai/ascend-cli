@@ -94,19 +94,30 @@ def test_unconfirmed_retains_error_and_safe_recovery_facts(native):
         assert 'private_payload' not in row and 'diagnosis' not in row
 
 
-def test_diagnosis_failure_never_loses_existing_assessment_receipt(native, monkeypatch):
+def test_missing_diagnosis_never_replays_target_or_infers_pause_cause(native, monkeypatch):
     client, invoke = native
     for state in client.states.values():
         state.update(status='paused', started=False)
-    def broken(*args):
-        raise RuntimeError('synthetic-private-diagnostic-detail')
-    monkeypatch.setattr(ascend, '_diagnose_not_started', broken)
+    monkeypatch.setattr(ascend, '_diagnose_not_started', lambda *a: pytest.fail('replayed target for diagnosis'))
     result = invoke(['--no-wait'])
     rows = json.loads(result.stdout)
     assert result.returncode == 1
     assert all(row['assessment_id'] == 'asmt_' + row['app_id'] and row['started'] is False for row in rows)
-    assert all(row['diagnosis'] for row in rows)
-    assert 'synthetic-private-diagnostic-detail' not in result.stdout
+    assert all('no start/pause cause was supplied' in row['diagnosis'] for row in rows)
+    assert all('request_outcome' not in row and 'mutation_attempted' not in row for row in rows)
+
+
+@pytest.mark.parametrize('diagnosis', ['synthetic observed native detail',
+                                     {'reason': 'synthetic_observed', 'detail': 'synthetic known fact'}])
+def test_observed_native_diagnosis_is_retained_without_another_probe(native, monkeypatch, diagnosis):
+    client, invoke = native
+    for state in client.states.values():
+        state.update(status='paused', started=False, diagnosis=diagnosis)
+    monkeypatch.setattr(ascend, '_diagnose_not_started', lambda *a: pytest.fail('replayed target for diagnosis'))
+    result = invoke(['--no-wait'])
+    assert result.returncode == 1
+    assert all(row['diagnosis'] == diagnosis and row['assessment_id'] == 'asmt_' + row['app_id']
+               for row in json.loads(result.stdout))
 
 
 def test_reused_assessment_and_recovered_create_are_not_replayed(native):

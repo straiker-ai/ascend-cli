@@ -484,7 +484,7 @@ class AscendAPI:
         return self._req("GET", f"/ascend/applications/{app_id}")
 
     def create_app(self, spec: Dict[str, Any]) -> Any:
-        """Create an application, and never report a failure that actually succeeded.
+        """Create an application, or locate a matching record after a transport failure.
 
         The POST is routinely lost in transit AFTER the platform created the app (observed against
         v3: 'Response ended prematurely' / RemoteDisconnected, more often with a large control
@@ -497,14 +497,16 @@ class AscendAPI:
         """
         try:
             return self._req("POST", "/ascend/applications", json_body=_clean_templates(spec))
-        except Exception as exc:
+        except (requests.ConnectionError, requests.Timeout,
+                requests.exceptions.ChunkedEncodingError,
+                requests.exceptions.ContentDecodingError) as exc:
             found = self._find_app_by_name(spec.get("name"))
             if found is None:
                 raise
             return {**found, "recovered": True,
                     "recovery_note": (
-                        f"the response was lost ({type(exc).__name__}), but the platform DID "
-                        f"create this application")}
+                        f"the create response was unavailable ({type(exc).__name__}); a matching "
+                        f"application was found, but the original create outcome is unconfirmed")}
 
     def _find_app_by_name(self, name: Optional[str]):
         """Look for a just-created app by name. Returns None if the lookup itself fails."""

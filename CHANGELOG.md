@@ -13,6 +13,12 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ### Fixed
 
+- **Declared hosted stream completion is enforced.** Generated SSE/NDJSON adapters
+  fail rather than score partial text when a configured terminal condition is
+  missing. Generic sentinels cannot replace a different declared terminal, and
+  malformed NDJSON is not returned as reply text. Streams without a declared
+  terminal keep EOF completion; JSON and unframed-text contracts are unchanged.
+
 - **Published-profile preparation capture and slot consistency.** Every sanitized
   capture is rebuilt from original response JSON with the final credential map,
   so credentials learned by later reads cannot remain raw in earlier captures.

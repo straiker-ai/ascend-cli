@@ -61,6 +61,12 @@ SSE_BODY = ('data: {"type": "token", "content": "Hello! "}\n\n'
 
 
 class TestDirectApi:
+    def test_unframed_text_contract_remains_supported(self):
+        cfg = {**REST, "response_path": ""}
+        out = run(cfg, {"http": [{"body": "Complete unframed answer."}]})
+        assert out["reply"]["status_code"] == 200
+        assert "Complete unframed answer." in json.dumps(out["reply"]["body"])
+
     def test_one_post_to_the_apps_url_with_its_headers_and_the_reply_under_its_key(self):
         out = run(REST, {"http": [{"url_contains": "/rest/api/chat", "method": "POST",
                                    "body_contains": "order 42", "body": {"reply": "Shipped."}}]})
@@ -101,6 +107,80 @@ class TestDirectApi:
 
 
 class TestSseStream:
+    @pytest.mark.parametrize("fmt,body", [
+        ("sse", 'data: {"type":"token","content":"Partial."}\n\n'),
+        ("ndjson", '{"type":"token","content":"Partial."}\n'),
+    ])
+    def test_declared_terminal_is_required_before_success(self, fmt, body):
+        cfg = {**SSE, "stream": {**SSE["stream"], "format": fmt}}
+        out = run(cfg, {"http": [{"body": body}]})
+        assert out["reply"]["status_code"] == 502
+        assert "Partial." not in json.dumps(out["reply"])
+
+    @pytest.mark.parametrize("terminal", ["[DONE]", "DONE"])
+    def test_generic_sentinel_cannot_replace_a_different_declared_terminal(self, terminal):
+        body = 'data: {"type":"token","content":"Partial."}\n\ndata: ' + terminal + '\n\n'
+        out = run(SSE, {"http": [{"body": body}]})
+        assert out["reply"]["status_code"] == 502
+
+    @pytest.mark.parametrize("position", ["before", "after"])
+    def test_malformed_ndjson_does_not_become_a_scored_answer(self, position):
+        cfg = {**SSE, "stream": {**SSE["stream"], "format": "ndjson"}}
+        complete = '{"type":"token","content":"Answer."}\n{"type":"done"}\n'
+        body = ('malformed\n' + complete) if position == "before" else (complete + 'malformed\n')
+        out = run(cfg, {"http": [{"body": body}]})
+        assert out["reply"]["status_code"] == 502
+        assert "Answer." not in json.dumps(out["reply"])
+
+    @pytest.mark.parametrize("done_when,terminal", [
+        ({"path": "type", "equals": "done"}, '{"type":"done"}'),
+        ({"contains": "[DONE]"}, '[DONE]'),
+    ])
+    def test_complete_declared_ndjson_and_explicit_raw_terminal_remain_supported(self, done_when, terminal):
+        cfg = {**SSE, "stream": {**SSE["stream"], "format": "ndjson", "done_when": done_when}}
+        body = '{"type":"token","content":"Answer."}\n' + terminal + '\n'
+        assert run(cfg, {"http": [{"body": body}]})["reply"]["status_code"] == 200
+
+    def test_sse_without_declared_completion_can_still_finish_at_eof(self):
+        stream = {key: value for key, value in SSE["stream"].items() if key != "done_when"}
+        cfg = {**SSE, "stream": stream}
+        out = run(cfg, {"http": [{"body": 'data: {"type":"token","content":"Complete."}\n\n'}]})
+        assert out["reply"]["status_code"] == 200
+        assert out["reply"]["body"] == {"response": "Complete."}
+
+    def test_ndjson_without_declared_completion_keeps_eof_and_legacy_sentinel(self):
+        stream = {key: value for key, value in SSE["stream"].items() if key != "done_when"}
+        cfg = {**SSE, "stream": {**stream, "format": "ndjson"}}
+        body = '{"type":"token","content":"Complete."}\n'
+        for suffix in ("", '[DONE]\n'):
+            assert run(cfg, {"http": [{"body": body + suffix}]})["reply"]["status_code"] == 200
+
+    def test_event_completion_is_required_when_declared(self):
+        cfg = {**SSE, "stream": {"text_path": "content", "token_events": ["delta"],
+                                 "done_events": ["finish"]}}
+        body = 'event: delta\ndata: {"content":"Answer."}\n\n'
+        assert run(cfg, {"http": [{"body": body}]})["reply"]["status_code"] == 502
+        assert run(cfg, {"http": [{"body": body + 'event: finish\ndata: {}\n\n'}]})["reply"]["status_code"] == 200
+
+    @pytest.mark.parametrize("verb", ["test", "verify"])
+    def test_missing_terminal_fails_the_actual_cli_execution_verdict(self, monkeypatch, capsys, tmp_path, verb):
+        from test_adaptor_cli import Recorder, UUID, run as run_cli
+
+        out = run(SSE, {"http": [{"body": 'data: {"type":"token","content":"Partial."}\n\n'}]})
+        turn = {"n": 1, "status_code": out["reply"]["status_code"], "scored": "",
+                "raw": out["reply"]["body"]}
+        payload = {"app_id": UUID, "turns": [turn]}
+        rec = Recorder(test=payload, verify=payload, console_uuid=UUID)
+        path = tmp_path / 'generated.js'
+        path.write_text(G.plan(SSE)["source"])
+        args = ["adaptor", verb, *([str(path)] if verb == "test" else []), "--app", UUID]
+        with pytest.raises(SystemExit) as stopped:
+            run_cli(monkeypatch, rec, *args, json_mode=True)
+        assert stopped.value.code == 1
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["ok"] is False and envelope["verdict"]["ok"] is False
+        assert "Partial." not in json.dumps(envelope)
+
     def test_the_stream_is_reassembled_to_one_string(self):
         out = run(SSE, {"http": [{"url_contains": "/sse/api/chat", "method": "POST", "body": SSE_BODY}]})
         assert out["reply"] == {"status_code": 200, "body": {"response": "Hello! I can help."},
@@ -110,10 +190,10 @@ class TestSseStream:
         assert call["headers"]["Accept"] == "text/event-stream"
         assert call["body"] == {"message": "What is the status of order 42?"}
 
-    def test_a_truncated_stream_still_answers_and_says_so(self):
+    def test_a_truncated_stream_with_declared_completion_is_not_an_answer(self):
         out = run(SSE, {"http": [{"body": SSE_BODY.split("data: {\"type\": \"done\"}")[0]}]})
-        assert out["reply"]["body"] == {"response": "Hello! I can help."}
-        assert out["reply"]["_diag"]["done"] is False
+        assert out["reply"]["status_code"] == 502
+        assert "Hello! I can help." not in json.dumps(out["reply"])
 
     def test_no_token_frames_is_a_502(self):
         out = run(SSE, {"http": [{"body": "data: {\"type\": \"status\", \"content\": \"x\"}\n\n"}]})

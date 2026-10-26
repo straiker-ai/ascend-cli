@@ -9502,7 +9502,7 @@ def cmd_adaptor_get(args):
 
 
 def cmd_adaptor_shape(args):
-    """The reply shape the app's response_template expects — the exact return statement to write.
+    """The response-template-only return example and current-v1 raw-reply compatibility guidance.
 
     The single most expensive thing to get wrong, because it does not fail: it scores. Read it
     before writing a line.
@@ -9541,8 +9541,10 @@ def cmd_adaptor_shape(args):
              "request_template:", json.dumps(data["request_template"], indent=2, default=str), "",
              f"response_template:\n{app.get('response_template')}", ""]
     if shape:
-        lines += [f"YOUR ADAPTOR MUST RETURN the reply at `{shape['path'] or '(the whole body)'}`:",
-                  f"    {shape['statement']}"]
+        lines += [f"RESPONSE_TEMPLATE-ONLY return example for `{shape['path'] or '(the whole body)'}`:",
+                  f"    {shape['statement']}",
+                  f"statement_scope: {shape['statement_scope']}",
+                  f"v1_compatibility: {shape['v1_compatibility']}"]
     else:
         lines.append("No {{RESPONSE}} in the response_template - ask which field should carry the "
                      "reply before writing the adaptor.")

@@ -204,13 +204,25 @@ def record_digest(value: Any) -> Optional[str]:
 
 
 # ----------------------------------------------------------------------------- the reply shape
-def reply_shape(response_template: Any) -> Optional[Dict[str, str]]:
-    """Where the app's response_template expects the answer, and the return statement to write.
+_V1_REPLY_COMPATIBILITY = (
+    "Current v1 assessment preflight also reads the raw reply, not only response_template extraction. "
+    "Whole-body strings and scalar body.text are compatible when they are genuine selected assistant text. "
+    "For an object body, expose that same string at body.text alongside the required nested shape and "
+    "context only if compatible. If body.text must be an object/list, or the body must be an array, "
+    "this is a conflict: author a consistent return/template through normal configuration approval; "
+    "do not overwrite the required shape. Preserve source-protocol validation, assistant-role selection, "
+    "completion, conversation state and failures. Other protocols retain their own parsers. "
+    "Never use object serialization, metadata, errors or prompt echoes as assistant text, or fabricate "
+    "success. No automatic coercion, template edits or engine proof."
+)
 
-    The engine does not read the adaptor's reply directly: it applies the application's
-    response_template to it, exactly as it would to a target's own response. A reply of the wrong
-    shape does not error — parsed_response becomes a stringified object and a detector scores
-    that. So this is the first thing to read, not the last.
+
+def reply_shape(response_template: Any) -> Optional[Dict[str, str]]:
+    """The template's answer path and return example, plus current-v1 compatibility guidance.
+
+    The statement covers response_template extraction only; raw assessment preflight is a
+    separate reader. Wrong template shapes can score a stringified object instead of the
+    assistant's reply. The model authors the source; this function changes no template or JS.
     """
     try:
         shape = (json.loads(response_template) if isinstance(response_template, str)
@@ -219,7 +231,8 @@ def reply_shape(response_template: Any) -> Optional[Dict[str, str]]:
         return None
     if isinstance(shape, str):
         if "RESPONSE" in shape:
-            return {"path": "", "statement": "return { status_code: 200, body: text };"}
+            return {"path": "", "statement": "return { status_code: 200, body: text };",
+                    "statement_scope": "response_template_only", "v1_compatibility": _V1_REPLY_COMPATIBILITY}
         return None
 
     def find(v, path=""):
@@ -246,7 +259,8 @@ def reply_shape(response_template: Any) -> Optional[Dict[str, str]]:
     js = "text"
     for part in reversed(where.split(".")):
         js = f"[ {js} ]" if part.isdigit() else f"{{ {part}: {js} }}"
-    return {"path": where, "statement": f"return {{ status_code: 200, body: {js} }};"}
+    return {"path": where, "statement": f"return {{ status_code: 200, body: {js} }};",
+            "statement_scope": "response_template_only", "v1_compatibility": _V1_REPLY_COMPATIBILITY}
 
 
 # ----------------------------------------------------------------------------- the local lint

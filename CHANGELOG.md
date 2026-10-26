@@ -13,6 +13,11 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ### Fixed
 
+- **Adapter shape guidance distinguishes raw v1 replies from template extraction.**
+  The existing return example is explicitly response-template-only, with additive
+  compatibility guidance for genuine scalar assistant text and conflicting nested
+  `body.text` shapes. Templates, authored source, generators and proof are unchanged.
+
 - **Batch assessment starts retain their actual outcome.** Per-app results now
   preserve confirmed, failed and unread start facts, recovery details and any
   supplied native diagnosis instead of treating every returned assessment ID

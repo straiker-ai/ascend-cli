@@ -173,7 +173,10 @@ class TestReplyShape:
         ('"{{RESPONSE}}"', "", "return { status_code: 200, body: text };"),
     ])
     def test_the_statement_to_write(self, tpl, path, statement):
-        assert AD.reply_shape(tpl) == {"path": path, "statement": statement}
+        shape = AD.reply_shape(tpl)
+        assert {key: shape[key] for key in ("path", "statement")} == {"path": path, "statement": statement}
+        assert shape["statement_scope"] == "response_template_only"
+        assert shape["v1_compatibility"] == AD._V1_REPLY_COMPATIBILITY
 
     @pytest.mark.parametrize("tpl", [None, "", "{}", '{"x": "y"}', "not json"])
     def test_no_response_marker_means_ask(self, tpl):

@@ -218,17 +218,28 @@ function checkReachability(turn, host) {
 
 **The single most expensive thing to get wrong, because it does not fail. It scores.**
 
-The engine does not read the adaptor's reply directly. It applies the application's
-`response_template` to it, exactly as it would to a target's own response. So the body you return
-has to have the shape that template describes:
+The configured extraction applies the application's `response_template` to the adaptor's reply,
+exactly as it would to a target's own response. The returned body must support that shape:
 
 ```
 response_template   {"response": "{{ RESPONSE }}"}          ->  return { response: text }
 response_template   {"data": {"reply": "{{ RESPONSE }}"}}   ->  return { data: { reply: text } }
 ```
 
-`ascend adaptor shape --app <app>` prints both templates and the exact return statement. If the
-shapes disagree, the run does not error: `parsed_response` becomes something like
+`ascend adaptor shape --app <app>` prints both templates and a response-template-only return
+example, labelled `statement_scope: response_template_only`. Its `v1_compatibility` guidance
+describes a separate current-v1 assessment preflight reader of the raw reply. Whole-body genuine
+assistant strings and scalar `body.text` are compatible. For an object body, expose the same
+selected assistant string at `body.text` alongside the required nested shape and context only
+when compatible. If the template needs `body.text` to be an object/list, or the whole body to be
+an array, do not overwrite that shape: author a consistent return/template through the normal
+configuration approval path. The tool does not change templates or adapter source.
+
+Preserve the source protocol's parser, assistant-role selection, completion, conversation state
+and failure semantics. Do not use serialized objects, metadata, errors or prompt echoes as the
+assistant reply, and never fabricate success. This guidance is not engine or assessment proof.
+
+If the shapes disagree, the run does not error: `parsed_response` becomes something like
 `{'response': 'the actual answer'}`, a stringified object, and **a detector scores that text as
 though the target said it.** Every probe in the assessment is then judged against a reply the target
 never gave. Either return the shape the template already describes, or have the template changed.

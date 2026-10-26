@@ -436,7 +436,7 @@ class TestShape:
     def test_prints_the_return_statement(self, monkeypatch, capsys):
         run(monkeypatch, Recorder(), "adaptor", "shape", "--app", "Support Bot")
         out = capsys.readouterr().out
-        assert "YOUR ADAPTOR MUST RETURN the reply at `data.reply`" in out
+        assert "RESPONSE_TEMPLATE-ONLY return example for `data.reply`" in out
         assert "return { status_code: 200, body: { data: { reply: text } } };" in out
         assert "adaptor  none stored" in out
 

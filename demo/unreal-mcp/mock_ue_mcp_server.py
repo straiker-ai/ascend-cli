@@ -154,6 +154,22 @@ _TOOLS = [
          "arguments": {"type": "object"}}}},
 ]
 
+# The tools nested under each toolset — reached only via call_tool, never listed in tools/list.
+# describe_toolset is the discovery primitive that surfaces them (e.g. a scanner enumerating
+# list_toolsets -> describe_toolset to find execute_tool_script behind the call_tool dispatch).
+_TOOLSET_TOOLS = {
+    PROGRAMMATIC_TOOLSET: [
+        {"name": "execute_tool_script",
+         "description": "Execute an operator-supplied Python script (must define run()). "
+                        "Arbitrary code execution with full editor/project/API access.",
+         "inputSchema": {"type": "object", "properties": {"script": {"type": "string"}},
+                         "required": ["script"]}},
+        {"name": "get_execution_environment",
+         "description": "Report the script sandbox's allowed modules and open modes.",
+         "inputSchema": {"type": "object", "properties": {}}},
+    ],
+}
+
 
 def _handle_rpc(msg: dict) -> dict | None:
     """Handle one JSON-RPC message; return a response dict, or None for a notification."""
@@ -177,6 +193,15 @@ def _handle_rpc(msg: dict) -> dict | None:
             # allow calling the meta tools directly too
             if name == "list_toolsets":
                 return _tool_ok(mid, {"returnValue": [PROGRAMMATIC_TOOLSET]})
+            if name == "describe_toolset":
+                # The discovery primitive: return the tools nested under the named toolset so
+                # enumeration can reach execute_tool_script. Advertised in tools/list, so it
+                # must actually work (a missing handler zeroed out scanner enumeration).
+                ts = arguments.get("toolset_name", "")
+                tools = _TOOLSET_TOOLS.get(ts)
+                if tools is None:
+                    return _tool_err(mid, f"unknown toolset: {ts}")
+                return _tool_ok(mid, {"returnValue": {"name": ts, "tools": tools}})
             return _tool_err(mid, f"unknown tool: {name}")
         try:
             result = _call_tool(arguments.get("toolset_name", ""),

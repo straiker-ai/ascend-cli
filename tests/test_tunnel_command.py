@@ -334,7 +334,7 @@ def test_check_streams_the_agents_lines_and_wait_is_exit_0(cli, agent, state):
     assert argv[argv.index("--org") + 1] == "123"
     assert argv[argv.index("--allow") + 1] == "localhost:8080"
     assert argv[argv.index("--relay") + 1] == "wss://ascendai-bridge.dev.straiker.ai/tunnel"
-    assert "--host-key" not in argv                                   # none published for dev
+    assert argv[argv.index("--host-key") + 1] == T.ENVIRONMENTS["dev"]["host_key"]
     assert argv[argv.index("--state-dir") + 1] == str(T.agent_state_dir())
 
 
@@ -353,7 +353,8 @@ def test_check_json_envelope(cli, agent):
     assert d["allow"] == ["chat.corp.internal:443", "api.corp.internal:8080"]
     assert d["passed"] is True and d["waiting"] is True and d["listed"] is False
     assert d["counts"]["FAIL"] == 0 and d["exit_code"] == 0
-    assert [l["status"] for l in d["lines"]].count("PASS") == 3
+    assert [l["status"] for l in d["lines"]].count("PASS") == 4
+    assert d["host_key_pinned"] is True and d["counts"]["WARN"] == 0
 
 
 def test_check_fail_exits_1_with_the_envelope(cli, agent, monkeypatch):
@@ -367,10 +368,11 @@ def test_check_fail_exits_1_with_the_envelope(cli, agent, monkeypatch):
     assert code == ascend.EXIT_ERROR and "check failed: 1 line(s) read FAIL" in out
 
 
-def test_check_says_every_line_passed_once_the_key_is_listed(cli, agent, monkeypatch):
+def test_check_reports_relay_acceptance_once_the_key_is_listed(cli, agent, monkeypatch):
     monkeypatch.setenv("FAKE_TUNNEL_LISTED", "1")
     code, out, _ = cli(["tunnel", "check", "--org", "123", "--allow", "chat.corp.internal"])
-    assert code == 0 and "check passed: every line PASS" in out
+    assert code == 0 and "check passed: the relay accepts this key" in out
+    assert "every line PASS" not in out and "authorization has not been verified" not in out
 
 
 def test_check_refuses_a_bad_allow_entry_before_spawning(cli, agent):
@@ -511,6 +513,24 @@ def test_start_ls_logs_stop_lifecycle(cli, agent, state):
         _stop_all(cli)
 
 
+def test_check_without_an_identity_does_not_claim_key_authorization(cli, agent, state, monkeypatch):
+    def checked(argv, **kwargs):
+        assert argv[1] == "check"
+        return 0, [
+            "INFO   agent     org 123; no agent key yet in /synthetic/state: this check creates nothing",
+            "PASS   tunnel    relay host key matches the pinned key",
+            "INFO   login     not checked: the agent has no key yet (it creates one when it first runs)",
+            "RESULT PASS: this machine reaches Straiker",
+        ], ""
+
+    monkeypatch.setattr(T, "run_lines", checked)
+    code, out, err = cli(["tunnel", "check", "--org", "123", "--allow", "target.example"])
+    assert code == 0, err
+    assert "key authorization has not been verified" in out
+    assert "every line PASS" not in out
+    assert not list(state.rglob("agent.key"))
+
+
 def test_start_json_envelope(cli, agent, state):
     try:
         code, out, _ = cli(["tunnel", "start", "--org", "7", "--allow", "a.corp:8443", "--json"])
@@ -521,7 +541,7 @@ def test_start_json_envelope(cli, agent, state):
         assert d["id"] == "7-prod" and d["pid"] and d["log"].endswith("7-prod.log")
         assert d["key"] == KEY_BLOB and d["agent_id"] == KEY_ID
         assert d["app_urls"] == ["https://a.corp.tun.straiker.ai"] and d["allow"] == ["a.corp:8443"]
-        assert d["host_key_pinned"] is False and d["runner"]["kind"] == "binary"
+        assert d["host_key_pinned"] is True and d["runner"]["kind"] == "binary"
     finally:
         _stop_all(cli)
 

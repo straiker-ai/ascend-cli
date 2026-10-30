@@ -7423,7 +7423,12 @@ def cmd_tunnel_check(args):
               f"{cfg['org']} {' '.join('--allow ' + f['entry'] for f in cfg['allow'])}"
               + (f" --env {cfg['env']}" if cfg['env'] != T.DEFAULT_ENV else ""))
     elif passed:
-        print("  check passed: every line PASS. Run the agent:  ascend tunnel start --org "
+        if parsed["listed"]:
+            print("  check passed: the relay accepts this key.")
+        else:
+            print("  connectivity check passed; key authorization has not been verified. "
+                  "Read or create the key with ascend tunnel key, list it on the application, then check again.")
+        print("  Run the agent:  ascend tunnel start --org "
               f"{cfg['org']} {' '.join('--allow ' + f['entry'] for f in cfg['allow'])}"
               + (f" --env {cfg['env']}" if cfg['env'] != T.DEFAULT_ENV else ""))
     else:

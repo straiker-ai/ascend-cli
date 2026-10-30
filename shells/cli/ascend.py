@@ -7424,7 +7424,7 @@ def cmd_tunnel_check(args):
               + (f" --env {cfg['env']}" if cfg['env'] != T.DEFAULT_ENV else ""))
     elif passed:
         if parsed["listed"]:
-            print("  check passed: the relay accepts this key.")
+            print("  check passed: the tunnel endpoint accepts this key.")
         else:
             print("  connectivity check passed; key authorization has not been verified. "
                   "Read or create the key with ascend tunnel key, list it on the application, then check again.")

@@ -371,7 +371,7 @@ def test_check_fail_exits_1_with_the_envelope(cli, agent, monkeypatch):
 def test_check_reports_relay_acceptance_once_the_key_is_listed(cli, agent, monkeypatch):
     monkeypatch.setenv("FAKE_TUNNEL_LISTED", "1")
     code, out, _ = cli(["tunnel", "check", "--org", "123", "--allow", "chat.corp.internal"])
-    assert code == 0 and "check passed: the relay accepts this key" in out
+    assert code == 0 and "check passed: the tunnel endpoint accepts this key" in out
     assert "every line PASS" not in out and "authorization has not been verified" not in out
 
 

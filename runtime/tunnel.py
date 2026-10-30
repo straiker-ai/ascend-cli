@@ -128,11 +128,12 @@ def resolve_endpoint(env: str, endpoint: Optional[str] = None,
         raise ValueError(f"the endpoint must be a wss:// URL, not {ep!r}")
     # A custom relay must never inherit another host's trust pin.
     published = next((e["host_key"] for e in ENVIRONMENTS.values() if e["endpoint"] == ep), None)
-    hk = (host_key or published or "").strip() or None
+    explicit = (host_key or "").strip()
+    hk = explicit or published or None
     if hk and len(hk.split()) < 2:
         raise ValueError("--host-key must be a public key line: <type> <base64>, e.g. ssh-ed25519 AAAA…")
     return {"env": env, "endpoint": ep, "host_key": hk,
-            "host_key_source": ("flag" if host_key else "built-in" if hk else None)}
+            "host_key_source": ("flag" if explicit else "built-in" if hk else None)}
 
 
 # ----------------------------------------------------------------------------- the allow list

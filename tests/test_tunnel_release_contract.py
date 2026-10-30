@@ -57,6 +57,33 @@ def test_relay_defaults_match_release_and_custom_relay_gets_no_unrelated_pin():
     assert override["host_key"] == stage["host_key"]
 
 
+@pytest.mark.parametrize("env", ["dev", "stage", "prod"])
+@pytest.mark.parametrize("blank", [" ", " \t ", "\r\n"])
+def test_blank_host_key_preserves_published_pin_for_older_path_binary(env, blank):
+    resolved = T.resolve_endpoint(env, host_key=blank)
+    assert resolved["host_key"] == T.ENVIRONMENTS[env]["host_key"]
+    assert resolved["host_key_source"] == "built-in"
+    argv = T.build_argv(
+        {"kind": "binary", "path": "/custom/old-tunnel"}, "check",
+        org="1234", allow=["target.example:443"], endpoint=resolved["endpoint"],
+        host_key=resolved["host_key"], state_dir="/existing/identity",
+    )
+    assert argv[argv.index("--host-key") + 1] == T.ENVIRONMENTS[env]["host_key"]
+
+
+@pytest.mark.parametrize("blank", [" ", " \t ", "\r\n"])
+def test_blank_host_key_does_not_assign_a_pin_to_a_custom_relay(blank):
+    resolved = T.resolve_endpoint("prod", "wss://custom.example/tunnel", blank)
+    assert resolved["host_key"] is None and resolved["host_key_source"] is None
+
+
+@pytest.mark.parametrize("endpoint", [None, "wss://custom.example/tunnel"])
+def test_padded_explicit_valid_pin_keeps_precedence(endpoint):
+    explicit = T.ENVIRONMENTS["dev"]["host_key"]
+    resolved = T.resolve_endpoint("prod", endpoint, " \t" + explicit + "\r\n")
+    assert resolved["host_key"] == explicit and resolved["host_key_source"] == "flag"
+
+
 @pytest.mark.parametrize("modern", [False, True])
 def test_old_and_new_check_identity_and_urls_have_the_same_contract(modern):
     if modern:

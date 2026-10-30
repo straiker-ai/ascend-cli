@@ -48,7 +48,9 @@ import tenant as _tenant
 from supervisor import pid_alive, _safe, _startup_grace_s, _log_tail
 
 BINARY = "ascend-tunnel"
-IMAGE = "ghcr.io/straiker-ai/ascend-tunnel:0.1.0"
+# v0.1.6 at dca071e23e442f8dece1a3fa8baba479d12e5dfa; attested multi-arch index.
+IMAGE = ("ghcr.io/straiker-ai/ascend-tunnel:0.1.6@sha256:"
+         "892b4aec63af03877b78bc1ca3208133451493c328c229e1efbca4e2cc6e8051")
 REPO_URL = "https://github.com/straiker-ai/ascend-tunnel"
 CONTAINER_STATE_DIR = "/var/lib/ascend-tunnel"       # what the published image uses
 CONTAINER_CA_FILE = "/etc/straiker/ca.pem"
@@ -61,21 +63,21 @@ MAX_KEYS = 20
 PROXY_VARS = ("HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy")
 CHECK_STATUSES = ("PASS", "FAIL", "WARN", "WAIT", "INFO")
 
-# The Straiker side of the tunnel, per environment. The agent itself knows only prod; dev and stage
-# are given to it as an explicit endpoint. A pinned host key is passed when one is published for
-# the environment; until then the agent warns that the key is not pinned, which `check` shows.
+# Published relay identities from ascend-tunnel v0.1.6 internal/config/config.go.
+# Pass these explicitly so older PATH binaries use the same verified relay identities.
 ENVIRONMENTS: Dict[str, Dict[str, Optional[str]]] = {
-    "dev":   {"endpoint": "wss://ascendai-bridge.dev.straiker.ai/tunnel", "host_key": None},
-    "stage": {"endpoint": "wss://ascendai-bridge.staging.straiker.ai/tunnel", "host_key": None},
-    "prod":  {"endpoint": "wss://ascendai-bridge.prod.straiker.ai/tunnel", "host_key": None},
+    "dev": {"endpoint": "wss://ascendai-bridge.dev.straiker.ai/tunnel",
+            "host_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBClL+8BZ6RXDGdP8iPvatZgyVnxlLTNlcfgKVpdKYay"},
+    "stage": {"endpoint": "wss://ascendai-bridge.stage.straiker.ai/tunnel",
+              "host_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKGHd3fIQ4SHvPRrgykwvRGdm1GmeUMhx2JecwNobxhn"},
+    "prod": {"endpoint": "wss://ascendai-bridge.prod.straiker.ai/tunnel",
+             "host_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOo1Og0g1ySNPvGcpekTrxnLXVc2+2QJ5n3aisivR4X2"},
 }
 DEFAULT_ENV = "prod"
 
 INSTALL_HINTS = [
     "macOS    brew install straiker-ai/tap/ascend-tunnel",
-    "Windows  winget install Straiker.AscendTunnel",
-    "         or: scoop bucket add straiker https://github.com/straiker-ai/scoop-bucket && "
-    "scoop install ascend-tunnel",
+    f"Windows  the .zip for your architecture from {REPO_URL}/releases (winget/Scoop not yet published)",
     f"Linux    the .deb / .rpm (installs a service) or the archive from {REPO_URL}/releases",
     "Docker   docker pull ghcr.io/straiker-ai/ascend-tunnel",
     "verify   gh attestation verify ascend-tunnel_<version>_<os>_<arch>.tar.gz "
@@ -124,11 +126,14 @@ def resolve_endpoint(env: str, endpoint: Optional[str] = None,
     ep = (endpoint or table["endpoint"] or "").strip()
     if not ep.startswith("wss://"):
         raise ValueError(f"the endpoint must be a wss:// URL, not {ep!r}")
-    hk = (host_key or table["host_key"] or "").strip() or None
+    # A custom relay must never inherit another host's trust pin.
+    published = next((e["host_key"] for e in ENVIRONMENTS.values() if e["endpoint"] == ep), None)
+    explicit = (host_key or "").strip()
+    hk = explicit or published or None
     if hk and len(hk.split()) < 2:
         raise ValueError("--host-key must be a public key line: <type> <base64>, e.g. ssh-ed25519 AAAA…")
     return {"env": env, "endpoint": ep, "host_key": hk,
-            "host_key_source": ("flag" if host_key else "built-in" if hk else None)}
+            "host_key_source": ("flag" if explicit else "built-in" if hk else None)}
 
 
 # ----------------------------------------------------------------------------- the allow list
@@ -506,13 +511,13 @@ def parse_check_lines(lines: List[str]) -> Dict[str, Any]:
         rows.append({"status": status, "text": text})
         if status != "INFO":
             continue
-        mk = re.search(r"agent key \([^)]*\):\s*(\S+)", text)
+        mk = re.search(r"agent\s+key \([^)]*\):\s*(\S+)", text)
         if mk:
             key = mk.group(1)
-        mo = re.match(r"org (\S+), agent ([0-9a-f]{8})", text)
+        mo = re.match(r"(?:agent\s+)?org (\S+), agent ([0-9a-f]{8})", text)
         if mo:
             org, aid = mo.group(1).rstrip(","), mo.group(2)
-        mu = re.search(r"app URL for \S+:\s*(\S+?)/\.\.\.", text)
+        mu = re.search(r"(?:app URL for \S+:|app\s+\S+ is reached at)\s*(\S+?)/\.\.\.", text)
         if mu:
             urls.append(mu.group(1))
     counts = {s: sum(1 for r in rows if r["status"] == s) for s in CHECK_STATUSES}

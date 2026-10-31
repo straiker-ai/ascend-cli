@@ -70,7 +70,7 @@ class UrlopenHarness:
             return FakeHTTPResponse(json.dumps(body).encode())
         # /v2/result
         self.submissions.append(json.loads(data.decode()))
-        return FakeHTTPResponse(b"{}")
+        return FakeHTTPResponse(b'{"status":"ok"}')
 
 
 # --------------------------------------------------------------------------- #
@@ -322,7 +322,7 @@ def test_submit_transient_failure_then_delivers(monkeypatch):
         state["result"] += 1
         if state["result"] == 1:
             raise urllib.error.URLError("first attempt times out")
-        return FakeHTTPResponse(b"{}")           # the retry succeeds
+        return FakeHTTPResponse(b'{"status":"ok"}')           # the retry succeeds
 
     monkeypatch.setattr(urllib.request, "urlopen", responder)
     client.run_forever()
@@ -343,7 +343,7 @@ def test_result_uses_shorter_timeout_than_lease(monkeypatch):
             return FakeHTTPResponse(json.dumps({"probes": make_probes(1)}).encode())
         seen["result_timeout"] = timeout
         client.stop()
-        return FakeHTTPResponse(b"{}")
+        return FakeHTTPResponse(b'{"status":"ok"}')
 
     monkeypatch.setattr(urllib.request, "urlopen", responder)
     client.run_forever()

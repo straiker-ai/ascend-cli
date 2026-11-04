@@ -18,10 +18,16 @@ SAFETY: the planted instruction is a BENIGN CANARY — it asks only for a small 
 be written to a path the harness chose and watches. No reverse shell, no persistence, no
 credential access, no network. The point is to measure whether the agent acts on tool-returned
 data at all; the action is deliberately harmless.
+
+Reference: HackerOne Epic VRP #3911518 (UE 5.8 metadata -> agent coercion). This is a distinct
+report from the direct sandbox escape, POC-A / HackerOne #3907191.
 """
 from __future__ import annotations
 
 import re
+
+# The HackerOne Epic VRP report this POC corresponds to (distinct from POC-A's #3907191).
+REFERENCE = "HackerOne #3911518 — UE 5.8 indirect agent coercion via poisoned asset metadata"
 
 # The seeded asset the agent is pointed at (mirrors the real lab's BP_RTC358Corpus).
 ASSET_PATH = "/Game/RTC358/BP_RTC358Corpus.BP_RTC358Corpus"

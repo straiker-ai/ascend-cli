@@ -1,5 +1,8 @@
 # POC-B — indirect agent coercion via poisoned UE project metadata (ENG-2269)
 
+**Reference:** HackerOne Epic VRP **#3911518** (UE 5.8 metadata → agent coercion) — a distinct
+report from the direct sandbox escape (POC-A, HackerOne #3907191).
+
 POC-A (in `../`) is a **direct** sandbox escape: operator-submitted Python breaks out of the
 ProgrammaticToolset sandbox. POC-B is the **indirect** path and a different class of bug: there
 is *no* server exploit. An attacker plants an instruction inside ordinary UE project content —

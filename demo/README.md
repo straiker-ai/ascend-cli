@@ -19,6 +19,12 @@ vhs demo/chat.tape          # talking to an agent
 | `discover.tape` | `--api` with only a base URL, `--curl` import, and a dead host producing a diagnosis rather than a crash. |
 | `chat.tape` | A live recorded session, `/results`, and replaying the transcript. |
 
+### Scenario demos
+
+| Directory | Shows |
+|---|---|
+| [`unreal-mcp/`](unreal-mcp/) | UE 5.8 native-MCP **ProgrammaticToolset sandbox escape** driven through a bespoke Ascend custom adapter, against a faithful local mock (offline) or a live editor. |
+
 ## Before recording
 
 The tapes drive **local** targets so a recording never depends on a third party being up:

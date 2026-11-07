@@ -196,6 +196,10 @@ class ConversationRouter:
     def __init__(self) -> None:
         self._instances: Dict[str, BotAdapter] = {}
         self._locks: Dict[str, threading.Lock] = {}
+        # A caller timeout does not stop an adapter's executor thread. Retain the
+        # real future until it finishes so later probes cannot queue behind work
+        # whose caller has already returned. Reset must not erase this ownership.
+        self._inflight: Dict[str, Any] = {}
         self._guard = threading.Lock()
         self._loop = asyncio.new_event_loop()
         self._loop_thread = threading.Thread(target=self._run_loop, daemon=True)
@@ -225,15 +229,36 @@ class ConversationRouter:
                     "error": f"unknown adapter '{adapter_type}'; "
                              f"known={sorted(ADAPTER_REGISTRY)}", "metadata": {}}
         key = self._key(adapter_type, config_name, conv_key)
+        deadline = time.monotonic() + timeout_s
         inst, lock = self._adapter_for(adapter_type, key)
         # Serialize turns for one conversation; different conversations proceed in parallel.
-        with lock:
-            fut = asyncio.run_coroutine_threadsafe(inst.send_prompt(prompt, config), self._loop)
+        if not lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            return {"response": "", "success": False,
+                    "error": "TimeoutError: waiting for the conversation; this prompt was not sent", "metadata": {}}
+        try:
+            with self._guard:
+                previous = self._inflight.get(key)
+                if previous is not None and not previous.done():
+                    return {"response": "", "success": False,
+                            "error": "Previous turn is still running; this prompt was not sent", "metadata": {}}
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return {"response": "", "success": False,
+                            "error": "TimeoutError: conversation deadline expired; this prompt was not sent", "metadata": {}}
+                fut = asyncio.run_coroutine_threadsafe(inst.send_prompt(prompt, config), self._loop)
+                self._inflight[key] = fut
             try:
-                return fut.result(timeout=timeout_s)
+                return fut.result(timeout=remaining)
             except Exception as e:  # includes timeout
                 return {"response": "", "success": False,
                         "error": f"{type(e).__name__}: {e}", "metadata": {}}
+            finally:
+                if fut.done():
+                    with self._guard:
+                        if self._inflight.get(key) is fut:
+                            self._inflight.pop(key, None)
+        finally:
+            lock.release()
 
     def reset(self, adapter_type: Optional[str] = None) -> int:
         """Drop cached instances (force fresh sessions). Returns count dropped."""

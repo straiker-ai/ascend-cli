@@ -160,3 +160,67 @@ def test_healthy_calls_still_serialize_and_complete_inside_their_deadlines(runti
         thread.join(2)
     assert first_result[0]["response"] == "first" and second["response"] == "second"
     assert values["starts"] == ["first", "second"]
+
+
+@pytest.mark.parametrize("reset", [False, True])
+def test_completed_overdue_response_can_be_released_without_another_turn(runtime, monkeypatch, reset):
+    import asyncio
+    import gc
+    import weakref
+    from dispatch import ADAPTER_REGISTRY
+
+    class Reply(dict):
+        pass
+
+    release, completed = threading.Event(), threading.Event()
+    replies = []
+
+    class Adapter:
+        async def send_prompt(self, prompt, config):
+            await asyncio.to_thread(release.wait, 2)
+            reply = Reply(response=prompt, success=True, metadata={})
+            replies.append(weakref.ref(reply))
+            completed.set()
+            return reply
+
+    monkeypatch.setitem(ADAPTER_REGISTRY, "custom", Adapter)
+    router, send, _ = runtime()
+    try:
+        assert send("first", timeout=0.01)["success"] is False
+        if reset:
+            assert router.reset() == 1
+        release.set()
+        assert completed.wait(1)
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            gc.collect()
+            if replies[0]() is None:
+                break
+            time.sleep(0.005)
+        assert replies[0]() is None
+    finally:
+        release.set()
+
+
+def test_completion_before_callback_registration_does_not_deadlock(runtime, monkeypatch):
+    from concurrent.futures import Future
+    import dispatch
+
+    router, send, _ = runtime()
+    original = dispatch.asyncio.run_coroutine_threadsafe
+
+    def already_complete(coroutine, loop):
+        if coroutine.cr_code.co_name != "send_prompt":
+            return original(coroutine, loop)
+        coroutine.close()
+        future = Future()
+        future.set_result({"success": True, "response": "immediate", "metadata": {}})
+        return future
+
+    monkeypatch.setattr(dispatch.asyncio, "run_coroutine_threadsafe", already_complete)
+    results = []
+    caller = threading.Thread(target=lambda: results.append(send("first")), daemon=True)
+    caller.start()
+    caller.join(1)
+    assert not caller.is_alive()
+    assert results[0]["response"] == "immediate"

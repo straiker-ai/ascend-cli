@@ -247,16 +247,20 @@ class ConversationRouter:
                             "error": "TimeoutError: conversation deadline expired; this prompt was not sent", "metadata": {}}
                 fut = asyncio.run_coroutine_threadsafe(inst.send_prompt(prompt, config), self._loop)
                 self._inflight[key] = fut
+
+            def completed(done):
+                with self._guard:
+                    if self._inflight.get(key) is done:
+                        self._inflight.pop(key, None)
+
+            # Completion may occur after the caller has returned. Register outside
+            # the guard: an already-completed future invokes this synchronously.
+            fut.add_done_callback(completed)
             try:
                 return fut.result(timeout=remaining)
             except Exception as e:  # includes timeout
                 return {"response": "", "success": False,
                         "error": f"{type(e).__name__}: {e}", "metadata": {}}
-            finally:
-                if fut.done():
-                    with self._guard:
-                        if self._inflight.get(key) is fut:
-                            self._inflight.pop(key, None)
         finally:
             lock.release()
 

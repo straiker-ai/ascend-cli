@@ -34,7 +34,8 @@ concurrency:
 
 jobs:
   tests:
-    runs-on: ubuntu-latest
+    # Python 3.9 has a setup-python build for 24.04, but not 26.04.
+    runs-on: ${{ matrix.python == '3.9' && 'ubuntu-24.04' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:

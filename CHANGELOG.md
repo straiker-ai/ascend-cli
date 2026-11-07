@@ -11,6 +11,16 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ## [Unreleased]
 
+### Added
+
+- **Explicit conversation validation.** `adapter validate --prompts-file prompts.json`
+  sends 2–8 prompts through the same adapter instance with one total timeout,
+  including initial authentication. It stops at the first failed or mismatched
+  answer and reports per-turn evidence and answer variation without an extra
+  fresh-session probe. Single-prompt validation and its existing carry check are
+  unchanged. The legacy `adapter validate --help` output intentionally gains this
+  option and clarifies timeout/expect semantics; its reviewed corpus is updated.
+
 ### Fixed
 
 - **Adapter shape guidance distinguishes raw v1 replies from template extraction.**

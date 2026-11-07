@@ -21,6 +21,22 @@ is documented in `docs/CAPABILITY_MATRIX.md`.
 
 ## The `BotAdapter` contract
 
+For a stateful adapter, validate a short conversation as well as the first reply:
+
+```bash
+ascend adapter validate --config mybot --prompts-file prompts.json --timeout 60 --json
+```
+
+`prompts.json` is a JSON array of 2–8 nonempty prompts (at least two distinct,
+at most 8192 characters each; file at most 64 KiB). All turns use one adapter
+instance and conversation. `--timeout` is a total budget including initial auth,
+up to 300 seconds. `--expect`, when supplied, must match every answer. The check
+stops at the first failure or mismatch, reports each attempted turn, and uses
+those answers for variation checking without an extra probe. Choose prompts that
+exercise the target's renewal and continuation behavior; this only proves the
+sequence actually run, not arbitrary expiry or platform-engine execution.
+Omit `--prompts-file` for the existing single-prompt validation behavior.
+
 Every adapter subclasses `runtime/adapters/base.py::BotAdapter` and implements one async method:
 
 ```python

@@ -119,9 +119,10 @@ HARD GATE: run one prompt through a config against the live target
 | `--config` | `CONFIG` | — | config name in configs/ |
 | `--file` | `FILE` | — | path to a config json (instead of --config) |
 | `--adapter` | `ADAPTER` | — | adapter type override (else config['adapter']) |
-| `--prompt` | `PROMPT` | `Hello, what can you help me with?` | — |
-| `--expect` | `EXPECT` | — | substring the response must contain |
-| `--timeout` | `TIMEOUT` | `60.0` | — |
+| `--prompt` | `PROMPT` | — | single prompt (defaults to a greeting) |
+| `--prompts-file` | `PROMPTS_FILE` | — | JSON array of 2–8 prompts on one conversation; at least two distinct; conflicts with --prompt |
+| `--expect` | `EXPECT` | — | substring every checked response must contain |
+| `--timeout` | `TIMEOUT` | `60.0` | seconds; with --prompts-file, one total budget including auth (max 300) |
 
 > example: ascend adapter validate --config mybot --prompt 'hello' --expect 'Bot'
 

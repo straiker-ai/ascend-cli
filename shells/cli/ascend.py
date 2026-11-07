@@ -8853,8 +8853,28 @@ def _describe_shape(result):
 
 
 def cmd_adapter_validate(args):
-    """HARD GATE: run one prompt through the config against the live target."""
+    """Validate a live answer, optionally an explicit same-conversation sequence."""
     from runtime.discovery import validate as V
+    prompts_file = getattr(args, "prompts_file", None)
+    prompt = args.prompt
+    sequence = None
+    if prompts_file:
+        if prompt is not None:
+            _die("pass either --prompt or --prompts-file, not both")
+        try:
+            with Path(prompts_file).expanduser().open("rb") as f:
+                raw = f.read(65537)
+            if len(raw) > 65536:
+                _die("--prompts-file must be at most 64 KiB")
+            sequence = json.loads(raw)
+        except (OSError, ValueError) as e:
+            _die(f"could not read --prompts-file as JSON: {e}")
+        error = V.sequence_input_error(sequence, args.timeout)
+        if error:
+            _die(error)
+        prompt = sequence[0]
+    elif prompt is None:
+        prompt = "Hello, what can you help me with?"
     _say(args, f"Validating {args.config or args.file} against the live target...")
     if args.file and args.config:
         _die("pass either --file or --config, not both")
@@ -8882,7 +8902,8 @@ def cmd_adapter_validate(args):
                                f"  nothing to prove from here — the platform calls this target "
                                f"itself"))
         sys.exit(EXIT_OK)
-    res = V.validate_config(atype, cfg, args.prompt, args.expect, timeout_s=args.timeout)
+    options = {"followup_prompts": sequence[1:]} if sequence is not None else {}
+    res = V.validate_config(atype, cfg, prompt, args.expect, timeout_s=args.timeout, **options)
     # A config can be perfectly correct and still be unassessable: the platform bounds how long each
     # probe may take, and the clock starts when the probe is queued. Say that here, from the one
     # real measurement we have, rather than letting it surface later as a run full of failures that
@@ -8900,7 +8921,8 @@ def cmd_adapter_validate(args):
     # whether a target is provable.
     _const = None
     if res.get("ok") and not res.get("error"):
-        _p = V.prove_answer_varies(atype, cfg, res.get("response"), timeout_s=args.timeout)
+        _p = (res["answer_variation"] if sequence is not None else
+              V.prove_answer_varies(atype, cfg, res.get("response"), timeout_s=args.timeout))
         if _p.get("checked") and not _p.get("varies"):
             _const = (f"the target gave the SAME answer to a second, unrelated question "
                       f"({str(res.get('response'))[:60]!r}) — this config is reading a constant, "
@@ -10553,9 +10575,11 @@ def build_parser():
     s.add_argument("--config", help="config name in configs/")
     s.add_argument("--file", help="path to a config json (instead of --config)")
     s.add_argument("--adapter", help="adapter type override (else config['adapter'])")
-    s.add_argument("--prompt", default="Hello, what can you help me with?")
-    s.add_argument("--expect", default=None, help="substring the response must contain")
-    s.add_argument("--timeout", type=float, default=60.0)
+    s.add_argument("--prompt", default=None, help="single prompt (defaults to a greeting)")
+    s.add_argument("--prompts-file", help="JSON array of 2–8 prompts on one conversation; at least two distinct; conflicts with --prompt")
+    s.add_argument("--expect", default=None, help="substring every checked response must contain")
+    s.add_argument("--timeout", type=float, default=60.0,
+                   help="seconds; with --prompts-file, one total budget including auth (max 300)")
     s.set_defaults(func=cmd_adapter_validate)
 
     # discover

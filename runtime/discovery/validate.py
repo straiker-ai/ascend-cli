@@ -15,8 +15,10 @@ config's headers/cookies — they are never written back into the config on disk
 from __future__ import annotations
 
 import copy
+import math
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -51,6 +53,7 @@ def validate_config(
     *,
     timeout_s: float = 60.0,
     verify_tls: bool = True,
+    followup_prompts: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Run ``config`` against the LIVE target for one prompt (the hard gate).
 
@@ -62,6 +65,10 @@ def validate_config(
             the response text.
         timeout_s: overall budget for the send (and any auth network call).
         verify_tls: pass through to TLS verification for auth + adapter.
+        followup_prompts: opt in to 2–8 total prompts on one conversation. The
+            entire sequence, including initial auth, shares ``timeout_s`` (0–300s).
+            Each answer must be nonempty and satisfy ``expected_substr``. Without
+            this argument the existing single-prompt/carry check is unchanged.
 
     Returns:
         ``{"ok": bool, "response": str, "error": str|None, "matched": bool,
@@ -80,6 +87,10 @@ def validate_config(
     if adapter not in ADAPTER_REGISTRY:
         return {"ok": False, "response": "", "adapter": adapter, "matched": False,
                 "error": f"unknown adapter {adapter!r}; known={sorted(ADAPTER_REGISTRY)}"}
+
+    if followup_prompts is not None:
+        return _validate_sequence(adapter, config, sample_prompt, followup_prompts,
+                                  expected_substr, timeout_s, verify_tls)
 
     merged = _merge_auth(config, timeout_s=min(timeout_s, 20.0), verify_tls=verify_tls)
     if merged.get("_auth_error"):
@@ -120,6 +131,78 @@ def validate_config(
         # adapters.base.platform_window_warning) — so it must survive back to the caller.
         "duration_ms": result.get("duration_ms"),
         "metadata": result.get("metadata", {}),
+    }
+
+
+def sequence_input_error(prompts: Any, timeout_s: float) -> Optional[str]:
+    """Validate bounded sequence input before authentication or target I/O."""
+    if (not isinstance(prompts, list) or not 2 <= len(prompts) <= 8
+            or any(not isinstance(p, str) or not p.strip() or len(p) > 8192 for p in prompts)):
+        return "sequence requires 2–8 nonempty string prompts, each at most 8192 characters"
+    if len({p.strip() for p in prompts}) < 2:
+        return "sequence requires at least two distinct prompts to check answer variation"
+    if (not isinstance(timeout_s, (int, float)) or isinstance(timeout_s, bool)
+            or not math.isfinite(timeout_s) or not 0 < timeout_s <= 300):
+        return "sequence timeout must be finite and greater than 0, at most 300 seconds"
+    return None
+
+
+def _validate_sequence(adapter, config, first, followups, expected, timeout_s, verify_tls):
+    from dispatch import ConversationRouter
+
+    prompts = [first, *followups] if isinstance(followups, list) else None
+    error = sequence_input_error(prompts, timeout_s)
+    if error:
+        return {"ok": False, "response": "", "error": error, "matched": False,
+                "adapter": adapter}
+    started = time.monotonic()
+    deadline = started + timeout_s
+    turns, answered = [], []
+    result = {"response": "", "metadata": {}}
+    matched = True
+    router = None
+    try:
+        merged = _merge_auth(config, timeout_s=min(timeout_s, 20.0), verify_tls=verify_tls)
+        if merged.get("_auth_error"):
+            error = f"auth failed: {merged['_auth_error']}"
+        else:
+            router = ConversationRouter()
+            for index, prompt in enumerate(prompts):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    error = f"sequence deadline exhausted before turn {index + 1}"
+                    break
+                result = router.send(adapter, merged, "discovery-validate", prompt, None, remaining)
+                response = (result.get("response") or "").strip()
+                success = bool(result.get("success")) and bool(response)
+                matched = expected is None or expected in response
+                error = result.get("error")
+                if not success and not error:
+                    error = f"sequence turn {index + 1} produced no successful nonempty answer"
+                turns.append({"turn": index + 1, "success": success, "response": response,
+                              "matched": matched, "error": error,
+                              "duration_ms": result.get("duration_ms")})
+                if success:
+                    answered.append((prompt.strip(), response))
+                if error or not success or not matched:
+                    break
+    finally:
+        if router is not None:
+            router.reset()
+    # Compare only successful answers to different prompts in THIS conversation.
+    # A failed follow-up is a continuity failure, never evidence of a constant.
+    pairs = [(a[1], b[1]) for i, a in enumerate(answered) for b in answered[i + 1:]
+             if a[0] != b[0]]
+    return {
+        "ok": not error and matched and len(answered) == len(prompts),
+        "response": (result.get("response") or "").strip(), "error": error,
+        "matched": matched, "adapter": adapter,
+        "duration_ms": result.get("duration_ms"), "metadata": result.get("metadata", {}),
+        "sequence": {"requested": len(prompts), "completed": len(answered),
+                     "same_conversation": True, "turns": turns,
+                     "duration_ms": round((time.monotonic() - started) * 1000)},
+        "answer_variation": {"checked": bool(pairs),
+                             "varies": any(a != b for a, b in pairs) if pairs else True},
     }
 
 

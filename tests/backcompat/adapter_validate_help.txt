@@ -3,7 +3,8 @@ $ ascend adapter validate --help
 --- stdout
 usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] adapter validate
        [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE] [--config CONFIG]
-       [--file FILE] [--adapter ADAPTER] [--prompt PROMPT] [--expect EXPECT] [--timeout TIMEOUT]
+       [--file FILE] [--adapter ADAPTER] [--prompt PROMPT] [--prompts-file PROMPTS_FILE]
+       [--expect EXPECT] [--timeout TIMEOUT]
 
 options:
   -h, --help            show this help message and exit
@@ -16,8 +17,12 @@ options:
   --config CONFIG       config name in configs/ (default: None)
   --file FILE           path to a config json (instead of --config) (default: None)
   --adapter ADAPTER     adapter type override (else config['adapter']) (default: None)
-  --prompt PROMPT
-  --expect EXPECT       substring the response must contain (default: None)
-  --timeout TIMEOUT
+  --prompt PROMPT       single prompt (defaults to a greeting) (default: None)
+  --prompts-file PROMPTS_FILE
+                        JSON array of 2–8 prompts on one conversation; at least two distinct;
+                        conflicts with --prompt (default: None)
+  --expect EXPECT       substring every checked response must contain (default: None)
+  --timeout TIMEOUT     seconds; with --prompts-file, one total budget including auth (max 300)
+                        (default: 60.0)
 
 example: ascend adapter validate --config mybot --prompt 'hello' --expect 'Bot'

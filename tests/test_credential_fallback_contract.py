@@ -86,6 +86,17 @@ def test_malformed_metadata_never_restores_store_fallback(stores, monkeypatch, m
     assert secrets.get("OTHER") == "synthetic-explicit-secret"
 
 
+def test_nested_metadata_at_default_process_recursion_limit(stores, monkeypatch):
+    monkeypatch.setenv(ENV, '[' * 1100 + ']' * 1100)
+    previous = sys.getrecursionlimit()
+    try:
+        sys.setrecursionlimit(1000)  # pytest raises this; normal fresh processes use 1000.
+        assert secrets.get("BLOCKED") is None
+        assert secrets.load_all() == {}
+    finally:
+        sys.setrecursionlimit(previous)
+
+
 @pytest.mark.parametrize("metadata", ['["BLOCKED"]', '{'])
 def test_native_resolver_child_does_not_leak_or_contact_a_host(tmp_path, metadata):
     home, state = tmp_path / "home", tmp_path / "state"

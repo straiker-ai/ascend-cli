@@ -74,7 +74,7 @@ def _excluded_names():
     parsed = None
     try:
         parsed = json.loads(raw)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, RecursionError):
         pass
     if (not isinstance(parsed, list) or any(not isinstance(name, str)
             or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) is None for name in parsed)):

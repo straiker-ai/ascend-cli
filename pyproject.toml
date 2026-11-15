@@ -33,3 +33,6 @@ packages = ["shells", "shells.cli", "runtime", "runtime.adapters", "runtime.disc
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.setuptools.package-data]
+runtime = ["credential_contract.json"]

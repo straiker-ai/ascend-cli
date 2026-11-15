@@ -57,6 +57,30 @@ import tenant as _tenant
 # config file and makes the store's keys greppable in a support bundle.
 PREFIX = "ASCEND_SECRET_"
 
+# Process-local, names-only handoff from a workspace credential resolver. A name
+# withheld by that resolver must not be resurrected from an older local copy.
+EXCLUSIONS_ENV = "_ASCEND_AGENT_WITHHELD_NAMES"
+
+
+def _excluded_names():
+    """Read lazily: malformed metadata disables store fallback, not CLI startup.
+
+    None denotes an invalid handoff. Explicit environment values still retain
+    their historical priority; no store contents or credential values change.
+    """
+    raw = os.environ.get(EXCLUSIONS_ENV)
+    if not raw:
+        return frozenset()
+    parsed = None
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError, RecursionError):
+        pass
+    if (not isinstance(parsed, list) or any(not isinstance(name, str)
+            or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) is None for name in parsed)):
+        return None
+    return frozenset(parsed)
+
 # ---------------------------------------------------------------------------------------------
 # THE secret-name rule. One place, asked by everything that has to decide whether a header, a
 # body field or a config key carries a credential: `discovery/classify.py` (what a capture
@@ -192,10 +216,13 @@ def load_all() -> Dict[str, Dict[str, Any]]:
     A credential store that silently accepted a world-readable file would quietly undo the only
     thing it is for, so this is loud and returns nothing rather than pretending.
     """
+    excluded = _excluded_names()
+    if excluded is None:
+        return {}
     merged: Dict[str, Dict[str, Any]] = {}
     for p in reversed(_paths()):        # unpinned first, so the current store overrides it
         merged.update(_load_one(p))
-    return merged
+    return {name: record for name, record in merged.items() if name not in excluded}
 
 
 def _load_one(p: Path) -> Dict[str, Dict[str, Any]]:
@@ -233,6 +260,9 @@ def get(name: str) -> Optional[str]:
     from_env = os.environ.get(name)
     if from_env:
         return from_env
+    excluded = _excluded_names()
+    if excluded is None or name in excluded:
+        return None
     rec = load_all().get(name)
     if isinstance(rec, dict):
         val = rec.get("value")

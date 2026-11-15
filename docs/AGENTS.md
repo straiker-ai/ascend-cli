@@ -204,6 +204,15 @@ all HTTP uses one pooled connection, so a second command in the same window cost
 | `ASCEND_NO_CACHE` | disable the response/JWT cache |
 | `ASCEND_NO_SPINNER` / `NO_COLOR` | plain, quiet output |
 | `ASCEND_STATE_DIR` | keys, bridge records, cache (per tenant); the tunnel agent's identity and records (per machine, beside the tenant dirs) |
+| `_ASCEND_AGENT_WITHHELD_NAMES` | JSON array of variable names whose local credential-store fallback is withheld for this process |
+
+The credential handoff contract is versioned in the packaged
+`runtime/credential_contract.json`. Exclusions are read when a credential store is
+consulted. They apply to both current-tenant and pre-pin fallback records; they do
+not delete or rewrite either store. Explicit non-empty environment values still
+win. Without exclusions, lookup behavior is unchanged. Malformed handoff metadata
+disables store fallback for that process while explicit environment values remain
+available; commands that do not resolve credentials need no extra startup check.
 
 ## The CLI versus MCP
 

@@ -189,7 +189,8 @@ class TestEnvironments:
         for env in ("dev", "stage", "prod"):
             r = T.resolve_endpoint(env)
             assert r["endpoint"].startswith("wss://ascendai-bridge.") and r["endpoint"].endswith("/tunnel")
-            assert r["host_key"] is None and r["host_key_source"] is None    # none published yet
+            assert r["host_key"] == T.ENVIRONMENTS[env]["host_key"]
+            assert r["host_key_source"] == "built-in"
         assert T.resolve_endpoint("prod")["endpoint"] == "wss://ascendai-bridge.prod.straiker.ai/tunnel"
         r = T.resolve_endpoint("dev", "wss://relay.example/tunnel", "ssh-ed25519 AAAA")
         assert r == {"env": "dev", "endpoint": "wss://relay.example/tunnel",
@@ -273,7 +274,7 @@ class TestRunner:
         r, notes = T.find_runner("auto", which=lambda n: None, docker_ready=ready)
         assert r is None and notes == ["ascend-tunnel is not on PATH", "docker is not installed"]
         msg = T.no_runner_message(notes)
-        for hint in ("brew install straiker-ai/tap/ascend-tunnel", "winget install Straiker.AscendTunnel",
+        for hint in ("brew install straiker-ai/tap/ascend-tunnel", "winget/Scoop not yet published",
                      "docker pull ghcr.io/straiker-ai/ascend-tunnel", "gh attestation verify"):
             assert hint in msg
 

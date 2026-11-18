@@ -308,8 +308,7 @@ error: capture did not deliver the prompt to the target, so no contract can be d
 ```
 
 The alternative, emitting a plausible-looking config built from page bootstrap
-traffic, produces a confidently wrong answer. Measured on a live hunt across 20
-public sites, the naive version "succeeded" on sites where it had actually typed
+traffic, produces a confidently wrong answer. In practice, the naive version "succeeded" on pages where it had actually typed
 into a search box and captured nothing.
 
 ### Picking the right input

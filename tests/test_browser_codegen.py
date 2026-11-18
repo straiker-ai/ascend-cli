@@ -7,7 +7,7 @@ prompt and reads the reply — so it knows the launcher, the chat frame, the inp
 method and where the reply renders. This turns that recipe into a validated browser adapter, with
 no hand-built selectors.
 
-Verified live end to end against a real anti-automation target: `adapter build --url` captured, the
+Covers end to end an anti-automation target: `adapter build --url` captured, the
 HTTP replay 403'd, a browser adapter was generated from the recipe, and it drove a real reply.
 """
 from __future__ import annotations

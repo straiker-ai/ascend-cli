@@ -92,7 +92,7 @@ def test_scrt2_honours_a_warmup_written_under_the_legacy_key():
 
     The `--warmup` flag and the create-then-send derivation write the key `warmup`; this adapter
     used to read only `warmup_message`, so a config carrying `warmup` skipped the warm-up and every
-    probe was scored against the consent banner (measured on a live Agentforce wire). It now reads
+    probe was scored against the consent banner. It now reads
     through `warmup_text()`, which accepts every key a writer has used.
 
     Mutation anchor: revert the adapter to `config.get("warmup_message", "")` and this goes red.

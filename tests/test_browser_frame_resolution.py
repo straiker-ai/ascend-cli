@@ -7,7 +7,7 @@ selector on the page can reach — the input lives several frames deep. Resolvin
 LOUD: the old code silently fell back to the main page, where `textarea` matched a hidden reCAPTCHA
 field and the run timed out with a misleading error.
 
-Verified live against a real anti-automation target (a Genesys-nested widget): frame-by-URL resolved the
+Covers an anti-automation target (a Genesys-nested widget): frame-by-URL resolved the
 chat frame and the adapter drove a real reply, where HTTP replay of the same request 403s.
 """
 from __future__ import annotations

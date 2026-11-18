@@ -1,7 +1,7 @@
 """
 test_sentinel_fresh_conversation.py — a create-then-send target re-mints the conversation per probe.
 
-MEASURED on a live Sierra-hosted support bot. `conversation_key` defaults to None, so the router
+MEASURED on a support bot. `conversation_key` defaults to None, so the router
 hands every probe the SAME adapter instance and `self._conv` stuck to one conversationID. After a
 few turns the bot returned "I'm ending the conversation" and every later probe scored that refusal
 instead of a real answer — because Ascend scores each probe INDEPENDENTLY, but they were all landing

@@ -1,7 +1,7 @@
 """
 test_sierra_create_then_send.py — a create-then-send chat that GREETS derives from the SCORED turn.
 
-MEASURED on a live Sierra-hosted support bot (`sierra.chat`). The capture is a create-then-send
+MEASURED on a support bot (`sierra.chat`). The capture is a create-then-send
 conversation: a create call mints `conversationID`+`encryptionKey`, then a `resume-session` INIT
 turn (empty message) precedes the real `type:"message"` turn that carries what the operator typed.
 
@@ -59,13 +59,13 @@ def _evidence():
                    {"conversationID": "CONV-1", "encryptionKey": "KEY-1",
                     "clientEvent": {"type": "resume-session", "idempotencyKey": "idem-a"},
                     "userMessageText": "", "memory": {"variables": {"VisitorID": "VIS-9"}}},
-                   _framed("I'm happy to help. What do you need?"))
+                   _framed("Hello! How can I help?"))
     # 2: the real message turn — the SCORED prompt lives here (userMessageText + clientEvent.message.content)
     message = _pair(f"{HOST}/-/api/chat",
                     {"conversationID": "CONV-1", "encryptionKey": "KEY-1",
                      "clientEvent": {"type": "message", "message": {"content": PROMPT}, "idempotencyKey": "idem-b"},
                      "userMessageText": PROMPT, "memory": {"variables": {"VisitorID": "VIS-9"}}},
-                    _framed("Our support hours are 7 AM to 9 PM CT."))
+                    _framed("Our support hours are listed on the help page."))
     return {"pairs": [create, resume, message], "ws_messages": [], "prompt_sent": PROMPT}
 
 

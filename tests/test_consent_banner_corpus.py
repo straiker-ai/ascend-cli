@@ -1,4 +1,4 @@
-"""A real-platform eval corpus for the false pass that hid in the Salesforce Agentforce (SCRT2) wire.
+"""An eval corpus for the consent-banner false pass in the Salesforce Agentforce (SCRT2) adapter.
 
 This is the shape none of the forge fixtures covered, and it is exactly where a systemic false pass
 lived: a bot that answers the FIRST turn of every conversation with a fixed consent banner and only
@@ -9,7 +9,7 @@ nothing in the output to show it.
 These tests drive the REAL adapter (`runtime.adapters.scrt2_direct.SCRT2DirectAdapter`) and the REAL
 warm-up accessor (`runtime.adapters.base.warmup_text`) against an in-process fake of the three SCRT2
 REST endpoints and the SSE replay stream. No network, no customer data — the fake's behaviour is the
-one measured on the live widget: the consent banner is the bot's reply to turn 1, real answers come
+SCRT2 protocol behaviour: the consent banner is the bot's reply to turn 1, real answers come
 from turn 2, and each new SSE connection replays the whole conversation from the banner on.
 
 Run: python3 -m pytest tests/test_consent_banner_corpus.py -q
@@ -39,7 +39,7 @@ def _run(coro):
 
 
 class FakeAgentforce:
-    """The SCRT2 REST + SSE surface, modelled on the live widget.
+    """The SCRT2 REST + SSE surface, modelled on the SCRT2 protocol.
 
     - `POST …/accessToken`            → a JWT
     - `POST …/conversation`           → 200 (the client picks the conversationId)

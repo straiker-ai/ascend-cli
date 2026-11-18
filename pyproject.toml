@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "Proprietary"}
 dependencies = [
-    "requests>=2.32.0",
+    "requests>=2.34.2",
     "websockets>=12.0",
 ]
 

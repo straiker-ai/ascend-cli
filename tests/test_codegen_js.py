@@ -361,3 +361,67 @@ class TestScaffold:
     def test_the_shape_of_everything_else(self, kind):
         assert G.shape_of({"adapter": kind}) == (G.SCAFFOLD if kind else "direct_api")
         assert G.shape_of({"adapter": "api"}) == "direct_api"
+
+
+# --- a target that logs in: the login-capable scaffold, never a thin passthrough ---------------
+OAUTH = {"adapter": "direct_api", "endpoint": "https://bot.example.com/api/chat", "method": "POST",
+         "body": {"message": "{{PROMPT}}"}, "response_path": "reply",
+         "auth": {"type": "oauth2", "grant": "client_credentials",
+                  "token_url": "https://idp.example.com/oauth/token",
+                  "client_secret_ref": "env:CLIENT_SECRET"}}
+CSRF = {"adapter": "direct_api", "endpoint": "https://bot.example.com/api/chat",
+        "body": {"message": "{{PROMPT}}"}, "response_path": "reply",
+        "auth": {"type": "csrf", "bootstrap_url": "https://bot.example.com/login", "into_header": "X-CSRF"}}
+MULTIHOP = {"adapter": "direct_api", "endpoint": "https://bot.example.com/api/chat",
+            "body": {"message": "{{PROMPT}}"}, "response_path": "reply",
+            "auth": {"type": "derived_multihop", "steps": [{"url": "https://bot.example.com/a"},
+                                                           {"url": "https://bot.example.com/b"}]}}
+LOGINS = [OAUTH, CSRF, MULTIHOP]
+
+
+class TestLoginScaffold:
+    """A handshake the engine performs itself (oauth2 / csrf / derived_multihop) gets a login
+    scaffold: the mint/echo structure plus a pure-JS PKCE helper, not the per-adapter passthrough
+    that would 401 on every probe."""
+
+    @pytest.mark.parametrize("cfg", LOGINS)
+    def test_a_dynamic_auth_contract_is_the_login_shape(self, cfg):
+        assert G.is_login_shape(cfg) is True
+        plan = G.plan(cfg)
+        assert plan["shape"] == G.LOGIN and plan["shape"] == "login"
+        assert plan["finished"] is False          # the operator still writes the login body
+
+    @pytest.mark.parametrize("cfg", LOGINS)
+    def test_the_login_scaffold_carries_the_pkce_helper_and_the_mint(self, cfg):
+        src = G.generate_adaptor(cfg)
+        assert "function pkceChallenge(" in src and "function mintCredential(" in src
+        assert "host.state.getOrMint(" in src and "host.http.request(" in src
+
+    @pytest.mark.parametrize("cfg", LOGINS)
+    def test_the_login_scaffold_passes_the_local_gate(self, cfg):
+        """The gate-accepts proof on the operator's side: lint_source mirrors the publish gate
+        (banned identifiers, one sendTurn, no export). The engine gate is proven live."""
+        assert AD.lint_source(G.generate_adaptor(cfg)) == []
+
+    def test_the_captured_handshake_is_described_without_a_secret(self):
+        src = G.generate_adaptor(OAUTH)
+        assert src.startswith("// @ts-check\n// UNFINISHED")
+        assert "'oauth2'" in src and "client_credentials" in src
+        assert "idp.example.com" in src          # the host, as a hint
+        assert "env:CLIENT_SECRET" not in src and "CLIENT_SECRET" not in src   # never the ref
+
+    def test_a_static_credential_is_not_a_login(self):
+        static = {"adapter": "direct_api", "endpoint": "https://bot.example.com/api/chat",
+                  "body": {"message": "{{PROMPT}}"}, "response_path": "reply",
+                  "auth": {"type": "static", "mode": "bearer", "value_ref": "env:T"}}
+        assert G.is_login_shape(static) is False
+        assert G.plan(static)["shape"] == "direct_api" and G.plan(static)["finished"] is True
+        assert "mintCredential" not in G.generate_adaptor(static)
+
+    def test_two_static_credentials_as_a_list_are_still_a_passthrough(self):
+        twolist = {"adapter": "direct_api", "endpoint": "https://bot.example.com/api/chat",
+                   "body": {"message": "{{PROMPT}}"}, "response_path": "reply",
+                   "auth": [{"type": "static", "mode": "custom", "name": "x", "value_ref": "env:A"},
+                            {"type": "static", "mode": "bearer", "value_ref": "env:B"}]}
+        assert G.is_login_shape(twolist) is False
+        assert G.plan(twolist)["shape"] == "direct_api"

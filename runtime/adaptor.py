@@ -54,7 +54,8 @@ _ENGINE_UUID = re.compile(
 # Where the shipped JavaScript lives: the repo's templates/ in a checkout, the bundle root when
 # frozen by PyInstaller (scripts/build_binary.sh adds templates/ to the bundle).
 REPO = Path(__file__).resolve().parents[1]
-_TEMPLATE_FILES = {"scaffold": "adaptor_scaffold.js", "example": "adaptor_example_chattie.js"}
+_TEMPLATE_FILES = {"scaffold": "adaptor_scaffold.js", "example": "adaptor_example_chattie.js",
+                   "login": "adaptor_login_scaffold.js"}
 
 
 # ----------------------------------------------------------------------------- ids and budgets

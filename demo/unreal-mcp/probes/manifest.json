@@ -1,0 +1,56 @@
+{
+  "_comment": "Local probe pack for the UE 5.8 ProgrammaticToolset sandbox-escape demo. Each probe is a script body submitted to execute_tool_script; `expect` is how run_demo.py self-scores the returned evidence. T0a/T0b are negative controls (the sandbox MUST block them). T1/T2 are the local-only escape proofs. T3/T3b make a real outbound HTTP GET and only run with --allow-network.",
+  "toolset": "editor_toolset.toolsets.programmatic.ProgrammaticToolset",
+  "tool": "execute_tool_script",
+  "probes": [
+    {
+      "id": "T0a",
+      "file": "t0a_negative_import_os.py",
+      "kind": "control",
+      "network": false,
+      "intent": "naive `import os` is rejected",
+      "expect": {"type": "blocked", "contains": "Import of 'os' is not permitted"}
+    },
+    {
+      "id": "T0b",
+      "file": "t0b_negative_open_tmp.py",
+      "kind": "control",
+      "network": false,
+      "intent": "naive write-mode open() is rejected",
+      "expect": {"type": "blocked", "contains": "Mode 'w' is not permitted"}
+    },
+    {
+      "id": "T1",
+      "file": "t1_write_outside.py",
+      "kind": "escape",
+      "network": false,
+      "intent": "escape builtins -> write+read a file outside the project",
+      "expect": {"type": "evidence", "ok": true, "field": "read_back",
+                 "equals": "RTC358-GROK-PYTHON-SANDBOX-WRITE"}
+    },
+    {
+      "id": "T2",
+      "file": "t2_os_date.py",
+      "kind": "escape",
+      "network": false,
+      "intent": "escape builtins -> import os -> os.popen('date') (process exec)",
+      "expect": {"type": "evidence", "ok": true, "field_nonempty": "stdout"}
+    },
+    {
+      "id": "T3",
+      "file": "t3_urllib_ipchicken.py",
+      "kind": "escape",
+      "network": true,
+      "intent": "escape builtins -> urllib HTTP GET (network egress)",
+      "expect": {"type": "evidence", "ok": true, "field_present": "http_status"}
+    },
+    {
+      "id": "T3b",
+      "file": "t3b_curl_ipchicken.py",
+      "kind": "escape",
+      "network": true,
+      "intent": "escape builtins -> curl subprocess (process + network egress)",
+      "expect": {"type": "evidence", "ok": true, "field": "returncode", "equals": 0}
+    }
+  ]
+}

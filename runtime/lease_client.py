@@ -75,6 +75,10 @@ class LeaseClient:
         # server-side hold jitter during a probe drought into a "lease error" storm. Only a hold
         # that blows past THIS ceiling is genuinely the platform holding too long.
         self.http_timeout = (self.wait_ms / 1000) + self.lease_margin
+        if self.qpm and self.qpm > 0:
+            self._min_interval = 60.0 / self.qpm
+        if self.capture_path:
+            Path(self.capture_path).parent.mkdir(parents=True, exist_ok=True)
 
     def _bump(self, key: str, n: int = 1) -> None:
         """Increment a counter under the lock. Worker threads race on the same stats dict, and
@@ -82,10 +86,6 @@ class LeaseClient:
         `bridge ls` storm heuristic both read these, so a lost update would misreport."""
         with self._stats_lock:
             self.stats[key] += n
-        if self.qpm and self.qpm > 0:
-            self._min_interval = 60.0 / self.qpm
-        if self.capture_path:
-            Path(self.capture_path).parent.mkdir(parents=True, exist_ok=True)
 
     # ---- transport ----------------------------------------------------------
     def _post(self, url: str, payload: Dict[str, Any],
@@ -123,7 +123,11 @@ class LeaseClient:
         delay = 1.0
         for i in range(attempts):
             try:
-                self._submit(request_id, msg_id, status_code, body)
+                receipt = self._submit(request_id, msg_id, status_code, body)
+                if not isinstance(receipt, dict) or receipt.get("status") != "ok":
+                    self._bump("submit_errors")
+                    logger.warning("submit_result returned an invalid acknowledgement for %s", request_id)
+                    return False
                 self._bump("delivered")
                 return True
             except Exception as e:  # noqa: BLE001 - any transport error is retryable here
@@ -144,8 +148,8 @@ class LeaseClient:
             return
         with self._rate_lock:
             wait = self._min_interval - (time.time() - self._last_call)
-            if wait > 0:
-                time.sleep(wait)
+            if wait > 0 and self._stop.wait(timeout=wait):
+                return
             self._last_call = time.time()
 
     # ---- capture ------------------------------------------------------------
@@ -222,6 +226,8 @@ class LeaseClient:
                     logger.warning("lease error %s, retry in %ss", e, backoff)
                     self._sleep(backoff); backoff = min(backoff * 2, 30); continue
 
+                if self._stop.is_set():
+                    break
                 if not printed_ready:
                     logger.info("ready — first lease OK; watching for probes")
                     printed_ready = True
@@ -243,6 +249,8 @@ class LeaseClient:
         self._stop.wait(timeout=seconds)
 
     def _process(self, probe: Dict[str, Any]) -> None:
+        if self._stop.is_set():
+            return
         request_id = probe.get("request_id")
         msg_id = probe.get("msg_id")
         message = probe.get("message", {})
@@ -250,6 +258,8 @@ class LeaseClient:
         self._capture("probe", {"request_id": request_id, "message": message})
 
         self._throttle()
+        if self._stop.is_set():
+            return
         try:
             status_code, body = self.handler(message)
         except Exception as e:

@@ -411,6 +411,12 @@ def _read_ansi_c_quoted(text: str, i: int) -> Tuple[str, int]:
     )
 
 
+_CURL_COMMAND_START = re.compile(
+    r"[ \t]*(?:\$[ \t]+)?(?:sudo[ \t]+)?(?:[^;&|\s'\"]*[/\\])?curl(?:\.exe)?(?=\s|$)", re.I
+)
+_MULTI_REQUEST = "This cURL input contains multiple requests. Import one request at a time."
+
+
 def _tokenize(text: str) -> List[str]:
     """Split a shell command line into argv, the way bash would.
 
@@ -421,9 +427,20 @@ def _tokenize(text: str) -> List[str]:
     tokens: List[str] = []
     buf: List[str] = []
     started = False
+    seen_command = _CURL_COMMAND_START.match(text) is not None
+    comment_end = 0
     i, n = 0, len(text)
     while i < n:
         c = text[i]
+        # The quoted and escaped branches below consume complete operands. Only
+        # an unquoted shell boundary can introduce another command.
+        if c == "#" and not started and i >= comment_end:
+            newline = text.find("\n", i)
+            comment_end = n if newline < 0 else newline
+        if c in "\n\r;&|" and i >= comment_end and _CURL_COMMAND_START.match(text, i + 1):
+            if seen_command:
+                raise CurlParseError(_MULTI_REQUEST)
+            seen_command = True
         if c in " \t\r\n":
             if started:
                 tokens.append("".join(buf))
@@ -562,6 +579,7 @@ def _parse_curl(curl_text: str) -> Dict[str, Any]:
     unknown: List[str] = []
     warnings: List[str] = []
     extra_urls: List[str] = []
+    next_transfer = False
 
     def _need_value(flag: str, it: List[str], i: int) -> Tuple[str, int]:
         if i + 1 >= len(it):
@@ -574,6 +592,8 @@ def _parse_curl(curl_text: str) -> Dict[str, Any]:
     i = 0
     while i < len(args):
         tok = args[i]
+        if tok in ("--next", "-:"):
+            next_transfer = True
         if tok == "--":
             i += 1
             continue
@@ -716,6 +736,8 @@ def _parse_curl(curl_text: str) -> Dict[str, Any]:
             "no URL found in the curl command; add the target URL "
             "(e.g. https://host/api/chat) and retry"
         )
+    if extra_urls and next_transfer:
+        raise CurlParseError(_MULTI_REQUEST)
     if extra_urls:
         warnings.append(
             f"multiple URLs given ({[url] + extra_urls}); using the first — "

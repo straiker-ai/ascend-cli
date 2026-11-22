@@ -150,14 +150,35 @@ def is_serving(app_id: str) -> bool:
     return _state_of(alive, age) == "serving"
 
 
+def _resolvable(name: str) -> bool:
+    """Whether the relay will find a value for `env:NAME`.
+
+    The relay resolves a reference in two places (`layers.auth.resolve_secret_ref`): its
+    environment, then this tenant's captured-credential store. This check has to ask the same two,
+    in the same order. It used to ask the environment alone, so a target registered from a capture
+    -- whose cookie `target add` had just put in the store under the very name the config
+    references -- was refused a relay that would have authenticated. MEASURED 2026-11-21: the run
+    was created anyway, sat with nothing leasing, and took about 80 seconds of hand repair before
+    its first probe was answered.
+    """
+    if os.environ.get(name):
+        return True
+    try:
+        import target_secrets as _store
+        return bool(_store.get(name))
+    except Exception:                       # no store, or one that cannot be read: not resolvable
+        return False
+
+
 def _unresolved_env_refs(config: str):
-    """Every `env:NAME` in the config whose variable is absent from THIS process's environment.
+    """Every `env:NAME` in the config the relay could not resolve: absent from THIS process's
+    environment AND from this tenant's captured-credential store (see `_resolvable`).
 
     A relay inherits os.environ, so a config that authenticates by `env:` reference works only in
-    a shell that exports it. Started from a shell that does not, the relay came up healthy and
-    then got a 401 from the target on every single probe -- which scores as no findings, i.e. the
-    exact false pass the whole design is meant to prevent. Refusing to start, and naming the
-    variable, turns a silent wrong answer into an obvious one.
+    a shell that exports it, or for a credential the store holds. Started with neither, the relay
+    came up healthy and then got a 401 from the target on every single probe -- which scores as no
+    findings, i.e. the exact false pass the whole design is meant to prevent. Refusing to start,
+    and naming the variable, turns a silent wrong answer into an obvious one.
     """
     import json as _json
     import re as _re
@@ -170,7 +191,7 @@ def _unresolved_env_refs(config: str):
     except Exception:
         return []
     names = sorted(set(_re.findall(r"env:([A-Za-z_][A-Za-z0-9_]*)", blob)))
-    return [n for n in names if not os.environ.get(n)]
+    return [n for n in names if not _resolvable(n)]
 
 
 def start(app_id: str, *, config: str, adapter: Optional[str], api_key: str,
@@ -205,9 +226,11 @@ def start(app_id: str, *, config: str, adapter: Optional[str], api_key: str,
         return {"app_id": app_id, "error": (
             f"config {config!r} authenticates by environment reference, but "
             f"{'these variables are' if len(missing) > 1 else 'this variable is'} not set in this "
-            f"shell: {names}. The bridge would start and then be refused by the target on every "
-            f"probe, which scores as a clean run that measured nothing. "
-            f"Export {'them' if len(missing) > 1 else 'it'} and start again."),
+            f"shell and this tenant's credential store has no value for "
+            f"{'them' if len(missing) > 1 else 'it'}: {names}. The bridge would start and then be "
+            f"refused by the target on every probe, which scores as a clean run that measured "
+            f"nothing. Export {'them' if len(missing) > 1 else 'it'}, or capture the target again, "
+            f"and start again."),
             "missing_env": missing}
     # Resolve the config HERE, in the operator's shell, and hand the child an ABSOLUTE path.
     # The child is spawned with cwd=REPO (below) while `config_dirs()` searches `Path.cwd()/configs`

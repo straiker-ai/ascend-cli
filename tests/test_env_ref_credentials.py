@@ -12,6 +12,11 @@ line. A credential-hygiene feature that pushes you back to plaintext is worse th
   2. A relay inherits os.environ. Started from a shell that does not export the variable the config
      references, it came up healthy and was then refused by the target on every probe — which
      scores as no findings, the exact false pass the design exists to prevent.
+
+  3. The check for (2) asked the environment alone. The relay asks the environment and then this
+     tenant's captured-credential store, which is where `target add` puts a cookie it withheld
+     from the config. So a target registered from a capture was refused a relay that would have
+     authenticated, and its run was created with nothing leasing.
 """
 import sys
 from pathlib import Path
@@ -94,6 +99,92 @@ class TestRelayRefusesUnresolvableRefs:
         for n in ("ONE", "TWO"):
             monkeypatch.delenv(n, raising=False)
         assert supervisor._unresolved_env_refs("gated") == ["ONE", "TWO"]
+
+
+class TestTheStartCheckAsksWhereTheRelayAsks:
+    """The relay resolves `env:NAME` from its environment, then from the tenant's store. The
+    check that decides whether to start it must give the same answer for every combination."""
+
+    NAME = "ASCEND_SECRET_EXAMPLE_TEST_COOKIE"
+    CONFIG = '{"endpoint":"http://x/chat","auth":{"type":"static","mode":"headers",' \
+             '"headers":{"Cookie":"env:ASCEND_SECRET_EXAMPLE_TEST_COOKIE"}}}'
+
+    @pytest.fixture
+    def store(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ASCEND_STATE_DIR", str(tmp_path / "state"))
+        monkeypatch.delenv(self.NAME, raising=False)
+        cfg = tmp_path / "captured.json"
+        cfg.write_text(self.CONFIG, encoding="utf-8")
+        import configs
+        monkeypatch.setattr(configs, "resolve_config_path", lambda ref: cfg)
+        monkeypatch.setattr(supervisor, "is_running", lambda a: False)
+        import target_secrets
+        return target_secrets
+
+    def _relay_resolves(self):
+        from layers.auth import AuthError, resolve_secret_ref
+        try:
+            return bool(resolve_secret_ref("env:" + self.NAME))
+        except AuthError:
+            return False
+
+    @pytest.mark.parametrize("in_env,in_store", [(False, False), (True, False), (False, True), (True, True)])
+    def test_the_check_and_the_relay_agree(self, store, monkeypatch, in_env, in_store):
+        if in_store:
+            store.record(self.NAME, "sid=stored", host="example.test", header="Cookie")
+        if in_env:
+            monkeypatch.setenv(self.NAME, "sid=exported")
+        unresolved = supervisor._unresolved_env_refs("captured")
+        assert (unresolved == []) is self._relay_resolves()
+        assert unresolved == ([] if (in_env or in_store) else [self.NAME])
+
+    def test_a_captured_cookie_in_the_store_lets_the_relay_start(self, store, monkeypatch):
+        store.record(self.NAME, "sid=stored", host="example.test", header="Cookie")
+        spawned = []
+
+        class Child:
+            pid = 4242
+            def poll(self):
+                return None
+
+        def popen(argv, **kw):
+            spawned.append((argv, kw["env"]))
+            return Child()
+
+        monkeypatch.setattr(supervisor.subprocess, "Popen", popen)
+        monkeypatch.setenv("ASCEND_STARTUP_GRACE_S", "0")
+        r = supervisor.start("aapp_test", config="captured", adapter=None, api_key="k")
+        assert "error" not in r and r.get("pid") == 4242
+        assert len(spawned) == 1
+        argv, env = spawned[0]
+        assert "sid=stored" not in " ".join(argv), "the value never rides on argv"
+        assert self.NAME not in env, "the relay reads the store itself; nothing is exported for it"
+
+    def test_a_reference_in_neither_place_is_refused_and_both_places_are_named(self, store, monkeypatch):
+        def popen(*a, **kw):
+            raise AssertionError("a relay was spawned for a reference nothing can resolve")
+        monkeypatch.setattr(supervisor.subprocess, "Popen", popen)
+        r = supervisor.start("aapp_test", config="captured", adapter=None, api_key="k")
+        assert r["missing_env"] == [self.NAME]
+        assert "not set in this shell" in r["error"] and "credential store" in r["error"]
+        assert supervisor.read_pid("aapp_test") is None, "a refused start leaves no relay record"
+
+    def test_a_store_that_cannot_be_read_counts_as_unresolved(self, store, monkeypatch):
+        store.record(self.NAME, "sid=stored", host="example.test", header="Cookie")
+        def broken(name):
+            raise OSError("unreadable")
+        monkeypatch.setattr(store, "get", broken)
+        assert supervisor._unresolved_env_refs("captured") == [self.NAME]
+
+    def test_an_empty_stored_value_counts_as_unresolved(self, store, tmp_path):
+        store.record(self.NAME, "sid=stored", host="example.test", header="Cookie")
+        import json
+        path = store.store_path()
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data[self.NAME]["value"] = ""
+        path.write_text(json.dumps(data), encoding="utf-8")
+        assert supervisor._unresolved_env_refs("captured") == [self.NAME]
+        assert self._relay_resolves() is False
 
 
 def test_the_login_exchange_actually_calls_the_resolver():

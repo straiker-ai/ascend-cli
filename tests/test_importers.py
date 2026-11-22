@@ -17,6 +17,7 @@ Offline by construction: curl parsing never touches the network, and
 `requests.Session`.
 """
 import json
+from pathlib import Path
 import sys
 
 import pytest
@@ -343,6 +344,25 @@ class TestBodyEncodings:
 
 
 class TestCurlErrors:
+    @pytest.mark.parametrize("reader", [from_curl, explain_curl])
+    def test_captured_two_request_file_is_refused_before_conversion(self, reader):
+        captured = (Path(__file__).parent / "fixtures/multi-request.curl").read_text()
+        with pytest.raises(CurlParseError, match="contains multiple requests"):
+            reader(captured)
+
+    @pytest.mark.parametrize("separator", ["; ", " && ", " --next ", " -: "])
+    def test_inline_request_boundaries_are_refused(self, separator):
+        captured = (Path(__file__).parent / "fixtures/multi-request.curl").read_text()
+        first, second = captured.strip().split("\n\n")
+        if separator.strip() in {"--next", "-:"}:
+            second = second.partition(" ")[2]
+        with pytest.raises(CurlParseError, match="contains multiple requests"):
+            explain_curl(first + separator + second)
+
+    def test_quoted_text_and_continuations_are_one_request(self):
+        original = MULTILINE_CURL.replace("What is my order status?", "show curl; curl help")
+        assert explain_curl(original)["prompt_value"] == "show curl; curl help"
+
     """Every failure is a readable sentence with a next action, never a traceback."""
 
     @pytest.mark.parametrize("bad,expected", [

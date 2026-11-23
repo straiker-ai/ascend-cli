@@ -137,6 +137,13 @@ class SSEStreamAdapter(BotAdapter):
             s = requests.Session()
             s.headers.update(config.get("headers", {}) or {})
             self._session = s
+        else:
+            # A credential re-acquired mid-run arrives as a new header value in the config. The
+            # session used to keep the headers it was built with, so after a 401 the relay minted
+            # a fresh token and then sent the prompt again with the expired one (measured: token
+            # endpoint called twice, the same dead bearer sent twice). Cookies and the connection
+            # are kept; only the header values follow the config.
+            self._session.headers.update(config.get("headers", {}) or {})
         return self._session
 
     def _reset_session(self) -> None:
@@ -295,8 +302,12 @@ class SSEStreamAdapter(BotAdapter):
                 if resp.status_code >= 400:
                     detail = resp.text[:500]
                     resp.close()
+                    # The status goes with the failure. Without it the relay shaped every refusal
+                    # by the target as a 502, so a 401 never reached the `reauth_on_401` lifecycle
+                    # (an expired token was never re-minted) and a 429 was never retried.
                     return self._fail(
-                        f"HTTP {resp.status_code}: {detail}", start, adapter="sse_stream"
+                        f"HTTP {resp.status_code}: {detail}", start, adapter="sse_stream",
+                        status_code=resp.status_code,
                     )
 
                 text, truncated, stalled = self._read_stream(resp, stream_cfg, deadline)

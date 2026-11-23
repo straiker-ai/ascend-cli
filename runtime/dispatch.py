@@ -31,6 +31,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -181,9 +182,31 @@ def shape_result(adapter_result: Dict[str, Any], config: Dict[str, Any]) -> Tupl
     if not ok:
         body["_error"] = adapter_result.get("error", "adapter failure")
         # honour a real upstream status if the adapter reported one
-        status = (meta or {}).get("status_code")
-        return (int(status) if isinstance(status, int) else 502), body
+        status = upstream_status(meta, adapter_result.get("error"))
+        return (status if status is not None else 502), body
     return 200, body
+
+
+_HTTP_STATUS_IN_ERROR = re.compile(r"^\s*HTTP(?: error)?:?\s+(\d{3})\b")
+
+
+def upstream_status(meta: Any, error: Any) -> Optional[int]:
+    """The status the TARGET answered with, for a failed call: the adapter's own `status_code`
+    when it reported one, else the status its error text opens with ("HTTP 401: ...",
+    "HTTP error: 429 Client Error ..."), else None.
+
+    MEASURED 2026-11-22: a target whose token lasts 60 s answered `401 token expired` to four
+    attack prompts. The streaming adapter reported the failure without its status, the relay
+    shaped it as 502, and the `reauth_on_401` lifecycle, which asks "was that a 401?", was never
+    told. No token was re-minted and every prompt failed. Adapters that do not carry the status
+    still say it in their error text, so it is read from there rather than lost."""
+    status = (meta or {}).get("status_code") if isinstance(meta, dict) else None
+    if isinstance(status, int) and not isinstance(status, bool):
+        return status
+    found = _HTTP_STATUS_IN_ERROR.match(str(error or ""))
+    if found and 400 <= int(found.group(1)) <= 599:
+        return int(found.group(1))
+    return None
 
 
 class ConversationRouter:

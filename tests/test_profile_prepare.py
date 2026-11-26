@@ -500,3 +500,56 @@ def test_actual_cli_private_output_prints_only_metadata(transport, tmp_path, mon
     assert all(value not in shown for value in ENV.values())
     assert all(field not in out for field in ("contract", "facts", "read_observations", "observed_inputs"))
     assert json.loads(path.read_bytes())["observed_inputs"][0]["value"] == SHARE
+
+
+# --------------------------------------------------------------------------- a tool's input schema is not a credential
+# MEASURED 2026-11-25: the Doppelganger private-banking workspace lists a tool whose input schema has a `client_id`
+# property. The sanitizer read the property NAME as a credential field and its definition's `"type": "string"` as an
+# unbound credential value (inputs_required / source_credential_binding_required), so a profile the operator had supplied
+# both values for could not be prepared; the other four workspaces, without such a name, prepared. The workspace below is
+# that read as served (fixtures/profile_doppelganger_tool_schema_workspace.json; private values replaced).
+CAPTURED = json.loads((Path(__file__).parent / "fixtures" / "profile_doppelganger_tool_schema_workspace.json").read_text())
+
+
+def _captured_workspace():
+    workspace = deepcopy(CAPTURED["workspace"])
+    workspace.update(slug="chosen", share_id=SHARE)
+    return workspace
+
+
+def test_a_tool_schema_property_named_like_a_credential_is_a_parameter_not_a_credential(transport):
+    transport.workspace = _captured_workspace()
+    assert any("client_id" in ((tool.get("input_schema") or {}).get("properties") or {})
+               for tool in transport.workspace["tool_specs"]), "the captured shape carries the name"
+    out = run(transport)
+    assert out["ok"] and out["outcome"] == "prepared", out.get("error")
+    observed = [o["sanitized_data"] for o in out["read_observations"] if o["url"].endswith("/api/workspaces/chosen")][0]
+    props = [t["input_schema"]["properties"] for t in observed["tool_specs"] if "client_id" in t["input_schema"]["properties"]]
+    assert props and props[0]["client_id"]["type"] == "string", "the schema text is kept as served"
+    assert "share_id" in observed and observed["share_id"] != SHARE, "the workspace's own secret is still bound"
+
+
+@pytest.mark.parametrize("keyword", ["default", "example", "examples", "const", "enum"])
+def test_a_value_a_schema_carries_as_data_under_a_credential_name_is_still_a_credential(transport, keyword):
+    workspace = _captured_workspace()
+    leaked = "sk-live-synthetic-unbound-value-004"
+    value = [leaked] if keyword in ("examples", "enum") else leaked
+    workspace["tool_specs"][0]["input_schema"]["properties"]["api_key"] = {"type": "string", keyword: value}
+    transport.workspace = workspace
+    out = run(transport)
+    assert not out["ok"] and out["error"] == {"code": "source_credential_binding_required"}
+
+
+@pytest.mark.parametrize("shape", ["not_an_object_schema", "unknown_keyword", "string_definition"])
+def test_a_properties_map_that_is_not_a_schema_is_source_data_as_before(transport, shape):
+    workspace = _captured_workspace()
+    leaked = "sk-live-synthetic-unbound-value-005"
+    if shape == "not_an_object_schema":
+        workspace["settings"] = {"properties": {"api_key": {"type": "string", "description": leaked}}}
+    elif shape == "unknown_keyword":
+        workspace["settings"] = {"type": "object", "properties": {"api_key": {"type": "string", "value": leaked}}}
+    else:
+        workspace["settings"] = {"type": "object", "properties": {"api_key": leaked}}
+    transport.workspace = workspace
+    out = run(transport)
+    assert not out["ok"] and out["error"] == {"code": "source_credential_binding_required"}

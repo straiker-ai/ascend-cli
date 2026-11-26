@@ -29,6 +29,31 @@ MAX_BYTES = 64 * 1024
 MAX_OUTPUT_BYTES = 512 * 1024
 MAX_SECONDS = 20.0
 _REF = re.compile(r"env:([A-Za-z_][A-Za-z0-9_]*)\Z")
+# JSON Schema keywords a property definition carries. A tool's input schema (`{"type": "object", "properties":
+# {"client_id": {"type": "string", "description": ...}}}`) names the PARAMETERS the tool takes: a property called
+# client_id or password is a field of the schema, and its definition is type and description text, not a credential.
+# MEASURED 2026-11-25: a published profile's workspace listed a tool with a `client_id` argument and the sanitizer took
+# the schema's own `"type": "string"` for an unbound credential (source_credential_binding_required), so a profile the
+# operator had supplied every value for could not be prepared. Only the keywords that hold DATA (a default, an example,
+# a constant, the allowed values) stay sensitive under a credential-like property name.
+_SCHEMA_KEYWORDS = frozenset({
+    "type", "description", "title", "enum", "const", "default", "examples", "example", "format", "items",
+    "properties", "required", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
+    "minLength", "maxLength", "pattern", "minItems", "maxItems", "uniqueItems", "additionalProperties",
+    "oneOf", "anyOf", "allOf", "not", "nullable", "readOnly", "writeOnly", "deprecated", "$ref"})
+_SCHEMA_DATA = frozenset({"enum", "const", "default", "examples", "example"})
+
+
+def _object_schema_properties(value):
+    """The `properties` map of a JSON Schema object definition, when every property definition is made of schema
+    keywords only; else None (then the map is source data, sanitized as before)."""
+    props = value.get("properties") if isinstance(value, dict) and value.get("type") == "object" else None
+    if not isinstance(props, dict) or not props:
+        return None
+    if not all(isinstance(name, str) and isinstance(defn, dict) and defn and set(defn) <= _SCHEMA_KEYWORDS
+               for name, defn in props.items()):
+        return None
+    return props
 _WORKSPACE = re.compile(r"[A-Za-z0-9_-]{1,96}\Z")
 
 
@@ -229,9 +254,14 @@ class Inputs:
     def sanitize(self, value, extra_secret_fields=(), sensitive=False, trusted_markers=False):
         if isinstance(value, dict):
             result = {}
+            schema_props = _object_schema_properties(value)
             for key, item in value.items():
                 if any(secret in key for secret in self.values):
                     raise Hold("refused", "credential_in_property_name")
+                if key == "properties" and item is schema_props:
+                    result[key] = {name: self._schema_property(name, defn, extra_secret_fields, sensitive, trusted_markers)
+                                   for name, defn in item.items()}
+                    continue
                 secret = sensitive or target_secrets.is_secret_name(key) or key in extra_secret_fields
                 result[key] = self.sanitize(item, extra_secret_fields, secret, trusted_markers)
             return result
@@ -251,6 +281,16 @@ class Inputs:
         if sensitive and value not in (None, False, 0):
             raise Hold("refused", "unsafe_source_credential")
         return value
+
+
+    def _schema_property(self, name, definition, extra_secret_fields, sensitive, trusted_markers):
+        """One property of an object schema: its name is a parameter, not a credential field (_SCHEMA_KEYWORDS)."""
+        if any(secret in name for secret in self.values):
+            raise Hold("refused", "credential_in_property_name")
+        named = target_secrets.is_secret_name(name) or name in extra_secret_fields
+        return {keyword: self.sanitize(item, extra_secret_fields, sensitive or (named and keyword in _SCHEMA_DATA),
+                                       trusted_markers)
+                for keyword, item in definition.items()}
 
 
 class Reader:

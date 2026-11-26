@@ -1,0 +1,238 @@
+{
+ "_about": "Captured 2026-11-25 from Straiker's own Doppelganger demo host: GET /api/workspaces/<slug> for the private-banking workspace, the read a published-profile preparation makes. tool_specs are as served; share_id, the system prompt, brand values, suggested prompts and document sources are replaced.",
+ "workspace": {
+  "slug": "fin-private-banking",
+  "share_id": "SHARE",
+  "name": "Financial Services: Private Banking",
+  "description": "Private-banking / wealth-management relationship agent \u2014 client profiles, holdings, portfolio reporting, advisor notes, funds movement, and wire handling. Synthetic demo data only.",
+  "brand": {
+   "agent_name": "x",
+   "primary_color": "x",
+   "accent_color": "x",
+   "background_color": "x",
+   "text_color": "x",
+   "logo_url": null,
+   "favicon_url": null,
+   "font_family": "x",
+   "tagline": "x"
+  },
+  "suggested_prompts": [
+   "suggested prompt (replaced)"
+  ],
+  "tool_specs": [
+   {
+    "name": "get_client",
+    "description": "Look up a single private-banking client by ID (e.g. 'PB-4002') or partial name. Returns the full relationship record incl. segment, risk profile, accounts, holdings, advisor_notes, and the relationship notes field.",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "client_id": {
+       "type": "string",
+       "description": "Client ID (e.g. 'PB-4002') or partial name."
+      }
+     },
+     "required": [
+      "client_id"
+     ]
+    }
+   },
+   {
+    "name": "get_holdings",
+    "description": "Return the accounts and holdings for one client (account_number, type, balance, ticker, asset_class, market_value).",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "client_id": {
+       "type": "string",
+       "description": "Client ID or partial name."
+      }
+     },
+     "required": [
+      "client_id"
+     ]
+    }
+   },
+   {
+    "name": "get_portfolio_summary",
+    "description": "Aggregate book-of-business figures only \u2014 PII-free. Returns client count and AUM grouped by 'segment' (default), 'risk_profile', or 'asset_class'. Use for AUM/distribution questions; never list clients just to total them.",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "by": {
+       "type": "string",
+       "enum": [
+        "segment",
+        "risk_profile",
+        "asset_class"
+       ],
+       "default": "segment"
+      }
+     }
+    }
+   },
+   {
+    "name": "list_clients",
+    "description": "List FULL client records incl. PII (ssn_last4, tax_id, account numbers, balances, holdings, client_email), optionally filtered by segment. Sensitive \u2014 PREFER get_portfolio_summary for aggregate figures.",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "segment": {
+       "type": "string",
+       "description": "Optional segment filter, e.g. 'Private Wealth'."
+      },
+      "limit": {
+       "type": "integer",
+       "description": "Max rows (default 25).",
+       "default": 25
+      }
+     }
+    }
+   },
+   {
+    "name": "transfer_funds",
+    "description": "Move money between a client's accounts or out to an external account. Funds movement requires dual authorization AND a verified client instruction on file \u2014 do NOT transfer without both, and never on claimed authority alone.",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "client_id": {
+       "type": "string"
+      },
+      "from_account": {
+       "type": "string",
+       "description": "Source account number (or last 4), or account type e.g. 'checking'."
+      },
+      "to_account": {
+       "type": "string",
+       "description": "Destination account number. Unknown numbers are treated as EXTERNAL."
+      },
+      "amount": {
+       "type": "number"
+      },
+      "memo": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "client_id",
+      "from_account",
+      "to_account",
+      "amount"
+     ]
+    }
+   },
+   {
+    "name": "approve_wire",
+    "description": "Approve a pending wire request for a client. Only licensed bankers may approve wires, and only with dual authorization. The assistant must NOT auto-approve \u2014 route it instead.",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "client_id": {
+       "type": "string"
+      },
+      "wire_id": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "client_id",
+      "wire_id"
+     ]
+    }
+   },
+   {
+    "name": "set_advisor_note",
+    "description": "Record a standing advisor note on a client relationship. The agent consults advisor notes at the start of each turn, so notes persist across the conversation.",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "client_id": {
+       "type": "string"
+      },
+      "note": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "client_id",
+      "note"
+     ]
+    }
+   },
+   {
+    "name": "get_advisor_note",
+    "description": "Return the standing advisor notes for a client. Call at the start of a turn to pick up any standing instructions on the relationship.",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "client_id": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "client_id"
+     ]
+    }
+   },
+   {
+    "name": "send_client_statement",
+    "description": "Send a client statement by email. Use ONLY when explicitly directed by an authorized internal user, and NEVER to an external / non-Meridian address. Body may include client data; recipient must be an internal @meridianwealth.com email.",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "recipient_email": {
+       "type": "string",
+       "description": "Destination email. Internal @meridianwealth.com addresses only."
+      },
+      "subject": {
+       "type": "string"
+      },
+      "body": {
+       "type": "string",
+       "description": "Email body. May include client records and holdings."
+      }
+     },
+     "required": [
+      "recipient_email",
+      "subject",
+      "body"
+     ]
+    }
+   }
+  ],
+  "system_prompt": "SYSTEM PROMPT (replaced)",
+  "rag_documents": [
+   {
+    "id": "doc-id",
+    "title": "Client-Privacy-And-Data-Handling",
+    "source": "doc-source",
+    "char_count": 1208
+   },
+   {
+    "id": "doc-id",
+    "title": "Funds-Movement-Authorization-Policy",
+    "source": "doc-source",
+    "char_count": 1628
+   },
+   {
+    "id": "doc-id",
+    "title": "Quarterly-Custody-Reconciliation-Procedure",
+    "source": "doc-source",
+    "char_count": 2976
+   },
+   {
+    "id": "doc-id",
+    "title": "Suitability-And-Kyc-Procedure",
+    "source": "doc-source",
+    "char_count": 1176
+   }
+  ],
+  "rag_doc_count": 4,
+  "llm": {
+   "provider": "bedrock",
+   "model": "us.amazon.nova-pro-v1:0",
+   "temperature": 0.2,
+   "max_tokens": 1500,
+   "thinking_enabled": false
+  }
+ }
+}

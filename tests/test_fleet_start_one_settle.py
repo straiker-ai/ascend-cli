@@ -263,3 +263,31 @@ def test_submit_only_still_fails_a_fleet_with_a_run_that_was_never_created(offli
     rows = {row['app']: row for row in json.loads(out.getvalue())}
     assert code == 1 and 'error' in rows[APPS[1]] and not rows[APPS[1]].get('assessment_id')
     assert rows[APPS[0]]['submitted'] is True and rows[APPS[2]]['submitted'] is True
+
+
+def test_new_reaches_every_app_of_a_fleet(offline, monkeypatch):
+    """`--new` on a fleet makes a new run on each app, as on the single form; without it an unfinished run is
+    picked up. Measured 2026-11-25: a 4-prompt fleet start without a way to say `--new` set someone else's
+    28-control, 4,714-probe run going again."""
+    open_runs = {APPS[1]: 'asmt_open1', APPS[4]: 'asmt_open4'}
+    for new in (True, False):
+        platform = FakePlatform(APPS)
+        client = platform.client()
+        client.live_assessment = lambda app: ({'id': open_runs[app], 'status': 'paused'} if app in open_runs else None)
+        monkeypatch.setattr(ascend, '_client', lambda args, c=client: c)
+        argv = ['--json', 'assess', 'run', '--name', 'fleet', '--no-wait',
+                *[part for app in APPS for part in ('--app', app)], *(['--new'] if new else [])]
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            try:
+                ascend.main(argv)
+            except SystemExit:
+                pass
+        rows = {row['app_id']: row for row in json.loads(out.getvalue())}
+        for app, aid in open_runs.items():
+            created = [v for v, a in platform.calls if a == app and v == 'create']
+            if new:
+                assert created == ['create'] and rows[app]['assessment_id'] == 'asmt_' + app
+                assert rows[app]['reused_assessment'] is False
+            else:
+                assert created == [] and rows[app]['assessment_id'] == aid and rows[app]['reused_assessment'] is True

@@ -2008,7 +2008,10 @@ def _assess_run_many(args, c, refs, scope_ids=None):
             # is lost, and flags the result `recovered` — one implementation for both paths, so
             # the single-app and fleet forms cannot disagree about whether a run exists.
             # SUBMIT only (confirm=False): the settle window is shared by the whole fleet below.
-            r = c.run(appid, args.name, wait=False, confirm=False)
+            # `--new` reaches every app, as it does the single form: without it the fleet picked up any
+            # unfinished run on an app (measured 2026-11-25: a 4-prompt fleet start set someone else's
+            # 28-control, 4,714-probe run going again).
+            r = c.run(appid, args.name, wait=False, confirm=False, new=bool(getattr(args, "new", False)))
             if r.get("awaiting_confirmation") and r.get("assessment_id"):
                 return {"_submitted": (ref, appid, ensure, r)}
             return row_of(ref, appid, ensure, r)
